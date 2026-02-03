@@ -23,3 +23,10 @@ func TestResizeStateUpdate(t *testing.T) {
 		t.Fatal("expected resize on size change")
 	}
 }
+
+func TestBackoffSequence(t *testing.T) {
+	seq := backoffDurations(3)
+	if len(seq) != 3 {
+		t.Fatalf("bad len: %d", len(seq))
+	}
+}

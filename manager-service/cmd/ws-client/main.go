@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -160,36 +161,23 @@ func main() {
 		cancel()
 	}()
 
-	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(*wsURL, nil)
-	if err != nil {
-		fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	statusf(colorGreen, "connected: %s", *wsURL)
-	statusf(colorBlue, "session: %s", create.AgentThreadID)
-
-	if err := sendCreate(conn, create); err != nil {
-		fatalf("send create failed: %v", err)
-	}
-
-	go watchResize(ctx, conn)
-
-	readDone := make(chan struct{})
+	inputCh := make(chan []byte, 128)
+	stdinErrCh := make(chan error, 1)
 	go func() {
-		defer close(readDone)
-		readLoop(ctx, conn)
+		stdinErrCh <- stdinLoop(ctx, inputCh, *rawMode, *exitOnCtrl)
 	}()
 
-	if err := stdinLoop(ctx, conn, *rawMode, *exitOnCtrl); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			statusf(colorRed, "stdin error: %v", err)
-		}
-		cancel()
+	if err := connectLoop(ctx, *wsURL, create, inputCh); err != nil && !errors.Is(err, context.Canceled) {
+		statusf(colorRed, "connection error: %v", err)
 	}
 
-	<-readDone
+	select {
+	case err := <-stdinErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			statusf(colorRed, "stdin error: %v", err)
+		}
+	default:
+	}
 }
 
 func validateURL(raw string) error {
@@ -278,18 +266,17 @@ func watchResize(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func readLoop(ctx context.Context, conn *websocket.Conn) {
+func readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 
 		var msg Message
 		if err := conn.ReadJSON(&msg); err != nil {
-			statusf(colorRed, "read error: %v", err)
-			return
+			return err
 		}
 
 		switch msg.Type {
@@ -319,7 +306,7 @@ func readLoop(ctx context.Context, conn *websocket.Conn) {
 			} else {
 				statusf(colorMagenta, "exit")
 			}
-			return
+			return io.EOF
 		case "error":
 			var payload ErrorPayload
 			if json.Unmarshal(msg.Data, &payload) == nil {
@@ -333,18 +320,18 @@ func readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func stdinLoop(ctx context.Context, conn *websocket.Conn, rawMode bool, exitKey string) error {
+func stdinLoop(ctx context.Context, inputCh chan<- []byte, rawMode bool, exitKey string) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		rawMode = false
 	}
 
 	if rawMode {
-		return stdinRaw(ctx, conn, exitKey)
+		return stdinRaw(ctx, inputCh, exitKey)
 	}
-	return stdinLine(ctx, conn)
+	return stdinLine(ctx, inputCh)
 }
 
-func stdinLine(ctx context.Context, conn *websocket.Conn) error {
+func stdinLine(ctx context.Context, inputCh chan<- []byte) error {
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		select {
@@ -360,13 +347,11 @@ func stdinLine(ctx context.Context, conn *websocket.Conn) error {
 		if len(line) == 0 {
 			continue
 		}
-		if err := sendStdin(conn, line); err != nil {
-			return err
-		}
+		inputCh <- line
 	}
 }
 
-func stdinRaw(ctx context.Context, conn *websocket.Conn, exitKey string) error {
+func stdinRaw(ctx context.Context, inputCh chan<- []byte, exitKey string) error {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return err
@@ -396,15 +381,11 @@ func stdinRaw(ctx context.Context, conn *websocket.Conn, exitKey string) error {
 		chunk := buf[:n]
 		if idx := bytesIndexByte(chunk, exitByte); idx >= 0 {
 			if idx > 0 {
-				if err := sendStdin(conn, chunk[:idx]); err != nil {
-					return err
-				}
+				inputCh <- chunk[:idx]
 			}
 			return context.Canceled
 		}
-		if err := sendStdin(conn, chunk); err != nil {
-			return err
-		}
+		inputCh <- chunk
 	}
 }
 
@@ -415,6 +396,123 @@ func bytesIndexByte(b []byte, target byte) int {
 		}
 	}
 	return -1
+}
+
+func connectLoop(ctx context.Context, wsURL string, create CreatePayload, inputCh <-chan []byte) error {
+	statusf(colorGreen, "connecting: %s", wsURL)
+	statusf(colorBlue, "session: %s", create.AgentThreadID)
+
+	attempt := 0
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			wait := backoffDuration(attempt)
+			attempt++
+			statusf(colorRed, "connect failed, retrying in %s", wait)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+
+		attempt = 0
+		statusf(colorGreen, "connected")
+
+		if err := sendCreate(conn, create); err != nil {
+			_ = conn.Close()
+			continue
+		}
+
+		connCtx, cancel := context.WithCancel(ctx)
+		go watchResize(connCtx, conn)
+
+		readErrCh := make(chan error, 1)
+		writeErrCh := make(chan error, 1)
+
+		go func() {
+			readErrCh <- readLoop(connCtx, conn)
+		}()
+		go func() {
+			writeErrCh <- writeLoop(connCtx, conn, inputCh)
+		}()
+
+		var connErr error
+		select {
+		case <-ctx.Done():
+			cancel()
+			_ = conn.Close()
+			return ctx.Err()
+		case err := <-readErrCh:
+			connErr = err
+		case err := <-writeErrCh:
+			connErr = err
+		}
+
+		cancel()
+		_ = conn.Close()
+
+		if errors.Is(connErr, context.Canceled) {
+			return connErr
+		}
+		if errors.Is(connErr, io.EOF) {
+			return connErr
+		}
+
+		wait := backoffDuration(attempt)
+		attempt++
+		statusf(colorYellow, "disconnected, retrying in %s", wait)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+func writeLoop(ctx context.Context, conn *websocket.Conn, inputCh <-chan []byte) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case data, ok := <-inputCh:
+			if !ok {
+				return context.Canceled
+			}
+			if len(data) == 0 {
+				continue
+			}
+			if err := sendStdin(conn, data); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func backoffDurations(n int) []time.Duration {
+	if n <= 0 {
+		return nil
+	}
+	seq := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		seq = append(seq, backoffDuration(i))
+	}
+	return seq
+}
+
+func backoffDuration(attempt int) time.Duration {
+	base := 250 * time.Millisecond
+	max := 5 * time.Second
+	wait := base * time.Duration(1<<attempt)
+	if wait > max {
+		return max
+	}
+	return wait
 }
 
 const (
