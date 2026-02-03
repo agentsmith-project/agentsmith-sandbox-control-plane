@@ -58,6 +58,12 @@ type ResizePayload struct {
 	Rows int `json:"rows"`
 }
 
+type resizeState struct {
+	cols        int
+	rows        int
+	initialized bool
+}
+
 type OutputPayload struct {
 	Data string `json:"data"`
 }
@@ -168,6 +174,8 @@ func main() {
 		fatalf("send create failed: %v", err)
 	}
 
+	go watchResize(ctx, conn)
+
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -217,6 +225,57 @@ func buildResizeMessage(cols int, rows int) (Message, error) {
 		return Message{}, err
 	}
 	return Message{Type: "resize", Data: data}, nil
+}
+
+func (s *resizeState) Update(cols int, rows int) (Message, bool, error) {
+	if cols <= 0 || rows <= 0 {
+		return Message{}, false, fmt.Errorf("invalid size cols=%d rows=%d", cols, rows)
+	}
+	if s.initialized && s.cols == cols && s.rows == rows {
+		return Message{}, false, nil
+	}
+	s.cols = cols
+	s.rows = rows
+	s.initialized = true
+	msg, err := buildResizeMessage(cols, rows)
+	if err != nil {
+		return Message{}, false, err
+	}
+	return msg, true, nil
+}
+
+func watchResize(ctx context.Context, conn *websocket.Conn) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return
+	}
+	var st resizeState
+
+	sendCurrent := func() {
+		cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
+		if err != nil {
+			return
+		}
+		msg, ok, err := st.Update(cols, rows)
+		if err != nil || !ok {
+			return
+		}
+		_ = conn.WriteJSON(msg)
+	}
+
+	sendCurrent()
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	defer signal.Stop(ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			sendCurrent()
+		}
+	}
 }
 
 func readLoop(ctx context.Context, conn *websocket.Conn) {
