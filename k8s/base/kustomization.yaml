@@ -17,6 +17,7 @@ resources:
   - network-policy.yaml
   - rbac-gc.yaml
   - gc-cronjob.yaml
+  - cleaner-cronjob.yaml
 
 # 通用标签
 commonLabels:
