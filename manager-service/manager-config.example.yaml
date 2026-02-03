@@ -96,3 +96,13 @@ files:
   tar:
     bin: tar
     rejectSymlinks: true
+
+storage:
+  endpoint: s3.amazonaws.com
+  accessKey: ""
+  secretKey: ""
+  bucket: sandbox-storage
+  useSSL: true
+
+buffer:
+  capacity: 10000

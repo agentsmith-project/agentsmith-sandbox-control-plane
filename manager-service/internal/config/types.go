@@ -14,6 +14,8 @@ type Config struct {
 	Sandbox    SandboxConfig `yaml:"sandbox"`
 	Exec       ExecConfig    `yaml:"exec"`
 	Files      FilesConfig   `yaml:"files"`
+	Storage    StorageConfig `yaml:"storage"`
+	Buffer     BufferConfig  `yaml:"buffer"`
 }
 
 // ServerConfig contains HTTP server configuration
@@ -178,6 +180,20 @@ type TarConfig struct {
 	RejectSymlinks bool   `yaml:"rejectSymlinks"`
 }
 
+// StorageConfig contains object storage configuration
+type StorageConfig struct {
+	Endpoint  string `yaml:"endpoint"`
+	AccessKey string `yaml:"accessKey"`
+	SecretKey string `yaml:"secretKey"`
+	Bucket    string `yaml:"bucket"`
+	UseSSL    bool   `yaml:"useSSL"`
+}
+
+// BufferConfig contains buffer capacity settings
+type BufferConfig struct {
+	Capacity int `yaml:"capacity"`
+}
+
 // ConfigMeta contains metadata about loaded configuration
 type ConfigMeta struct {
 	SchemaVersion int          `yaml:"schemaVersion"`
@@ -323,6 +339,16 @@ func DefaultConfig() *Config {
 				Bin:            "tar",
 				RejectSymlinks: true,
 			},
+		},
+		Storage: StorageConfig{
+			Endpoint:  "s3.amazonaws.com",
+			AccessKey: "",
+			SecretKey: "",
+			Bucket:    "sandbox-storage",
+			UseSSL:    true,
+		},
+		Buffer: BufferConfig{
+			Capacity: 10000,
 		},
 	}
 }
