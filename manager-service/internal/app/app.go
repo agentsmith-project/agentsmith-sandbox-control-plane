@@ -13,10 +13,15 @@ import (
 	"time"
 
 	"github.com/sandbox/manager/internal/auth"
+	"github.com/sandbox/manager/internal/buffer"
 	"github.com/sandbox/manager/internal/config"
+	"github.com/sandbox/manager/internal/finalizer"
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/session"
+	"github.com/sandbox/manager/internal/storage"
+	"github.com/sandbox/manager/internal/websocket"
 )
 
 var version = "dev"
@@ -32,6 +37,13 @@ type Manager struct {
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
+
+	// New components
+	sessionManager   *session.Manager
+	bufferManager    *buffer.Manager
+	storageClient    *storage.Client
+	wsHandler        *websocket.Handler
+	finalizerHandler *finalizer.Handler
 }
 
 // Main is the entry point for the sandbox manager.
@@ -103,19 +115,71 @@ func mainImpl() {
 		},
 	)
 
+	// Initialize new components
+	log.Printf("Initializing session manager...")
+	sessionManager := session.NewManager()
+
+	log.Printf("Initializing buffer manager...")
+	bufferManager := buffer.NewManager()
+
+	// Initialize storage client from environment variables
+	storageEndpoint := getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000")
+	storageAccessKey := getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin")
+	storageSecretKey := getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin")
+	storageBucket := getEnvOrDefault("STORAGE_BUCKET", "sandboxes")
+	storageUseSSL := os.Getenv("STORAGE_USE_SSL") == "true"
+
+	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)", storageEndpoint, storageBucket, storageUseSSL)
+	storageClient, err := storage.NewClient(storageEndpoint, storageAccessKey, storageSecretKey, storageBucket, storageUseSSL)
+	if err != nil {
+		log.Fatalf("Failed to create storage client: %v", err)
+	}
+	log.Printf("Storage client initialized successfully")
+
+	// Initialize WebSocket handler with all dependencies
+	log.Printf("Initializing WebSocket handler...")
+	wsHandler := websocket.NewHandler(
+		sessionManager,
+		bufferManager,
+		k8sClient,
+		storageClient,
+		cfg.Sandbox.Defaults.Namespace,
+	)
+
+	// Initialize finalizer handler
+	log.Printf("Initializing finalizer handler...")
+	finalizerHandler, err := finalizer.NewHandler(&finalizer.HandlerConfig{
+		K8sClient:     k8sClient,
+		StorageClient: storageClient,
+		Namespace:     cfg.Sandbox.Defaults.Namespace,
+		CheckInterval: 10 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create finalizer handler: %v", err)
+	}
+
 	mgr := &Manager{
-		cfg:           cfg,
-		cfgMeta:       cfgMeta,
-		cfgWatcher:    cfgWatcher,
-		k8sClient:     k8sClient,
-		k8sExecutor:   k8sExecutor,
-		authValidator: authValidator,
-		healthChecker: observability.NewHealthChecker(),
-		metrics:       observability.GetMetrics(),
+		cfg:              cfg,
+		cfgMeta:          cfgMeta,
+		cfgWatcher:       cfgWatcher,
+		k8sClient:        k8sClient,
+		k8sExecutor:      k8sExecutor,
+		authValidator:    authValidator,
+		healthChecker:    observability.NewHealthChecker(),
+		metrics:          observability.GetMetrics(),
+		sessionManager:   sessionManager,
+		bufferManager:    bufferManager,
+		storageClient:    storageClient,
+		wsHandler:        wsHandler,
+		finalizerHandler: finalizerHandler,
 	}
 
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
+
+	// Start finalizer handler in background goroutine
+	go mgr.finalizerHandler.Start(context.Background())
+	log.Printf("Finalizer handler started")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -127,6 +191,7 @@ func mainImpl() {
 	log.Printf("  Health check: http://localhost:%d/healthz", cfg.Server.HTTPPort)
 	log.Printf("  Readiness:    http://localhost:%d/readyz", cfg.Server.HTTPPort)
 	log.Printf("  Metrics:      http://localhost:%d%s", cfg.Server.HTTPPort, cfg.Server.Metrics.Path)
+	log.Printf("  WebSocket:    ws://localhost:%d/ws", cfg.Server.HTTPPort)
 	log.Printf("  Debug config: http://localhost:%d%s", cfg.Server.HTTPPort, cfg.Server.Debug.ConfigPath)
 
 	mgr.waitForShutdown()
@@ -197,6 +262,9 @@ func (m *Manager) setupHTTPServer() {
 
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
+	// Add WebSocket route - no auth required for WebSocket
+	mux.Handle("/ws", m.wsHandler)
+
 	v1Handler := m.buildV1Handler()
 	if m.cfg.Auth.Enabled {
 		authMiddleware := auth.ServiceKeyMiddleware(
@@ -246,6 +314,18 @@ func (m *Manager) GetK8sExecutor() *k8s.Executor {
 
 func (m *Manager) GetMetrics() *observability.MetricsRegistry {
 	return m.metrics
+}
+
+func (m *Manager) GetSessionManager() *session.Manager {
+	return m.sessionManager
+}
+
+func (m *Manager) GetBufferManager() *buffer.Manager {
+	return m.bufferManager
+}
+
+func (m *Manager) GetStorageClient() *storage.Client {
+	return m.storageClient
 }
 
 func (m *Manager) buildV1Handler() http.Handler {
