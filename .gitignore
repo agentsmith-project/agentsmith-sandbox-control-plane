@@ -1,0 +1,67 @@
+# 构建产物
+*.tar
+*.tar.gz
+*.zip
+manager-service/manager
+manager-service/*.test
+images/gc/kubectl
+
+# sbx artifacts
+dist/
+tools/bin/
+tools/vendor/tools.lock.json
+secrets/
+
+# 配置文件（包含敏感信息）
+*.env
+!*.env.example
+config.env
+deploy.env
+registry.config
+!*.config.example
+!*.env.example
+
+# 离线部署包（可重建）
+sandbox-offline-*/
+test-package/
+test-offline-package/
+offline-package/
+
+# 离线部署配置文件（可重建）
+tools/offline/config/images.list
+tools/offline/config/images-*.list
+tools/offline/config/registry.config
+
+# CA 证书（根据实际情况决定是否提交）
+# 如需提交 CA 证书，请取消以下注释
+# k8s/cluster/kind/certs/*.pem
+# k8s/cluster/kind/certs/*.crt
+# k8s/cluster/kind/certs/*.cert
+# k8s/cluster/kind/certs/*.srl
+
+# 临时文件
+/tmp/
+*.log
+*.bak
+*.tmp
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+
+# 测试文件
+test-*/
+*-test/
+
+# 缓存
+.buildx-cache-*/
+.cache/
+
+# 状态文件
+*.lock
+*.state

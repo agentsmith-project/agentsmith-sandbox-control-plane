@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox-manager
+  namespace: sandbox-system
+  annotations:
+    # Nginx Ingress Controller annotations
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  rules:
+  - host: sandbox-manager.example.com  # CHANGE THIS to your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sandbox-manager
+            port:
+              number: 80
+  # Uncomment below for TLS/HTTPS
+  # tls:
+  # - hosts:
+  #   - sandbox-manager.example.com
+  #   secretName: sandbox-manager-tls

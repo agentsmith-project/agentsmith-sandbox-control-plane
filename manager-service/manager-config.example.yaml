@@ -1,0 +1,98 @@
+version: 1
+
+server:
+  httpPort: 8080
+  requestIdHeader: X-Request-Id
+  timeouts:
+    readHeader: 5s
+    read: 30s
+    write: 60s
+    idle: 120s
+  maxHeaderBytes: 1048576
+  metrics:
+    enabled: true
+    path: /metrics
+    requireServiceKey: false
+  debug:
+    configPath: /debug/config
+    enablePprof: false
+
+auth:
+  enabled: true
+  headerName: X-Service-Key
+  acceptAuthorization: true
+  authorizationScheme: ServiceKey
+  failStatusCode: 401
+
+kubernetes:
+  qps: 50
+  burst: 100
+  requestTimeout: 15s
+  retry:
+    enabled: true
+    maxAttempts: 3
+    baseBackoff: 200ms
+    maxBackoff: 2s
+
+sandbox:
+  defaults:
+    namespace: sandbox
+    runnerImage: sandbox-runner:1.0.0
+    imagePullPolicy: IfNotPresent
+    ttlSeconds: 900
+    podReadyWait: 30s
+    podPollInterval: 500ms
+    terminationGraceSeconds: 1
+    activeDeadlineSeconds: 0
+    containerName: runner
+    workdir: /workspace
+    volumes:
+      workspace:
+        name: workspace
+        mountPath: /workspace
+        sizeLimit: "0"
+      tmp:
+        name: tmp
+        mountPath: /tmp
+        sizeLimit: 256Mi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeralStorage: 2Gi
+    labels:
+      app: llm-sandbox
+    annotations: {}
+
+exec:
+  defaultTimeout: 30s
+  maxTimeout: 300s
+  stdoutMaxBytes: 1048576
+  stderrMaxBytes: 1048576
+  preserveTailBytes: 4096
+  exitCodeMarker:
+    key: "__SBX_EXIT_CODE__"
+    stream: "stderr"
+  shell:
+    bin: sh
+    args: ["-lc"]
+  env:
+    allowRegex: "^[A-Z_][A-Z0-9_]*$"
+  workdir:
+    allowedPrefixes: ["/workspace"]
+
+files:
+  rootPrefix: /workspace
+  upload:
+    defaultDest: /workspace
+    maxBytes: 52428800
+    format: tar.gz
+  download:
+    defaultSrc: /workspace
+    format: tar.gz
+  tar:
+    bin: tar
+    rejectSymlinks: true

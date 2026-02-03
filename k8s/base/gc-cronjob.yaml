@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sandbox-gc
+  namespace: sandbox-system
+spec:
+  schedule: "*/1 * * * *"  # 默认值，可以通过 overlay patch 覆盖（从 ConfigMap 读取）
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3  # 保留最近 3 个成功的 Job
+  failedJobsHistoryLimit: 1     # 保留最近 1 个失败的 Job
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: sandbox-gc
+          # imagePullSecrets 在 overlays 中根据环境配置
+          restartPolicy: Never
+          containers:
+          - name: gc
+            image: sandbox-gc:1.0.0
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: SANDBOX_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: sandbox-namespace
+            - name: LABEL_SELECTOR
+              value: "app=llm-sandbox"
+            - name: NOW_SKEW_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: gc-skew-seconds
+            # 禁用代理，GC 在集群内部运行，不需要代理
+            - name: HTTP_PROXY
+              value: ""
+            - name: HTTPS_PROXY
+              value: ""
+            - name: http_proxy
+              value: ""
+            - name: https_proxy
+              value: ""
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,10.96.0.0/12,10.0.0.0/8,.svc,.svc.cluster.local"

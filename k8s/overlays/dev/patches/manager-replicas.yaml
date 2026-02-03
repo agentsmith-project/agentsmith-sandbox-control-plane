@@ -1,0 +1,7 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-manager
+  namespace: sandbox-system
+spec:
+  replicas: 1  # 开发环境 1 个副本

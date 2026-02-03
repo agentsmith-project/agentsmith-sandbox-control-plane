@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-config
+  namespace: sandbox-system
+data:
+  ttl-seconds-default: "3600"  # 生产环境 TTL: 1 小时

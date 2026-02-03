@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-manager
+  namespace: sandbox-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-manager
+  template:
+    metadata:
+      labels:
+        app: sandbox-manager
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sandbox-manager
+      # imagePullSecrets 在 overlays 中根据环境配置
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        image: sandbox-manager:2.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        # Service keys from Secret (for authentication)
+        - name: SERVICE_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: sandbox-manager-keys
+              key: SERVICE_KEYS
+        # Boot configuration (not hot-reloadable)
+        - name: CONFIG_PATH
+          value: "/etc/sandbox-manager/manager-config.yaml"
+        - name: CONFIG_RELOAD_DEBOUNCE
+          value: "300ms"
+        - name: CONFIG_RELOAD_MIN_INTERVAL
+          value: "1s"
+        - name: CONFIG_RELOAD_BACKOFF_MAX
+          value: "30s"
+        - name: STRICT_CONFIG_RELOAD
+          value: "false"
+        - name: DEBUG
+          value: "false"
+        - name: RUNNER_IMAGE_DEFAULT
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: runner-image-default
+        # Mount config file
+        volumeMounts:
+        - name: manager-config
+          mountPath: /etc/sandbox-manager/manager-config.yaml
+          subPath: manager-config.yaml
+          readOnly: true
+        # Probes
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # Resources
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        # Security
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+      # Volumes
+      volumes:
+      - name: manager-config
+        configMap:
+          name: sandbox-manager-config

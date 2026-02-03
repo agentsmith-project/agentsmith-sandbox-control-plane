@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-config
+  namespace: sandbox-system
+data:
+  ttl-seconds-default: "300"  # 开发环境 TTL 更短（5 分钟）

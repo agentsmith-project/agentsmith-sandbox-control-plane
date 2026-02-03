@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=scripts/lib/log.sh
+source "${ROOT_DIR}/scripts/lib/log.sh"
+# shellcheck source=scripts/lib/args.sh
+source "${ROOT_DIR}/scripts/lib/args.sh"
+# shellcheck source=scripts/lib/proxy.sh
+source "${ROOT_DIR}/scripts/lib/proxy.sh"
+# shellcheck source=scripts/lib/tools.sh
+source "${ROOT_DIR}/scripts/lib/tools.sh"
+# shellcheck source=scripts/lib/docker.sh
+source "${ROOT_DIR}/scripts/lib/docker.sh"
+# shellcheck source=scripts/lib/images.sh
+source "${ROOT_DIR}/scripts/lib/images.sh"
+# shellcheck source=scripts/lib/skopeo.sh
+source "${ROOT_DIR}/scripts/lib/skopeo.sh"
+# shellcheck source=scripts/lib/offline.sh
+source "${ROOT_DIR}/scripts/lib/offline.sh"
+# shellcheck source=scripts/lib/k8s.sh
+source "${ROOT_DIR}/scripts/lib/k8s.sh"
+# shellcheck source=scripts/lib/kind.sh
+source "${ROOT_DIR}/scripts/lib/kind.sh"
+# shellcheck source=scripts/lib/sandbox.sh
+source "${ROOT_DIR}/scripts/lib/sandbox.sh"
+
+sbx_usage() {
+  cat <<'EOF'
+Sandbox CLI (repo entrypoint)
+
+Usage:
+  ./sbx <group> <command> [options]
+
+Groups:
+  images      Build/push/export/import/verify images
+  offline     Offline package operations (alias of images offline subcommands)
+  tools       Vendor/fetch/verify bundled tools (skopeo/kubectl/kustomize/...)
+  dev         Kind-based dev cluster helpers
+  k8s         Deploy/verify/update-images for kustomize
+  sandbox     Sandbox namespace maintenance helpers
+
+Run:
+  ./sbx <group> --help
+EOF
+}
+
+main() {
+  if [ $# -lt 1 ]; then
+    sbx_usage
+    exit 1
+  fi
+
+  local group="${1:-}"
+  shift || true
+
+  case "$group" in
+    -h|--help|help)
+      sbx_usage
+      ;;
+    images)
+      sbx_images "$@"
+      ;;
+    offline)
+      sbx_images offline "$@"
+      ;;
+    tools)
+      sbx_tools "$@"
+      ;;
+    dev)
+      sbx_dev "$@"
+      ;;
+    k8s)
+      sbx_k8s "$@"
+      ;;
+    sandbox)
+      sbx_sandbox "$@"
+      ;;
+    *)
+      log_error "Unknown group: $group"
+      sbx_usage
+      exit 1
+      ;;
+  esac
+}
+
+sbx_images() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    -h|--help|help|"")
+      cat <<'EOF'
+Usage:
+  ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only manager|runner|gc]
+  ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only manager|runner|gc]
+  ./sbx images export offline --out DIR [--source docker|harbor|registry] [--registry HOST:PORT] [--project NAME] [--username USER] [--password PASS] [--proxy auto|on|off]
+  ./sbx images import offline --from DIR [--to docker|harbor|registry] [--registry HOST:PORT] [--project NAME] [--username USER] [--password PASS] [--verify] [--proxy auto|on|off]
+  ./sbx images verify offline --path DIR
+EOF
+      ;;
+    build)
+      images_build "$ROOT_DIR" "$@"
+      ;;
+    push)
+      local target="${1:-}"; shift || true
+      case "$target" in
+        harbor)
+          images_push_harbor "$ROOT_DIR" "$@"
+          ;;
+        *)
+          log_error "Unknown push target: $target"
+          exit 1
+          ;;
+      esac
+      ;;
+    export)
+      local target="${1:-}"; shift || true
+      case "$target" in
+        offline)
+          offline_export "$ROOT_DIR" "$@"
+          ;;
+        *)
+          log_error "Unknown export target: $target"
+          exit 1
+          ;;
+      esac
+      ;;
+    import)
+      local target="${1:-}"; shift || true
+      case "$target" in
+        offline)
+          offline_import "$ROOT_DIR" "$@"
+          ;;
+        *)
+          log_error "Unknown import target: $target"
+          exit 1
+          ;;
+      esac
+      ;;
+    verify)
+      local target="${1:-}"; shift || true
+      case "$target" in
+        offline)
+          offline_verify "$ROOT_DIR" "$@"
+          ;;
+        *)
+          log_error "Unknown verify target: $target"
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      log_error "Unknown images command: $cmd"
+      exit 1
+      ;;
+  esac
+}
+
+sbx_tools() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    -h|--help|help|"")
+      cat <<'EOF'
+Usage:
+  ./sbx tools fetch [--proxy auto|on|off]
+  ./sbx tools verify
+  ./sbx tools where
+
+Notes:
+  Tools are stored under tools/bin/linux-amd64 and included into offline packages.
+EOF
+      ;;
+    fetch)
+      tools_fetch "$ROOT_DIR" "$@"
+      ;;
+    verify)
+      tools_verify "$ROOT_DIR"
+      ;;
+    where)
+      tools_where "$ROOT_DIR"
+      ;;
+    *)
+      log_error "Unknown tools command: $cmd"
+      exit 1
+      ;;
+  esac
+}
+
+sbx_dev() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    -h|--help|help|"")
+      cat <<'EOF'
+Usage:
+  ./sbx dev up [--cluster NAME] [--harbor-ca PATH|auto] [--proxy auto|on|off] [--force]
+  ./sbx dev down [--cluster NAME] [--force]
+  ./sbx dev reset [--cluster NAME] [--harbor-ca PATH|auto] [--proxy auto|on|off]
+  ./sbx dev status [--cluster NAME]
+EOF
+      ;;
+    up)
+      dev_up "$ROOT_DIR" "$@"
+      ;;
+    down)
+      dev_down "$ROOT_DIR" "$@"
+      ;;
+    reset)
+      dev_reset "$ROOT_DIR" "$@"
+      ;;
+    status)
+      dev_status "$ROOT_DIR" "$@"
+      ;;
+    *)
+      log_error "Unknown dev command: $cmd"
+      exit 1
+      ;;
+  esac
+}
+
+sbx_k8s() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    -h|--help|help|"")
+      cat <<'EOF'
+Usage:
+  ./sbx k8s update-images --registry HOST:PORT --project NAME
+  ./sbx k8s harbor-secret --registry HOST:PORT --project NAME --username USER --password PASS [--namespace sandbox-system]
+  ./sbx k8s deploy dev|staging|production
+  ./sbx k8s undeploy dev|staging|production
+  ./sbx k8s verify dev|staging|production
+  ./sbx k8s health
+  ./sbx k8s backup --out DIR
+EOF
+      ;;
+    update-images)
+      k8s_update_images "$ROOT_DIR" "$@"
+      ;;
+    harbor-secret)
+      k8s_setup_harbor_secret "$ROOT_DIR" "$@"
+      ;;
+    deploy)
+      k8s_deploy "$ROOT_DIR" "$@"
+      ;;
+    undeploy)
+      k8s_undeploy "$ROOT_DIR" "$@"
+      ;;
+    verify)
+      k8s_verify "$ROOT_DIR" "$@"
+      ;;
+    health)
+      k8s_health "$ROOT_DIR"
+      ;;
+    backup)
+      k8s_backup "$ROOT_DIR" "$@"
+      ;;
+    *)
+      log_error "Unknown k8s command: $cmd"
+      exit 1
+      ;;
+  esac
+}
+
+sbx_sandbox() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    -h|--help|help|"")
+      cat <<'EOF'
+Usage:
+  ./sbx sandbox list [--namespace sandbox] [--selector app=llm-sandbox]
+  ./sbx sandbox cleanup [--namespace sandbox] [--selector app=llm-sandbox] [--dry-run]
+EOF
+      ;;
+    list)
+      sandbox_list "$ROOT_DIR" "$@"
+      ;;
+    cleanup)
+      sandbox_cleanup "$ROOT_DIR" "$@"
+      ;;
+    *)
+      log_error "Unknown sandbox command: $cmd"
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
