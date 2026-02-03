@@ -538,6 +538,9 @@ func GetExpiresAtFromPod(pod *v1.Pod) string {
 	if pod.Annotations == nil {
 		return ""
 	}
+	if val := pod.Annotations["sandbox/expiresAt"]; val != "" {
+		return val
+	}
 	return pod.Annotations["expires_at"]
 }
 

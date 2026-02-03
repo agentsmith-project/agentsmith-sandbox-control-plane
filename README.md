@@ -62,6 +62,34 @@ tools/bin/linux-amd64/kubectl -n sandbox-system port-forward svc/sandbox-manager
 {"type":"create","agent_thread_id":"test-123","image":"python:3.11","command":["/bin/bash"]}
 ```
 
+### Make Targets (Convenience)
+
+```bash
+make test
+make test-integration
+make build-manager
+make build-runner
+make build-cleaner
+make kind-up
+make kind-status
+make smoke
+```
+
+### WS Client (Interactive)
+
+Build and run the CLI client:
+
+```bash
+cd manager-service
+go build -o ../bin/ws-client ./cmd/ws-client
+../bin/ws-client --url ws://localhost:8080/ws --agent-thread-id at_demo --image python:3.11 --command /bin/bash
+```
+
+Notes:
+- Raw TTY mode enabled by default; exit with `Ctrl-]` (or `--exit-key ctrl-c`).
+- Auto reconnect with backoff on disconnect.
+- Terminal resize is detected and sent automatically when running in a TTY.
+
 ## Project Structure
 
 ```

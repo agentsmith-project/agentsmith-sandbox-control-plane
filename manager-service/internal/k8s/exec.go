@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -187,6 +188,7 @@ func (e *Executor) buildExecURL(podName string, command []string, container stri
 // bufferWriter is a thread-safe buffer for capturing output
 type bufferWriter struct {
 	data []byte
+	mu   sync.Mutex
 }
 
 func newBufferWriter() *bufferWriter {
@@ -194,11 +196,15 @@ func newBufferWriter() *bufferWriter {
 }
 
 func (b *bufferWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
 	b.data = append(b.data, p...)
+	b.mu.Unlock()
 	return len(p), nil
 }
 
 func (b *bufferWriter) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return string(b.data)
 }
 
