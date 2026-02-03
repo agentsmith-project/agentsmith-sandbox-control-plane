@@ -53,6 +53,11 @@ type StatusPayload struct {
 	Progress float64 `json:"progress"`
 }
 
+type ResizePayload struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
 type OutputPayload struct {
 	Data string `json:"data"`
 }
@@ -204,6 +209,14 @@ func sendStdin(conn *websocket.Conn, data []byte) error {
 		"data": StdinPayload{Data: base64.StdEncoding.EncodeToString(data)},
 	}
 	return conn.WriteJSON(msg)
+}
+
+func buildResizeMessage(cols int, rows int) (Message, error) {
+	data, err := json.Marshal(ResizePayload{Cols: cols, Rows: rows})
+	if err != nil {
+		return Message{}, err
+	}
+	return Message{Type: "resize", Data: data}, nil
 }
 
 func readLoop(ctx context.Context, conn *websocket.Conn) {
