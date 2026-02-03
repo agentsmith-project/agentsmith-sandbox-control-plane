@@ -16,6 +16,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// FinalizerSnapshot is the finalizer added to pods for snapshot handling
+	FinalizerSnapshot = "manager.mbos.io/snapshot"
+)
+
 // PodSpec contains specifications for creating a sandbox pod
 type PodSpec struct {
 	SessionID             string
@@ -28,6 +33,7 @@ type PodSpec struct {
 	EphemeralStorageLimit string
 	ContainerName         string
 	Workdir               string
+	Command               string
 	Env                   map[string]string
 	ResourceRequests      ResourceRequests
 	ResourceLimits        ResourceLimits
@@ -35,6 +41,7 @@ type PodSpec struct {
 	Annotations           map[string]string
 	Volumes               []VolumeSpec
 	SecurityContext       *PodSecurityConfig
+	AgentThreadID         string
 }
 
 // ResourceRequests contains resource request values
@@ -63,6 +70,7 @@ type PodSecurityConfig struct {
 	RunAsUser           int64
 	DropAllCapabilities bool
 	ReadOnlyRoot        bool
+	Privileged          bool
 }
 
 // PodResult contains the result of a pod operation
@@ -79,17 +87,34 @@ func (c *Client) CreatePod(ctx context.Context, spec *PodSpec) (*PodResult, erro
 	now := time.Now().UTC()
 	expiresAt := now.Add(time.Duration(spec.TTLSeconds) * time.Second)
 
+	// Build labels with agent_thread_id
+	labels := make(map[string]string)
+	if spec.Labels != nil {
+		for k, v := range spec.Labels {
+			labels[k] = v
+		}
+	}
+	if spec.AgentThreadID != "" {
+		labels["agent_thread_id"] = spec.AgentThreadID
+	}
+
+	// Build annotations with expires_at and last_activity_at
+	annotations := mergeAnnotations(spec.Annotations, map[string]string{
+		"sandbox/sessionId":    spec.SessionID,
+		"sandbox/ttlSeconds":   strconv.Itoa(spec.TTLSeconds),
+		"last_activity_at":     now.Format(time.RFC3339),
+		"expires_at":           expiresAt.Format(time.RFC3339),
+		"sandbox/lastActiveAt": now.Format(time.RFC3339),
+		"sandbox/expiresAt":    expiresAt.Format(time.RFC3339),
+	})
+
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: c.namespace,
-			Labels:    spec.Labels,
-			Annotations: mergeAnnotations(spec.Annotations, map[string]string{
-				"sandbox/sessionId":    spec.SessionID,
-				"sandbox/ttlSeconds":   strconv.Itoa(spec.TTLSeconds),
-				"sandbox/lastActiveAt": now.Format(time.RFC3339),
-				"sandbox/expiresAt":    expiresAt.Format(time.RFC3339),
-			}),
+			Name:        podName,
+			Namespace:   c.namespace,
+			Labels:      labels,
+			Annotations: annotations,
+			Finalizers:  []string{FinalizerSnapshot},
 		},
 		Spec: buildPodSpec(spec),
 	}
@@ -270,6 +295,8 @@ func (c *Client) PatchActivity(ctx context.Context, name string, ttlSeconds int)
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"annotations": map[string]string{
+				"last_activity_at":     now.Format(time.RFC3339),
+				"expires_at":           expiresAt.Format(time.RFC3339),
 				"sandbox/lastActiveAt": now.Format(time.RFC3339),
 				"sandbox/expiresAt":    expiresAt.Format(time.RFC3339),
 			},
@@ -335,10 +362,16 @@ func buildContainer(spec *PodSpec) v1.Container {
 		Name:            spec.ContainerName,
 		Image:           spec.Image,
 		ImagePullPolicy: v1.PullPolicy(spec.ImagePullPolicy),
-		Command:         []string{"sh", "-lc", "tail -f /dev/null"},
 		WorkingDir:      spec.Workdir,
 		VolumeMounts:    buildVolumeMounts(spec.Volumes),
 		Resources:       buildResources(spec.ResourceRequests, spec.ResourceLimits),
+	}
+
+	// Use tmux wrapper script if command is provided
+	if spec.Command != "" {
+		container.Command = []string{"sh", "-c", buildTmuxWrapperScript(spec.Command)}
+	} else {
+		container.Command = []string{"sh", "-lc", "tail -f /dev/null"}
 	}
 
 	// Add environment variables
@@ -360,13 +393,46 @@ func buildContainer(spec *PodSpec) v1.Container {
 	return container
 }
 
+// buildTmuxWrapperScript builds a shell script that wraps the user command in tmux
+func buildTmuxWrapperScript(userCommand string) string {
+	return fmt.Sprintf(`#!/bin/sh
+# Check if tmux exists
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux not found, running command directly"
+    exec sh -c "%s"
+fi
+
+# Set session name
+SESSION_NAME="sandbox-session"
+
+# Check if session already exists
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    echo "Session $SESSION_NAME already exists, attaching..."
+    exec tail -f /dev/null
+fi
+
+# Create new session with user command and keep it running
+tmux new-session -d -s "$SESSION_NAME" sh -c "%s"
+echo "Created tmux session $SESSION_NAME"
+
+# Keep container running
+exec tail -f /dev/null
+`, userCommand, userCommand)
+}
+
 // buildSecurityContext builds the security context
 func buildSecurityContext(cfg *PodSecurityConfig) *v1.SecurityContext {
 	ctx := &v1.SecurityContext{
 		RunAsNonRoot:             &cfg.NonRoot,
 		RunAsUser:                &cfg.RunAsUser,
-		AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
 		ReadOnlyRootFilesystem:   &cfg.ReadOnlyRoot,
+		AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
+	}
+
+	if cfg.Privileged {
+		privileged := true
+		ctx.Privileged = &privileged
+		ctx.AllowPrivilegeEscalation = &privileged
 	}
 
 	if cfg.DropAllCapabilities {
@@ -472,5 +538,13 @@ func GetExpiresAtFromPod(pod *v1.Pod) string {
 	if pod.Annotations == nil {
 		return ""
 	}
-	return pod.Annotations["sandbox/expiresAt"]
+	return pod.Annotations["expires_at"]
+}
+
+// GetAgentThreadIDFromPod extracts agent thread ID from pod labels
+func GetAgentThreadIDFromPod(pod *v1.Pod) string {
+	if pod.Labels == nil {
+		return ""
+	}
+	return pod.Labels["agent_thread_id"]
 }
