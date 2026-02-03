@@ -3,6 +3,7 @@
 *.tar.gz
 *.zip
 manager-service/manager
+manager-service/cleaner
 manager-service/*.test
 images/gc/kubectl
 
