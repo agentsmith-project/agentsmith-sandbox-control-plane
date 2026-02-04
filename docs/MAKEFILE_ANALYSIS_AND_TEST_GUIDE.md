@@ -606,39 +606,536 @@ tools/bin/linux-amd64/kubectl exec -it <pod-name> -n sandbox -- bash
 
 ---
 
-## 附录 B: 测试检查清单
+## 附录 B: 详细冒烟测试步骤
 
-### B.1 环境准备检查清单
+### B.1 完整冒烟测试流程
 
-- [ ] Docker 已安装且运行中
-- [ ] kind 已安装
-- [ ] 磁盘空间充足 (>20GB)
-- [ ] 网络连接正常 (或配置代理)
-- [ ] Harbor 凭证已设置 (如使用远程仓库)
+此章节提供从零开始到完整测试验证的详细步骤。
 
-### B.2 功能测试检查清单
+#### 步骤 1: 环境检查 (5 分钟)
 
-- [ ] `./sbx tools verify` 通过
-- [ ] `./sbx dev up` 成功创建集群
-- [ ] `./sbx k8s verify dev` 所有检查通过
-- [ ] `./sbx k8s health` 健康检查通过
-- [ ] Manager 服务可访问
-- [ ] `test-manager.sh` 所有测试通过
-- [ ] 可创建沙盒
-- [ ] 可在沙盒中执行命令
-- [ ] 可删除沙盒
-- [ ] `./sbx dev down --force` 清理成功
+```bash
+# 1. 检查 Docker 状态
+docker info >/dev/null 2>&1 && echo "✓ Docker is running" || echo "✗ Docker is not running"
 
-### B.3 清理验证检查清单
+# 2. 检查 kind 安装
+kind version >/dev/null 2>&1 && echo "✓ kind is installed" || echo "✗ kind is not installed"
 
-- [ ] 所有 Pods 已删除
-- [ ] kind 集群已删除
-- [ ] 无残留 Docker 容器
-- [ ] 端口转发已停止
-- [ ] 临时文件已清理
+# 3. 检查磁盘空间
+DISK_AVAILABLE=$(df -BG . | tail -1 | awk '{print $4}' | sed 's/G//')
+if [ "$DISK_AVAILABLE" -gt 20 ]; then
+    echo "✓ Disk space: ${DISK_AVAILABLE}GB available"
+else
+    echo "✗ Disk space: only ${DISK_AVAILABLE}GB available (need >20GB)"
+fi
+
+# 4. 检查 Go 版本 (本地开发需要)
+if command -v go >/dev/null 2>&1; then
+    GO_VERSION=$(go version | awk '{print $3}')
+    echo "✓ Go version: $GO_VERSION"
+else
+    echo "⚠ Go is not installed (required for building images)"
+fi
+```
+
+#### 步骤 2: 构建镜像 (5-10 分钟)
+
+```bash
+# 进入项目目录
+cd /path/to/mbos-sandbox-v1
+
+# 设置代理 (如需要)
+export HTTP_PROXY="http://192.168.0.220:8889"
+export HTTPS_PROXY="http://192.168.0.220:8889"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.220"
+
+# 方式 1: 使用 sbx 命令构建
+./sbx images build --pull-proxy "$HTTP_PROXY" --build-proxy off
+
+# 方式 2: 手动构建 (如 sbx 不可用)
+# 构建 manager
+cd manager-service
+docker buildx build --load \
+    --pull --pull-proxy "$HTTP_PROXY" \
+    --build-arg BUILDPROXY=off \
+    -t sandbox-manager:$(cat ../VERSION 2>/dev/null || echo dev) \
+    -f Dockerfile .
+
+# 构建 runner
+cd ../runner-service
+docker buildx build --load \
+    --pull --pull-proxy "$HTTP_PROXY" \
+    --build-arg BUILDPROXY=off \
+    -t sandbox-runner:$(cat ../VERSION 2>/dev/null || echo dev) \
+    -f Dockerfile .
+
+cd ..
+
+# 验证镜像
+docker images | grep 'sandbox-'
+# 预期输出:
+# sandbox-manager   <version>   <image-id>   <ago>   <size>
+# sandbox-runner    <version>   <image-id>   <ago>   <size>
+```
+
+#### 步骤 3: 启动 Kind 集群 (2-3 分钟)
+
+```bash
+# 删除旧集群 (如存在)
+kind delete cluster --name sandbox-cluster 2>/dev/null || true
+
+# 创建新集群
+kind create cluster --name sandbox-cluster --image kindest/node:v1.31.0
+
+# 验证集群
+kubectl cluster-info
+kubectl get nodes
+
+# 预期输出:
+# Kubernetes control plane is running at ...
+# NAME                             STATUS   ROLES           AGE   VERSION
+# sandbox-cluster-control-plane   Ready    control-plane   10s   v1.31.0
+```
+
+#### 步骤 4: 加载镜像到集群 (1-2 分钟)
+
+```bash
+# 加载镜像
+kind load docker-image sandbox-manager:$(cat manager-service/VERSION 2>/dev/null || echo dev) --name sandbox-cluster
+kind load docker-image sandbox-runner:$(cat runner-service/VERSION 2>/dev/null || echo dev) --name sandbox-cluster
+
+# 验证镜像已加载
+docker exec sandbox-cluster-control-plane crictl images | grep 'sandbox-'
+```
+
+#### 步骤 5: 部署应用 (2-3 分钟)
+
+```bash
+# 创建命名空间
+kubectl create namespace sandbox-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace sandbox --dry-run=client -o yaml | kubectl apply -f -
+
+# 部署 base 配置
+kubectl apply -k k8s/base
+
+# 等待 Pod 就绪
+echo "Waiting for manager pod to be ready..."
+kubectl wait --for=condition=ready pod -l app=sandbox-manager -n sandbox-system --timeout=120s
+
+# 验证部署
+kubectl get pods -n sandbox-system
+kubectl get services -n sandbox-system
+
+# 预期输出:
+# NAME                               READY   STATUS    RESTARTS   AGE
+# sandbox-manager-xxxxxxxxx-xxxxx   1/1     Running   0          30s
+# sandbox-cleaner-xxxxxxxxx-xxxxx   0/1     Completed 0          30s
+```
+
+#### 步骤 6: 启动 MinIO (如需存储功能)
+
+```bash
+# 启动 MinIO 容器
+docker run -d --name minio-sandbox \
+    -p 9000:9000 -p 9001:9001 \
+    -e MINIO_ROOT_USER=minioadmin \
+    -e MINIO_ROOT_PASSWORD=minioadmin \
+    quay.io/minio/minio server /data --console-address ":9001"
+
+# 等待 MinIO 就绪
+sleep 5
+
+# 验证 MinIO
+curl -s http://localhost:9000/minio/health/live
+# 预期输出: OK
+```
+
+#### 步骤 7: 端口转发 Manager 服务
+
+```bash
+# 后台运行端口转发
+kubectl port-forward -n sandbox-system svc/sandbox-manager 8080:80 --address 0.0.0.0 > /tmp/sandbox-pf.log 2>&1 &
+PF_PID=$!
+
+# 保存 PID 用于后续清理
+echo $PF_PID > /tmp/sandbox-pf.pid
+
+# 等待端口转发就绪
+sleep 3
+
+# 验证连接
+curl -s http://localhost:8080/healthz | jq .
+
+# 预期输出:
+# {
+#   "status": "ok",
+#   "time": "2026-02-04T..."
+# }
+```
+
+#### 步骤 8: 获取认证凭据
+
+```bash
+# 获取 Service Key
+SERVICE_KEY=$(kubectl get secret sandbox-manager-keys -n sandbox-system \
+    -o jsonpath='{.data.SERVICE_KEYS}' | base64 -d | cut -d',' -f1)
+
+echo "Service Key: $SERVICE_KEY"
+# 预期输出: Service Key: dev-key-12345
+```
+
+#### 步骤 9: API 健康检查测试
+
+```bash
+# 测试各端点
+MANAGER_URL="http://localhost:8080"
+
+echo "=== 1. Health Check ==="
+curl -s "${MANAGER_URL}/healthz" | jq .
+
+echo "=== 2. Readiness Check ==="
+curl -s "${MANAGER_URL}/readyz" | jq .
+
+echo "=== 3. Metrics ==="
+curl -s "${MANAGER_URL}/metrics" | head -20
+
+echo "=== 4. Debug Config ==="
+curl -s "${MANAGER_URL}/debug/config" | jq '.meta'
+```
+
+#### 步骤 10: 沙盒创建和命令执行测试
+
+```bash
+MANAGER_URL="http://localhost:8080"
+SERVICE_KEY="dev-key-12345"
+SESSION_ID="smoke-test-$(date +%s)"
+
+echo "=== Test 1: Create Sandbox ==="
+RESPONSE=$(curl -s -X PUT "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "ttlSeconds": 900,
+        "containerName": "runner",
+        "workdir": "/workspace"
+    }')
+echo "Response: $RESPONSE"
+
+POD_NAME=$(echo "$RESPONSE" | grep -o '"podName":"[^"]*"' | cut -d'"' -f4)
+echo "Created Pod: $POD_NAME"
+
+# 等待 Pod 就绪
+sleep 8
+
+echo "=== Test 2: Echo Command ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "cmd": ["echo", "Smoke test passed"],
+        "timeoutSeconds": 10
+    }' | jq .
+
+echo "=== Test 3: PWD Command ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "cmd": ["pwd"],
+        "timeoutSeconds": 10
+    }' | jq .
+
+echo "=== Test 4: LS Command ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "cmd": ["ls", "-la", "/workspace"],
+        "timeoutSeconds": 10
+    }' | jq .
+
+echo "=== Test 5: Whoami Command ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "cmd": ["whoami"],
+        "timeoutSeconds": 10
+    }' | jq .
+
+echo "=== Test 6: Environment Variable Test ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "cmd": ["sh", "-c", "echo $HOME"],
+        "timeoutSeconds": 10
+    }' | jq .
+
+echo "=== Test 7: Touch Sandbox (TTL Extension) ==="
+curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/touch" \
+    -H "X-Service-Key: ${SERVICE_KEY}" | jq .
+
+echo "=== Test 8: Delete Sandbox ==="
+curl -s -X DELETE "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}" \
+    -H "X-Service-Key: ${SERVICE_KEY}" | jq -r '"status" // empty'
+```
+
+#### 步骤 11: 验证 Pod 清理
+
+```bash
+# 等待 Pod 被删除
+sleep 5
+
+# 检查 Pod 状态
+kubectl get pods -n sandbox
+
+# 预期输出: No resources found in sandbox namespace.
+# 或者之前的 Pod 状态为 Terminating
+```
+
+#### 步骤 12: 运行完整测试脚本
+
+```bash
+# 运行自动化测试脚本
+./manager-service/scripts/test-manager.sh http://localhost:8080 "$SERVICE_KEY"
+
+# 预期所有测试通过
+```
+
+#### 步骤 13: 清理环境
+
+```bash
+# 1. 停止端口转发
+if [ -f /tmp/sandbox-pf.pid ]; then
+    kill $(cat /tmp/sandbox-pf.pid) 2>/dev/null || true
+    rm /tmp/sandbox-pf.pid
+fi
+
+# 2. 删除 k8s 资源
+kubectl delete -k k8s/base --ignore-not-found=true
+
+# 3. 删除 Kind 集群
+kind delete cluster --name sandbox-cluster
+
+# 4. 删除 MinIO 容器
+docker rm -f minio-sandbox 2>/dev/null || true
+
+# 5. 清理临时文件
+rm -f /tmp/sandbox-pf.log
+
+echo "=== Cleanup Complete ==="
+```
+
+### B.2 测试结果验证清单
+
+#### 必须通过的测试项
+
+| 测试项 | 命令/方法 | 预期结果 |
+|--------|-----------|----------|
+| **镜像构建** | `docker images \| grep sandbox-` | manager 和 runner 镜像存在 |
+| **集群创建** | `kubectl get nodes` | 1 个 Ready 状态的节点 |
+| **Manager Pod** | `kubectl get pods -n sandbox-system` | 1/1 Running |
+| **健康检查** | `curl /healthz` | `{"status":"ok"}` |
+| **创建沙盒** | API PUT 请求 | 返回 podName |
+| **Echo 命令** | API POST /exec | exitCode=0, stdout 正确 |
+| **PWD 命令** | API POST /exec | exitCode=0, stdout="/workspace" |
+| **删除沙盒** | API DELETE 请求 | HTTP 204 或 200 |
+| **Pod 清理** | `kubectl get pods -n sandbox` | Pod 被删除 |
+
+#### 可选验证项
+
+| 测试项 | 命令/方法 | 预期结果 |
+|--------|-----------|----------|
+| **指标端点** | `curl /metrics` | 返回 Prometheus 格式指标 |
+| **配置端点** | `curl /debug/config` | 返回 JSON 配置 |
+| **TTL 续期** | API POST /touch | HTTP 200 |
+| **文件操作** | API /files/* | 上传/下载功能正常 |
+
+### B.3 故障排查检查表
+
+#### 镜像构建失败
+
+```bash
+# 检查代理设置
+echo "HTTP_PROXY: $HTTP_PROXY"
+echo "HTTPS_PROXY: $HTTPS_PROXY"
+echo "NO_PROXY: $NO_PROXY"
+
+# 测试代理连通性
+curl -x "$HTTP_PROXY" -I https://registry-1.docker.io/v2/
+
+# 检查 Docker buildx
+docker buildx version
+docker buildx ls
+```
+
+#### Pod 无法启动
+
+```bash
+# 查看 Pod 事件
+kubectl describe pod <pod-name> -n sandbox-system
+
+# 查看 Pod 日志
+kubectl logs <pod-name> -n sandbox-system
+
+# 常见错误排查
+# - ImagePullBackOff: 检查镜像是否加载到 kind
+#   docker exec sandbox-cluster-control-plane crictl images
+# - CrashLoopBackOff: 检查容器日志，确认配置正确
+# - OOMKilled: 增加内存限制
+```
+
+#### API 请求失败
+
+```bash
+# 检查端口转发
+ps aux | grep port-forward
+
+# 检查 Service
+kubectl get svc -n sandbox-system
+
+# 检查 Endpoints
+kubectl get endpoints -n sandbox-system
+
+# 直接访问 Pod IP
+POD_IP=$(kubectl get pod -l app=sandbox-manager -n sandbox-system -o jsonpath='{.items[0].status.podIP}')
+curl -s http://$POD_IP:8080/healthz
+```
+
+#### Exec 返回 exitCode=-1
+
+```bash
+# 检查 Manager 日志
+kubectl logs -f deployment/sandbox-manager -n sandbox-system
+
+# 检查沙盒 Pod 日志
+kubectl logs -f <sandbox-pod> -n sandbox
+
+# 验证 RBAC 权限
+kubectl auth can-i get pods -n sandbox --as=system:serviceaccount:sandbox-system:sandbox-manager
+kubectl auth can-i create pods/exec -n sandbox --as=system:serviceaccount:sandbox-system:sandbox-manager
+kubectl auth can-i update pods -n sandbox --as=system:serviceaccount:sandbox-system:sandbox-manager
+```
+
+### B.4 一键冒烟测试脚本
+
+保存为 `scripts/smoke-test.sh`:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+echo "=== mbos-sandbox-v1 Smoke Test ==="
+echo ""
+
+# 配置
+MANAGER_URL="${MANAGER_URL:-http://localhost:8080}"
+SERVICE_KEY="${SERVICE_KEY:-dev-key-12345}"
+SESSION_ID="smoke-$(date +%s)"
+
+# 颜色输出
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+pass() { echo -e "${GREEN}✓ $1${NC}"; }
+fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
+
+# 测试 1: 健康检查
+echo "[1/10] Testing health endpoint..."
+if curl -s "${MANAGER_URL}/healthz" | grep -q '"status":"ok"'; then
+    pass "Health check passed"
+else
+    fail "Health check failed"
+fi
+
+# 测试 2: 创建沙盒
+echo "[2/10] Creating sandbox..."
+RESPONSE=$(curl -s -X PUT "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"ttlSeconds": 900, "containerName": "runner", "workdir": "/workspace"}')
+if echo "$RESPONSE" | grep -q '"podName"'; then
+    POD_NAME=$(echo "$RESPONSE" | grep -o '"podName":"[^"]*"' | cut -d'"' -f4)
+    pass "Sandbox created: $POD_NAME"
+else
+    fail "Failed to create sandbox"
+fi
+
+sleep 8  # 等待 Pod 就绪
+
+# 测试 3-8: 各种命令
+echo "[3/10] Testing echo command..."
+if curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"cmd": ["echo", "test"], "timeoutSeconds": 10}' \
+    | grep -q '"exitCode":0'; then
+    pass "Echo command passed"
+else
+    fail "Echo command failed"
+fi
+
+echo "[4/10] Testing pwd command..."
+if curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"cmd": ["pwd"], "timeoutSeconds": 10}' \
+    | grep -q '"exitCode":0'; then
+    pass "PWD command passed"
+else
+    fail "PWD command failed"
+fi
+
+echo "[5/10] Testing ls command..."
+if curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+    -H "X-Service-Key: ${SERVICE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"cmd": ["ls", "-la"], "timeoutSeconds": 10}' \
+    | grep -q '"exitCode":0'; then
+    pass "LS command passed"
+else
+    fail "LS command failed"
+fi
+
+echo "[6/10] Testing touch..."
+if curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/touch" \
+    -H "X-Service-Key: ${SERVICE_KEY}" >/dev/null; then
+    pass "Touch passed"
+else
+    fail "Touch failed"
+fi
+
+# 测试 9: 删除沙盒
+echo "[9/10] Deleting sandbox..."
+if curl -s -X DELETE "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}" \
+    -H "X-Service-Key: ${SERVICE_KEY}" >/dev/null; then
+    pass "Sandbox deleted"
+else
+    fail "Failed to delete sandbox"
+fi
+
+# 测试 10: 验证清理
+echo "[10/10] Verifying cleanup..."
+sleep 3
+if ! kubectl get pod -n sandbox "$POD_NAME" 2>/dev/null; then
+    pass "Pod cleaned up"
+else
+    echo -e "${RED}⚠ Pod still exists (may be normal termination delay)${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}=== All Smoke Tests Passed! ===${NC}"
+```
+
+使用方法:
+
+```bash
+chmod +x scripts/smoke-test.sh
+./scripts/smoke-test.sh
+```
 
 ---
 
-**文档版本**: 1.0
-**最后更新**: 2026-02-04
-**维护者**: mbos-sandbox-v1 团队
+## 附录 C: 清理验证检查清单

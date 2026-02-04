@@ -119,11 +119,22 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 		Duration: duration,
 	}
 
+	// Try to get output from buffers
 	if stdoutBuf != nil {
 		result.Stdout = stdoutBuf.String()
+	} else if opts.Stdout != nil {
+		// If a writer was provided, try to get its output if it supports String()
+		if str, ok := opts.Stdout.(interface{ String() string }); ok {
+			result.Stdout = str.String()
+		}
 	}
 	if stderrBuf != nil {
 		result.Stderr = stderrBuf.String()
+	} else if opts.Stderr != nil {
+		// If a writer was provided, try to get its output if it supports String()
+		if str, ok := opts.Stderr.(interface{ String() string }); ok {
+			result.Stderr = str.String()
+		}
 	}
 
 	// Check for timeout

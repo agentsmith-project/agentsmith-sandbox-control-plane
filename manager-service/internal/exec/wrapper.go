@@ -76,10 +76,10 @@ func (w *Wrapper) buildUserCommand(cmd []string) string {
 // buildMarkerCommand builds the command that outputs the exit code marker
 func (w *Wrapper) buildMarkerCommand() string {
 	if w.MarkerStream == "stdout" {
-		return fmt.Sprintf("echo %s$?", w.ExitCodeMarker)
+		return fmt.Sprintf("echo \"%s=$?\"", w.ExitCodeMarker)
 	}
-	// Default to stderr
-	return fmt.Sprintf("echo %s$? >&2", w.ExitCodeMarker)
+	// Default to stderr - use = separator for parsing
+	return fmt.Sprintf("echo \"%s=$?\" >&2", w.ExitCodeMarker)
 }
 
 // GetCommandArgs returns the shell command with the wrapped command as argument
