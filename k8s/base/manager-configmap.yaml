@@ -103,3 +103,10 @@ data:
       tar:
         bin: tar
         rejectSymlinks: true
+
+    storage:
+      endpoint: 192.168.80.1:9000
+      accessKey: minioadmin
+      secretKey: minioadmin
+      bucket: sandboxes
+      useSSL: false

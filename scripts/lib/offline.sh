@@ -14,7 +14,6 @@ offline_export() {
   local proxy_mode="auto"
   local manager_tag=""
   local runner_tag=""
-  local gc_tag=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -22,7 +21,6 @@ offline_export() {
       --source) source="${2:-docker}"; shift 2 ;;
       --manager-tag) manager_tag="${2:-}"; shift 2 ;;
       --runner-tag) runner_tag="${2:-}"; shift 2 ;;
-      --gc-tag) gc_tag="${2:-}"; shift 2 ;;
       --registry) registry="${2:-}"; shift 2 ;;
       --project) project="${2:-}"; shift 2 ;;
       --username) username="${2:-}"; shift 2 ;;
@@ -52,11 +50,9 @@ offline_export() {
   local manager_ver runner_ver gc_ver
   manager_ver="${manager_tag:-$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)}"
   runner_ver="${runner_tag:-$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)}"
-  gc_ver="${gc_tag:-$(cat "${root}/images/gc/VERSION" 2>/dev/null || echo dev)}"
 
   local local_manager="sandbox-manager:${manager_ver}"
   local local_runner="sandbox-runner:${runner_ver}"
-  local local_gc="sandbox-gc:${gc_ver}"
 
   mkdir -p "$out_dir"
   mkdir -p "${out_dir}/images" "${out_dir}/bin" "${out_dir}/k8s" "${out_dir}/docs"
@@ -93,7 +89,6 @@ offline_export() {
     eval "$penv"
     skopeo_copy "$root" "docker://${registry}/${project}/${local_manager}" "docker-daemon:${local_manager}" --src-creds "${username}:${password}"
     skopeo_copy "$root" "docker://${registry}/${project}/${local_runner}" "docker-daemon:${local_runner}" --src-creds "${username}:${password}"
-    skopeo_copy "$root" "docker://${registry}/${project}/${local_gc}" "docker-daemon:${local_gc}" --src-creds "${username}:${password}"
   fi
 
   docker_image_exists "$local_manager" || die "Missing local image: $local_manager (run: ./sbx images build)"
@@ -102,11 +97,9 @@ offline_export() {
 
   local tar_manager="${out_dir}/images/sandbox-manager_${manager_ver}_linux_amd64.tar"
   local tar_runner="${out_dir}/images/sandbox-runner_${runner_ver}_linux_amd64.tar"
-  local tar_gc="${out_dir}/images/sandbox-gc_${gc_ver}_linux_amd64.tar"
 
   docker_save_image "$local_manager" "$tar_manager"
   docker_save_image "$local_runner" "$tar_runner"
-  docker_save_image "$local_gc" "$tar_gc"
 
   offline_write_manifest "$root" "$out_dir" "$manager_ver" "$runner_ver" "$gc_ver" "$tar_manager" "$tar_runner" "$tar_gc"
   offline_write_sha256sums "$out_dir"
@@ -238,10 +231,8 @@ offline_write_manifest() {
   local out_dir="$2"
   local manager_ver="$3"
   local runner_ver="$4"
-  local gc_ver="$5"
   local tar_manager="$6"
   local tar_runner="$7"
-  local tar_gc="$8"
 
   if ! command -v sha256sum >/dev/null 2>&1; then
     die "sha256sum is required for offline manifest"
@@ -279,13 +270,10 @@ offline_write_manifest() {
     --arg gcVer "$gc_ver" \
     --arg managerTar "$rel_manager" \
     --arg runnerTar "$rel_runner" \
-    --arg gcTar "$rel_gc" \
     --arg managerSha "$sha_manager" \
     --arg runnerSha "$sha_runner" \
-    --arg gcSha "$sha_gc" \
     --arg managerDig "$dig_manager" \
     --arg runnerDig "$dig_runner" \
-    --arg gcDig "$dig_gc" \
     '{
       schemaVersion: 1,
       generatedAt: $genAt,
@@ -294,7 +282,6 @@ offline_write_manifest() {
       images: [
         {name:"sandbox-manager", tag:$managerVer, tarPath:$managerTar, tarSha256:$managerSha, digest:$managerDig},
         {name:"sandbox-runner", tag:$runnerVer, tarPath:$runnerTar, tarSha256:$runnerSha, digest:$runnerDig},
-        {name:"sandbox-gc", tag:$gcVer, tarPath:$gcTar, tarSha256:$gcSha, digest:$gcDig}
       ]
     }' > "${out_dir}/manifest.json"
   log_info "offline wrote manifest.json"

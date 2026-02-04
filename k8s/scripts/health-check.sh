@@ -16,9 +16,9 @@ echo "Manager Service:"
 kubectl get service sandbox-manager -n sandbox-system
 echo ""
 
-# 检查 GC CronJob
-echo "GC CronJob:"
-kubectl get cronjob sandbox-gc -n sandbox-system
+# 检查 Cleaner CronJob
+echo "Cleaner CronJob:"
+kubectl get cronjob sandbox-cleaner -n sandbox-system
 echo ""
 
 # 检查最近的事件

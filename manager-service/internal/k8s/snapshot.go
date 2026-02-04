@@ -13,7 +13,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 	go func() {
 		defer writer.Close()
 
-		err := c.Exec(ctx, namespace, podName, "sandbox", []string{
+		err := c.Exec(ctx, namespace, podName, "runner", []string{
 			"tar", "czf", "-", "-C", "/workspace", ".",
 		}, StreamOptions{
 			Stdout: writer,
@@ -28,7 +28,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 
 // RestoreWorkspace extracts tar.gz to /workspace
 func (c *Client) RestoreWorkspace(ctx context.Context, namespace, podName string, tarData io.Reader) error {
-	return c.Exec(ctx, namespace, podName, "sandbox", []string{
+	return c.Exec(ctx, namespace, podName, "runner", []string{
 		"tar", "xzf", "-", "-C", "/workspace",
 	}, StreamOptions{
 		Stdin: tarData,
@@ -37,7 +37,7 @@ func (c *Client) RestoreWorkspace(ctx context.Context, namespace, podName string
 
 // CheckTmux checks if tmux session exists
 func (c *Client) CheckTmux(ctx context.Context, namespace, podName string) (bool, error) {
-	output, err := c.ExecWithOutput(ctx, namespace, podName, "sandbox", []string{
+	output, err := c.ExecWithOutput(ctx, namespace, podName, "runner", []string{
 		"tmux", "has-session", "-t", "sandbox",
 	})
 

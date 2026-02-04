@@ -4,7 +4,7 @@ metadata:
   name: sandbox-manager
   namespace: sandbox-system
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: sandbox-manager
@@ -54,6 +54,17 @@ spec:
             configMapKeyRef:
               name: sandbox-config
               key: runner-image-default
+        # Storage configuration (for local development with MinIO on host)
+        - name: STORAGE_ENDPOINT
+          value: "192.168.80.1:9000"
+        - name: STORAGE_ACCESS_KEY
+          value: "minioadmin"
+        - name: STORAGE_SECRET_KEY
+          value: "minioadmin"
+        - name: STORAGE_BUCKET
+          value: "sandboxes"
+        - name: STORAGE_USE_SSL
+          value: "false"
         # Mount config file
         volumeMounts:
         - name: manager-config
