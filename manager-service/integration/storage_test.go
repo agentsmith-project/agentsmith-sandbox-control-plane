@@ -6,6 +6,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestStorage_MinIOIntegration(t *testing.T) {
 	// Get MinIO configuration from environment
 	endpoint := os.Getenv("MINIO_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:9000"
+		endpoint = "localhost:9000"
 	}
 
 	accessKey := os.Getenv("MINIO_ACCESS_KEY")
@@ -62,7 +63,7 @@ func TestStorage_MinIOIntegration(t *testing.T) {
 		assert.Equal(t, int64(len(testData)), size, "Downloaded size should match uploaded size")
 
 		downloaded := make([]byte, size)
-		n, err := rc.Read(downloaded)
+		n, err := io.ReadFull(rc, downloaded)
 		require.NoError(t, err, "Failed to read downloaded data")
 		require.Equal(t, len(testData), n, "Downloaded bytes should match")
 		assert.Equal(t, testData, downloaded, "Downloaded data doesn't match uploaded data")
@@ -160,7 +161,7 @@ func TestStorage_MinIOIntegration(t *testing.T) {
 			require.NoError(t, err, "Cycle %d: download failed", i)
 
 			downloaded := make([]byte, size)
-			n, err := rc.Read(downloaded)
+			n, err := io.ReadFull(rc, downloaded)
 			rc.Close()
 			require.NoError(t, err, "Cycle %d: read failed", i)
 			assert.Equal(t, testData, downloaded[:n], "Cycle %d: data mismatch", i)

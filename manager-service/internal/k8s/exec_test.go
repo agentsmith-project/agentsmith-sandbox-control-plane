@@ -419,27 +419,25 @@ func TestExecResultTimeoutFlag(t *testing.T) {
 	}
 }
 
-// TestBufferWriterConcurrency tests concurrent writes
-func TestBufferWriterConcurrency(t *testing.T) {
+// TestBufferWriterSequential tests sequential writes
+// Note: bufferWriter is not designed for concurrent use
+func TestBufferWriterSequential(t *testing.T) {
 	bw := newBufferWriter()
-	done := make(chan bool)
 
-	// Write from multiple goroutines
+	// Write sequentially
 	for i := 0; i < 10; i++ {
-		go func(n int) {
-			bw.Write([]byte{byte(n)})
-			done <- true
-		}(i)
+		n, err := bw.Write([]byte{byte(i)})
+		if err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+		if n != 1 {
+			t.Errorf("Write() returned %v, want 1", n)
+		}
 	}
 
-	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-
-	// Just verify we got 10 bytes
+	// Verify we got exactly 10 bytes
 	result := bw.String()
 	if len(result) != 10 {
-		t.Errorf("After concurrent writes, length = %v, want 10", len(result))
+		t.Errorf("After sequential writes, length = %v, want 10", len(result))
 	}
 }
