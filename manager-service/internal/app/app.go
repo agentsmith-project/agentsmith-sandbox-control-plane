@@ -38,6 +38,8 @@ type Manager struct {
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	// New components
 	sessionManager   *session.Manager
@@ -102,7 +104,10 @@ func mainImpl() {
 	k8sExecutor := k8s.NewExecutor(k8sClient)
 
 	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
-	authValidator := auth.NewServiceKeyValidator(serviceKeys)
+	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
+	if err != nil {
+		log.Fatalf("Failed to initialize service key validator: %v", err)
+	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
 	cfgWatcher := config.NewWatcher(
@@ -184,6 +189,9 @@ func mainImpl() {
 		log.Fatalf("Failed to create finalizer handler: %v", err)
 	}
 
+	// Create manager lifecycle context
+	mgrCtx, mgrCancel := context.WithCancel(context.Background())
+
 	mgr := &Manager{
 		cfg:              cfg,
 		cfgMeta:          cfgMeta,
@@ -199,14 +207,20 @@ func mainImpl() {
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
 		rateLimiter:      rateLimiter,
+		ctx:              mgrCtx,
+		cancel:           mgrCancel,
 	}
 
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
 
-	// Start finalizer handler in background goroutine
-	go mgr.finalizerHandler.Start(context.Background())
+	// Start finalizer handler in background goroutine with manager lifecycle context
+	go mgr.finalizerHandler.Start(mgr.ctx)
 	log.Printf("Finalizer handler started")
+
+	// Start session cleanup goroutine with manager lifecycle context
+	go mgr.sessionManager.StartCleanup(mgr.ctx, 5*time.Minute)
+	log.Printf("Session cleanup started (interval=5m)")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -289,8 +303,20 @@ func (m *Manager) setupHTTPServer() {
 
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
-	// Add WebSocket route - no auth required for WebSocket
-	mux.Handle("/ws", m.wsHandler)
+	// Add WebSocket route with service key authentication via query parameter
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		// 从 URL 参数获取 service key
+		serviceKey := r.URL.Query().Get("service_key")
+
+		// 验证 service key
+		if !m.authValidator.Validate(serviceKey) {
+			http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
+			return
+		}
+
+		// 认证通过，转发到 WebSocket handler
+		m.wsHandler.ServeHTTP(w, r)
+	})
 
 	v1Handler := m.buildV1Handler()
 	if m.cfg.Auth.Enabled {
@@ -530,6 +556,12 @@ func (m *Manager) waitForShutdown() {
 
 	log.Printf("Shutdown signal received, gracefully shutting down...")
 
+	// Cancel manager lifecycle context to stop all background goroutines
+	// This includes the finalizer handler which was started with m.ctx
+	if m.cancel != nil {
+		m.cancel()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -570,6 +602,9 @@ func convertConfigError(err *config.ConfigError) *httpapi.ConfigError {
 	}
 }
 
+// sanitizeConfig creates a safe subset of configuration for debug output.
+// NOTE: Storage configuration (AccessKey, SecretKey) is intentionally excluded
+// to prevent credential exposure via debug endpoint.
 func sanitizeConfig(cfg *config.Config) httpapi.DebugConfigConfig {
 	return httpapi.DebugConfigConfig{
 		Version: cfg.Version,

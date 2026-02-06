@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestConfig_Validate(t *testing.T) {

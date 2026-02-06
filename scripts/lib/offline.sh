@@ -47,7 +47,7 @@ offline_export() {
 
   tools_verify "$root" || die "Bundled tools missing/invalid (run: ./sbx tools fetch)"
 
-  local manager_ver runner_ver gc_ver
+  local manager_ver runner_ver
   manager_ver="${manager_tag:-$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)}"
   runner_ver="${runner_tag:-$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)}"
 
@@ -93,7 +93,6 @@ offline_export() {
 
   docker_image_exists "$local_manager" || die "Missing local image: $local_manager (run: ./sbx images build)"
   docker_image_exists "$local_runner" || die "Missing local image: $local_runner (run: ./sbx images build)"
-  docker_image_exists "$local_gc" || die "Missing local image: $local_gc (run: ./sbx images build)"
 
   local tar_manager="${out_dir}/images/sandbox-manager_${manager_ver}_linux_amd64.tar"
   local tar_runner="${out_dir}/images/sandbox-runner_${runner_ver}_linux_amd64.tar"
@@ -101,7 +100,7 @@ offline_export() {
   docker_save_image "$local_manager" "$tar_manager"
   docker_save_image "$local_runner" "$tar_runner"
 
-  offline_write_manifest "$root" "$out_dir" "$manager_ver" "$runner_ver" "$gc_ver" "$tar_manager" "$tar_runner" "$tar_gc"
+  offline_write_manifest "$root" "$out_dir" "$manager_ver" "$runner_ver" "$tar_manager" "$tar_runner"
   offline_write_sha256sums "$out_dir"
 
   log_info "Offline package created: $out_dir"
@@ -231,8 +230,8 @@ offline_write_manifest() {
   local out_dir="$2"
   local manager_ver="$3"
   local runner_ver="$4"
-  local tar_manager="$6"
-  local tar_runner="$7"
+  local tar_manager="$5"
+  local tar_runner="$6"
 
   if ! command -v sha256sum >/dev/null 2>&1; then
     die "sha256sum is required for offline manifest"
@@ -247,27 +246,23 @@ offline_write_manifest() {
   gen_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   git_commit="$(git -C "$root" rev-parse HEAD)"
 
-  local rel_manager rel_runner rel_gc
+  local rel_manager rel_runner
   rel_manager="${tar_manager#${out_dir}/}"
   rel_runner="${tar_runner#${out_dir}/}"
-  rel_gc="${tar_gc#${out_dir}/}"
 
-  local sha_manager sha_runner sha_gc
+  local sha_manager sha_runner
   sha_manager="$(sha256sum "$tar_manager" | awk '{print $1}')"
   sha_runner="$(sha256sum "$tar_runner" | awk '{print $1}')"
-  sha_gc="$(sha256sum "$tar_gc" | awk '{print $1}')"
 
-  local dig_manager dig_runner dig_gc
+  local dig_manager dig_runner
   dig_manager="$("$sk" inspect "docker-archive:${tar_manager}" | "$jqbin" -r '.Digest // ""')"
   dig_runner="$("$sk" inspect "docker-archive:${tar_runner}" | "$jqbin" -r '.Digest // ""')"
-  dig_gc="$("$sk" inspect "docker-archive:${tar_gc}" | "$jqbin" -r '.Digest // ""')"
 
   "$jqbin" -n \
     --arg genAt "$gen_at" \
     --arg gitCommit "$git_commit" \
     --arg managerVer "$manager_ver" \
     --arg runnerVer "$runner_ver" \
-    --arg gcVer "$gc_ver" \
     --arg managerTar "$rel_manager" \
     --arg runnerTar "$rel_runner" \
     --arg managerSha "$sha_manager" \
@@ -281,7 +276,7 @@ offline_write_manifest() {
       gitCommit: $gitCommit,
       images: [
         {name:"sandbox-manager", tag:$managerVer, tarPath:$managerTar, tarSha256:$managerSha, digest:$managerDig},
-        {name:"sandbox-runner", tag:$runnerVer, tarPath:$runnerTar, tarSha256:$runnerSha, digest:$runnerDig},
+        {name:"sandbox-runner", tag:$runnerVer, tarPath:$runnerTar, tarSha256:$runnerSha, digest:$runnerDig}
       ]
     }' > "${out_dir}/manifest.json"
   log_info "offline wrote manifest.json"

@@ -12,16 +12,23 @@ type ServiceKeyValidator struct {
 }
 
 // NewServiceKeyValidator creates a new service key validator
-func NewServiceKeyValidator(keys []string) *ServiceKeyValidator {
+// Returns an error if no valid keys are provided
+func NewServiceKeyValidator(keys []string) (*ServiceKeyValidator, error) {
 	validKeys := make(map[string]struct{})
 	for _, key := range keys {
-		if key != "" {
-			validKeys[key] = struct{}{}
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" {
+			validKeys[trimmed] = struct{}{}
 		}
 	}
+
+	if len(validKeys) == 0 {
+		return nil, fmt.Errorf("SERVICE_KEYS cannot be empty: service requires authentication")
+	}
+
 	return &ServiceKeyValidator{
 		validKeys: validKeys,
-	}
+	}, nil
 }
 
 // Validate checks if a key is valid using constant-time comparison

@@ -92,6 +92,9 @@ func (c *Client) SnapshotExists(ctx context.Context, key string) (bool, error) {
 	_, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		errResp := minio.ToErrorResponse(err)
+		// Check if this is a valid minio error response (Code is set)
+		// ToErrorResponse returns a zero-value ErrorResponse for non-minio errors,
+		// with Code == "" (empty string), so we check for "NoSuchKey" explicitly
 		if errResp.Code == "NoSuchKey" {
 			return false, nil
 		}

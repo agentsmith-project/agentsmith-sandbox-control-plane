@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 )
 
 // SnapshotWorkspace creates a tar.gz of /workspace
@@ -13,13 +14,27 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 	go func() {
 		defer writer.Close()
 
-		err := c.Exec(ctx, namespace, podName, "runner", []string{
+		// Check if context is already cancelled before starting work
+		select {
+		case <-ctx.Done():
+			writer.CloseWithError(ctx.Err())
+			return
+		default:
+		}
+
+		// Set a timeout for the snapshot operation (2 minutes)
+		execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+
+		// Execute tar command
+		err := c.Exec(execCtx, namespace, podName, "runner", []string{
 			"tar", "czf", "-", "-C", "/workspace", ".",
 		}, StreamOptions{
 			Stdout: writer,
 		})
 		if err != nil {
 			writer.CloseWithError(fmt.Errorf("tar command failed: %w", err))
+			return
 		}
 	}()
 

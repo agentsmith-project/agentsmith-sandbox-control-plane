@@ -90,11 +90,33 @@ func (w *Wrapper) GetCommandArgs(env map[string]string, workdir string, userCmd 
 	return append([]string{w.ShellBin}, args...)
 }
 
-// shellEscape escapes a string for safe use in shell single quotes
+// shellEscape escapes a string for safe use in shell commands.
+//
+// This function prevents command injection by:
+// 1. Wrapping the entire string in single quotes
+// 2. Escaping any single quotes within the string using '\'' sequence
+//
+// Within single quotes, all characters are treated literally except single quotes themselves.
+// To include a single quote, we end the single-quoted string, add an escaped single quote
+// (using backslash), and restart the single-quoted string.
+//
+// Examples:
+//   "hello"     → "'hello'"
+//   "it's"      → "'it'\''s'"
+//   "; rm -rf /" → "'; rm -rf /'"
+//
+// This approach prevents injection via:
+// - Command separators (;, |, &, &&, ||)
+// - Command substitution ($(), backticks)
+// - Variable expansion ($VAR)
+// - Newlines and other special characters
 func shellEscape(s string) string {
+	if s == "" {
+		return "''"
+	}
 	// Replace single quotes with '\'' (end quote, escaped quote, start quote)
-	escaped := strings.ReplaceAll(s, "'", "'\"'\"'")
-	return "'" + escaped + "'"
+	// This is the standard shell escaping pattern: 'end' \' start '
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // escapeForDoubleQuotes escapes a string for use in shell double quotes

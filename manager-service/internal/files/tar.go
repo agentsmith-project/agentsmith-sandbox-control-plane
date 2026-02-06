@@ -323,9 +323,26 @@ func (d *Downloader) Download(ctx context.Context, podName string, src string) (
 	go func() {
 		defer pw.Close()
 
+		// Check if context is already cancelled
+		select {
+		case <-ctx.Done():
+			pw.CloseWithError(ctx.Err())
+			return
+		default:
+		}
+
 		// Create a separate context with timeout for the exec operation
-		execCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		// Use the parent context to propagate cancellation
+		execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
+
+		// Check again before starting the exec
+		select {
+		case <-execCtx.Done():
+			pw.CloseWithError(execCtx.Err())
+			return
+		default:
+		}
 
 		opts := &k8s.ExecOptions{
 			Command: cmd,

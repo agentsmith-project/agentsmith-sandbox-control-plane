@@ -51,14 +51,14 @@ log_warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 log_step()    { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
 pass_test() {
-    ((PASSED_TESTS++))
-    ((TOTAL_TESTS++))
+    ((PASSED_TESTS++)) || true
+    ((TOTAL_TESTS++)) || true
     log_success "$1"
 }
 
 fail_test() {
-    ((FAILED_TESTS++))
-    ((TOTAL_TESTS++))
+    ((FAILED_TESTS++)) || true
+    ((TOTAL_TESTS++)) || true
     log_error "$1"
 }
 
@@ -222,27 +222,39 @@ test_build_images() {
         export HTTP_PROXY HTTPS_PROXY NO_PROXY
     fi
 
+    # 验证目录存在
+    if [ ! -d "$PROJECT_DIR/manager-service" ]; then
+        fail_test "Manager service directory not found: $PROJECT_DIR/manager-service"
+        return 1
+    fi
+    if [ ! -d "$PROJECT_DIR/runner-service" ]; then
+        fail_test "Runner service directory not found: $PROJECT_DIR/runner-service"
+        return 1
+    fi
+
     # 构建 manager
     log_info "Building manager image..."
-    cd "$PROJECT_DIR/manager-service"
+    cd "$PROJECT_DIR/manager-service" || { fail_test "Failed to cd to manager-service"; return 1; }
     if docker buildx build --load -t "sandbox-manager:$VERSION" -f Dockerfile . "${build_args[@]}" >/dev/null 2>&1; then
         pass_test "Manager image built successfully"
     else
         fail_test "Failed to build manager image"
+        cd "$PROJECT_DIR" || true
         return 1
     fi
 
     # 构建 runner
     log_info "Building runner image..."
-    cd "$PROJECT_DIR/runner-service"
+    cd "$PROJECT_DIR/runner-service" || { fail_test "Failed to cd to runner-service"; return 1; }
     if docker buildx build --load -t "sandbox-runner:$VERSION" -f Dockerfile . "${build_args[@]}" >/dev/null 2>&1; then
         pass_test "Runner image built successfully"
     else
         fail_test "Failed to build runner image"
+        cd "$PROJECT_DIR" || true
         return 1
     fi
 
-    cd "$PROJECT_DIR"
+    cd "$PROJECT_DIR" || { log_warn "Failed to return to project directory"; return 0; }
 }
 
 # 3. 创建 Kind 集群
@@ -278,6 +290,18 @@ test_create_cluster() {
 # 4. 加载镜像
 test_load_images() {
     log_step "Step 4: Load Images to Cluster"
+
+    # 验证镜像存在
+    if ! docker image inspect "sandbox-manager:$VERSION" &>/dev/null; then
+        fail_test "Manager image not found: sandbox-manager:$VERSION"
+        log_info "Build the image first or use --no-build with existing images"
+        return 1
+    fi
+    if ! docker image inspect "sandbox-runner:$VERSION" &>/dev/null; then
+        fail_test "Runner image not found: sandbox-runner:$VERSION"
+        log_info "Build the image first or use --no-build with existing images"
+        return 1
+    fi
 
     # 加载 manager
     if kind load docker-image "sandbox-manager:$VERSION" --name "$CLUSTER_NAME" >/dev/null 2>&1; then
