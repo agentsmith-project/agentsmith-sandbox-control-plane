@@ -54,13 +54,13 @@ spec:
             configMapKeyRef:
               name: sandbox-config
               key: runner-image-default
-        # Storage configuration (for local development with MinIO on host)
+        # Storage configuration
+        # Option 1: Use credentials from mounted Secret (recommended for production)
+        - name: STORAGE_CREDENTIALS_PATH
+          value: "/etc/secrets/minio"
+        # Option 2: Use environment variables (fallback for local development)
         - name: STORAGE_ENDPOINT
           value: "192.168.80.1:9000"
-        - name: STORAGE_ACCESS_KEY
-          value: "minioadmin"
-        - name: STORAGE_SECRET_KEY
-          value: "minioadmin"
         - name: STORAGE_BUCKET
           value: "sandboxes"
         - name: STORAGE_USE_SSL
@@ -70,6 +70,10 @@ spec:
         - name: manager-config
           mountPath: /etc/sandbox-manager/manager-config.yaml
           subPath: manager-config.yaml
+          readOnly: true
+        # Mount MinIO credentials (Secret volume)
+        - name: minio-credentials
+          mountPath: /etc/secrets/minio
           readOnly: true
         # Probes
         readinessProbe:
@@ -108,3 +112,7 @@ spec:
       - name: manager-config
         configMap:
           name: sandbox-manager-config
+      - name: minio-credentials
+        secret:
+          secretName: minio-credentials
+          defaultMode: 0400  # Read-only, owner only

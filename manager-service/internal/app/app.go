@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
@@ -44,6 +45,7 @@ type Manager struct {
 	storageClient    *storage.Client
 	wsHandler        *websocket.Handler
 	finalizerHandler *finalizer.Handler
+	rateLimiter      *ratelimit.Limiter
 }
 
 // Main is the entry point for the sandbox manager.
@@ -122,15 +124,24 @@ func mainImpl() {
 	log.Printf("Initializing buffer manager...")
 	bufferManager := buffer.NewManager()
 
-	// Initialize storage client from environment variables
-	storageEndpoint := getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000")
-	storageAccessKey := getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin")
-	storageSecretKey := getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin")
-	storageBucket := getEnvOrDefault("STORAGE_BUCKET", "sandboxes")
-	storageUseSSL := os.Getenv("STORAGE_USE_SSL") == "true"
+	// Initialize storage client
+	// Try loading from credentials file first, fall back to environment variables
+	storageCreds, err := storage.LoadCredentials()
+	if err != nil {
+		log.Printf("Failed to load storage credentials, using defaults: %v", err)
+		// Use defaults for local development
+		storageCreds = &storage.Credentials{
+			Endpoint:  getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000"),
+			AccessKey: getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin"),
+			SecretKey: getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin"),
+			Bucket:    getEnvOrDefault("STORAGE_BUCKET", "sandboxes"),
+			UseSSL:    os.Getenv("STORAGE_USE_SSL") == "true",
+		}
+	}
 
-	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)", storageEndpoint, storageBucket, storageUseSSL)
-	storageClient, err := storage.NewClient(storageEndpoint, storageAccessKey, storageSecretKey, storageBucket, storageUseSSL)
+	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)",
+		storageCreds.Endpoint, storageCreds.Bucket, storageCreds.UseSSL)
+	storageClient, err := storage.NewClientWithCreds(storageCreds)
 	if err != nil {
 		log.Fatalf("Failed to create storage client: %v", err)
 	}
@@ -144,7 +155,22 @@ func mainImpl() {
 		k8sClient,
 		storageClient,
 		cfg.Sandbox.Defaults.Namespace,
+		cfg,
 	)
+
+	// Initialize rate limiter
+	log.Printf("Initializing rate limiter...")
+	rateLimiterConfig := &ratelimit.Config{
+		GlobalRPS:       100,
+		GlobalBurst:     200,
+		PerIPRPS:        10,
+		PerIPBurst:      20,
+		PerSessionRPS:   5,
+		PerSessionBurst: 10,
+		CleanupInterval: 5 * time.Minute,
+	}
+	rateLimiter := ratelimit.NewLimiter(rateLimiterConfig)
+	log.Printf("Rate limiter initialized")
 
 	// Initialize finalizer handler
 	log.Printf("Initializing finalizer handler...")
@@ -172,6 +198,7 @@ func mainImpl() {
 		storageClient:    storageClient,
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
+		rateLimiter:      rateLimiter,
 	}
 
 	mgr.setupReadinessChecks()
@@ -280,6 +307,7 @@ func (m *Manager) setupHTTPServer() {
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
 	v1Handler = reqIDMiddleware(v1Handler)
 	v1Handler = m.observabilityMiddleware(v1Handler)
+	v1Handler = m.rateLimiter.Middleware(v1Handler)
 
 	mux.Handle("/v1/", v1Handler)
 

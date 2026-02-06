@@ -11,19 +11,12 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox/manager/internal/buffer"
+	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
 
 // Handler manages WebSocket connections and sandbox sessions
 type Handler struct {
@@ -33,6 +26,8 @@ type Handler struct {
 	storageClient  *storage.Client
 	podNamespace   string
 	logger         observability.Logger
+	cfg            *config.Config
+	upgrader       *websocket.Upgrader
 }
 
 // NewHandler creates a new WebSocket handler
@@ -42,7 +37,21 @@ func NewHandler(
 	k8sClient *k8s.Client,
 	storageClient *storage.Client,
 	podNamespace string,
+	cfg *config.Config,
 ) *Handler {
+	// Build WebSocket config from app config
+	wsCfg := &Config{
+		ReadBufferSize:          cfg.WebSocket.ReadBufferSize,
+		WriteBufferSize:         cfg.WebSocket.WriteBufferSize,
+		AllowedOrigins:          cfg.WebSocket.AllowedOrigins,
+		AllowNonBrowserRequests: cfg.WebSocket.AllowNonBrowserRequests,
+	}
+	if cfg.WebSocket.HandshakeTimeout != "" {
+		if d, err := time.ParseDuration(cfg.WebSocket.HandshakeTimeout); err == nil {
+			wsCfg.HandshakeTimeout = d
+		}
+	}
+
 	return &Handler{
 		sessionManager: sessionManager,
 		bufferManager:  bufferManager,
@@ -50,13 +59,15 @@ func NewHandler(
 		storageClient:  storageClient,
 		podNamespace:   podNamespace,
 		logger:         observability.GetLogger(),
+		cfg:            cfg,
+		upgrader:       wsCfg.Upgrader(),
 	}
 }
 
 // ServeHTTP handles WebSocket upgrade and connection
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Upgrade to WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// Upgrade to WebSocket with configured upgrader
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("websocket upgrade failed: %v", err), http.StatusBadRequest)
 		return

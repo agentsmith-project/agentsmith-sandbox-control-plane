@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/sandbox/manager/internal/observability"
 )
 
 const (
@@ -173,35 +175,33 @@ func IsPodReady(pod *v1.Pod) bool {
 
 // WaitForPodReady waits for a pod to become ready
 func (c *Client) WaitForPodReady(ctx context.Context, name string, waitTime time.Duration, pollInterval time.Duration) (bool, error) {
-	timeout := time.After(waitTime)
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
+	poller := observability.NewPoller(pollInterval, waitTime)
 
-	for {
-		select {
-		case <-timeout:
-			return false, fmt.Errorf("pod %s did not become ready within %v", name, waitTime)
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-ticker.C:
-			pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, name, metav1.GetOptions{})
-			if err != nil {
-				if errors.IsNotFound(err) {
-					return false, fmt.Errorf("pod %s not found", name)
-				}
-				return false, fmt.Errorf("failed to get pod: %w", err)
+	err := poller.Poll(ctx, func() (bool, error) {
+		pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, fmt.Errorf("pod %s not found", name)
 			}
-
-			if pod.Status.Phase == v1.PodFailed {
-				return false, fmt.Errorf("pod %s failed", name)
-			}
-
-			if IsPodReady(pod) {
-				log.Printf("K8s: pod %s is ready", name)
-				return true, nil
-			}
+			return false, fmt.Errorf("failed to get pod: %w", err)
 		}
+
+		if pod.Status.Phase == v1.PodFailed {
+			return false, fmt.Errorf("pod %s failed", name)
+		}
+
+		if IsPodReady(pod) {
+			log.Printf("K8s: pod %s is ready", name)
+			return true, nil
+		}
+
+		return false, nil
+	})
+
+	if err != nil {
+		return false, err
 	}
+	return true, nil
 }
 
 // EnsurePod gets or creates a pod, waiting for it to be ready

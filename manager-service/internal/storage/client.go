@@ -46,6 +46,11 @@ func NewClient(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Cli
 	}, nil
 }
 
+// NewClientWithCreds creates a storage client using a Credentials struct
+func NewClientWithCreds(creds *Credentials) (*Client, error) {
+	return NewClient(creds.Endpoint, creds.AccessKey, creds.SecretKey, creds.Bucket, creds.UseSSL)
+}
+
 func (c *Client) GenerateSnapshotKey(workspaceID, projectID, agentThreadID string) string {
 	return fmt.Sprintf("snapshots/%s/%s/%s/workspace.tar.gz",
 		strings.TrimPrefix(workspaceID, "ws_"),

@@ -16,6 +16,7 @@ type Config struct {
 	Files      FilesConfig   `yaml:"files"`
 	Storage    StorageConfig `yaml:"storage"`
 	Buffer     BufferConfig  `yaml:"buffer"`
+	WebSocket  WebSocketConfig `yaml:"websocket"`
 }
 
 // ServerConfig contains HTTP server configuration
@@ -194,6 +195,15 @@ type BufferConfig struct {
 	Capacity int `yaml:"capacity"`
 }
 
+// WebSocketConfig contains WebSocket configuration
+type WebSocketConfig struct {
+	ReadBufferSize          int      `yaml:"readBufferSize"`
+	WriteBufferSize         int      `yaml:"writeBufferSize"`
+	AllowedOrigins          []string `yaml:"allowedOrigins"`
+	AllowNonBrowserRequests bool     `yaml:"allowNonBrowserRequests"`
+	HandshakeTimeout        string   `yaml:"handshakeTimeout"`
+}
+
 // ConfigMeta contains metadata about loaded configuration
 type ConfigMeta struct {
 	SchemaVersion int          `yaml:"schemaVersion"`
@@ -349,6 +359,13 @@ func DefaultConfig() *Config {
 		},
 		Buffer: BufferConfig{
 			Capacity: 10000,
+		},
+		WebSocket: WebSocketConfig{
+			ReadBufferSize:          1024,
+			WriteBufferSize:         1024,
+			AllowedOrigins:          []string{"http://localhost:3000"},
+			AllowNonBrowserRequests: true,
+			HandshakeTimeout:        "10s",
 		},
 	}
 }
