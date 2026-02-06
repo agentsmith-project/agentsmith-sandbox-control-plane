@@ -14,31 +14,25 @@ type SessionBuilder struct {
 
 // NewSessionBuilder creates a new SessionBuilder.
 func NewSessionBuilder() *SessionBuilder {
+	now := time.Now()
 	return &SessionBuilder{
 		s: &session.Session{
-			ID:              "test-session-" + uuid.New().String()[:8],
-			CreatedAt:       time.Now(),
+			CreatedAt:       now,
+			LastActivityAt:  now,
 			State:           session.StateReady,
 			ClientConnected: false,
+			Config: session.SecurityConfig{
+				MaxLifetime: session.DefaultMaxLifetime,
+				IdleTimeout: 15 * time.Minute,
+			},
+			ExpiresAt: now.Add(session.DefaultMaxLifetime),
 		},
 	}
-}
-
-// WithID sets the session ID.
-func (b *SessionBuilder) WithID(id string) *SessionBuilder {
-	b.s.ID = id
-	return b
 }
 
 // WithAgentThreadID sets the agent thread ID.
 func (b *SessionBuilder) WithAgentThreadID(agentThreadID string) *SessionBuilder {
 	b.s.AgentThreadID = agentThreadID
-	return b
-}
-
-// WithSandboxID sets the sandbox ID.
-func (b *SessionBuilder) WithSandboxID(sandboxID string) *SessionBuilder {
-	b.s.SandboxID = sandboxID
 	return b
 }
 
@@ -48,8 +42,14 @@ func (b *SessionBuilder) WithPodName(podName string) *SessionBuilder {
 	return b
 }
 
+// WithPodNamespace sets the pod namespace.
+func (b *SessionBuilder) WithPodNamespace(podNamespace string) *SessionBuilder {
+	b.s.PodNamespace = podNamespace
+	return b
+}
+
 // WithState sets the session state.
-func (b *SessionBuilder) WithState(state session.SessionState) *SessionBuilder {
+func (b *SessionBuilder) WithState(state session.State) *SessionBuilder {
 	b.s.State = state
 	return b
 }
@@ -60,15 +60,21 @@ func (b *SessionBuilder) WithImage(image string) *SessionBuilder {
 	return b
 }
 
-// WithCreatedAt sets the creation time.
-func (b *SessionBuilder) WithCreatedAt(t time.Time) *SessionBuilder {
-	b.s.CreatedAt = t
+// WithCommand sets the command.
+func (b *SessionBuilder) WithCommand(cmd ...string) *SessionBuilder {
+	b.s.Command = cmd
 	return b
 }
 
-// WithClientConnected sets the client connected flag.
-func (b *SessionBuilder) WithClientConnected(connected bool) *SessionBuilder {
-	b.s.ClientConnected = connected
+// WithEnv sets environment variables.
+func (b *SessionBuilder) WithEnv(env map[string]string) *SessionBuilder {
+	b.s.Env = env
+	return b
+}
+
+// WithCreatedAt sets the creation time.
+func (b *SessionBuilder) WithCreatedAt(t time.Time) *SessionBuilder {
+	b.s.CreatedAt = t
 	return b
 }
 
@@ -78,15 +84,39 @@ func (b *SessionBuilder) WithLastActivityAt(t time.Time) *SessionBuilder {
 	return b
 }
 
+// WithExpiresAt sets the expires at time.
+func (b *SessionBuilder) WithExpiresAt(t time.Time) *SessionBuilder {
+	b.s.ExpiresAt = t
+	return b
+}
+
+// WithClientConnected sets the client connected flag.
+func (b *SessionBuilder) WithClientConnected(connected bool) *SessionBuilder {
+	b.s.ClientConnected = connected
+	return b
+}
+
 // WithIdleTimeout sets the idle timeout duration.
 func (b *SessionBuilder) WithIdleTimeout(timeout time.Duration) *SessionBuilder {
-	b.s.IdleTimeout = timeout
+	b.s.Config.IdleTimeout = timeout
 	return b
 }
 
 // WithMaxLifetime sets the maximum lifetime duration.
 func (b *SessionBuilder) WithMaxLifetime(lifetime time.Duration) *SessionBuilder {
-	b.s.MaxLifetime = lifetime
+	b.s.Config.MaxLifetime = lifetime
+	return b
+}
+
+// WithAllowNetworkAccess sets network access permission.
+func (b *SessionBuilder) WithAllowNetworkAccess(allow bool) *SessionBuilder {
+	b.s.Config.AllowNetworkAccess = allow
+	return b
+}
+
+// WithReadonlyFilesystem sets readonly filesystem.
+func (b *SessionBuilder) WithReadonlyFilesystem(readonly bool) *SessionBuilder {
+	b.s.Config.ReadonlyFilesystem = readonly
 	return b
 }
 

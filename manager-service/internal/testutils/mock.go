@@ -4,9 +4,10 @@ import (
 	"context"
 	"io"
 
-	v1 "k8s.io/api/core"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/stretchr/testify/mock"
 )
@@ -35,7 +36,7 @@ func (m *MockK8sClient) CreatePod(ctx context.Context, pod *v1.Pod) (*v1.Pod, er
 }
 
 // DeletePod mocks deleting a pod.
-func (m *MockK8sClient) DeletePod(ctx context.Context, name string, options *v1.DeleteOptions) error {
+func (m *MockK8sClient) DeletePod(ctx context.Context, name string, options *metav1.DeleteOptions) error {
 	args := m.Called(ctx, name, options)
 	return args.Error(0)
 }
@@ -81,12 +82,12 @@ func (m *MockStorageClient) Exists(ctx context.Context, key string) (bool, error
 	return args.Bool(0), args.Error(1)
 }
 
-// Helper function to create not found error
+// NotFoundErr creates a not found error for testing.
 func NotFoundErr(msg string) error {
 	return &errors.StatusError{
-		ErrStatus: v1.Status{
-			Status:  v1.StatusFailure,
-			Reason:  v1.StatusReasonNotFound,
+		ErrStatus: metav1.Status{
+			Status:  metav1.StatusFailure,
+			Reason:  metav1.StatusReasonNotFound,
 			Message: msg,
 			Code:    404,
 		},

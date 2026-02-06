@@ -534,10 +534,16 @@ func GetSessionIDFromPod(pod *v1.Pod) string {
 }
 
 // GetExpiresAtFromPod extracts expires at from pod annotations
+// Checks sandbox/expiresAt first, then falls back to expires_at for backward compatibility
 func GetExpiresAtFromPod(pod *v1.Pod) string {
 	if pod.Annotations == nil {
 		return ""
 	}
+	// Check sandbox/expiresAt first (canonical format)
+	if expiresAt, ok := pod.Annotations["sandbox/expiresAt"]; ok {
+		return expiresAt
+	}
+	// Fallback to expires_at for backward compatibility
 	return pod.Annotations["expires_at"]
 }
 
