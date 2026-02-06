@@ -569,3 +569,33 @@ func BenchmarkRemoveFinalizerWithRetry_WithRetries(b *testing.B) {
 		}
 	}
 }
+
+// TestSnapshotFinalizerConstant tests the finalizer constant value
+func TestSnapshotFinalizerConstant(t *testing.T) {
+	expected := "manager.mbos.io/snapshot"
+	if SnapshotFinalizer != expected {
+		t.Errorf("Expected SnapshotFinalizer to be %q, got %q", expected, SnapshotFinalizer)
+	}
+}
+
+// TestDefaultConstants tests default constants
+func TestDefaultConstants(t *testing.T) {
+	if DefaultCheckInterval != 10*time.Second {
+		t.Errorf("Expected DefaultCheckInterval to be 10s, got %v", DefaultCheckInterval)
+	}
+
+	if DefaultSnapshotTimeout != 5*time.Minute {
+		t.Errorf("Expected DefaultSnapshotTimeout to be 5m, got %v", DefaultSnapshotTimeout)
+	}
+}
+
+// TestNewHandler_NilConfig tests that nil config returns error
+func TestNewHandler_NilConfig(t *testing.T) {
+	handler, err := NewHandler(nil)
+	require.Error(t, err)
+	require.Nil(t, handler)
+	require.Contains(t, err.Error(), "config cannot be nil")
+}
+
+// Note: Full tests of NewHandler require actual k8s.Client and storage.Client instances
+// which is not practical for unit tests. The integration tests cover this scenario.

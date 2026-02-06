@@ -1,8 +1,16 @@
 package httpapi
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/sandbox/manager/internal/config"
+	"github.com/sandbox/manager/internal/k8s"
+	"github.com/sandbox/manager/internal/observability"
 )
 
 // TestExtractSessionId tests the extractSessionId helper function
@@ -226,4 +234,266 @@ type TestError struct {
 
 func (e *TestError) Error() string {
 	return e.Message
+}
+
+// TestIsContextCanceled tests the isContextCanceled helper function
+func TestIsContextCanceled(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "context.Canceled",
+			err:      context.Canceled,
+			expected: true,
+		},
+		{
+			name:     "context.DeadlineExceeded",
+			err:      context.DeadlineExceeded,
+			expected: true,
+		},
+		{
+			name:     "wrapped context.Canceled - contains message so returns true",
+			err:      fmt.Errorf("wrapped: %w", context.Canceled),
+			expected: true, // The message contains "context canceled" which is detected
+		},
+		{
+			name:     "error with context canceled message",
+			err:      fmt.Errorf("operation failed: context canceled"),
+			expected: true,
+		},
+		{
+			name:     "error with operation was canceled message",
+			err:      fmt.Errorf("operation was canceled"),
+			expected: true,
+		},
+		{
+			name:     "error with deadline exceeded message",
+			err:      fmt.Errorf("deadline exceeded"),
+			expected: true,
+		},
+		{
+			name:     "generic error",
+			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+		{
+			name:     "error with canceled in middle - contains checks work",
+			err:      fmt.Errorf("context canceled during operation"),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isContextCanceled(tt.err)
+			if result != tt.expected {
+				t.Errorf("isContextCanceled(%v) = %v, want %v", tt.err, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestContains tests the contains helper function
+func TestContains(t *testing.T) {
+	tests := []struct {
+		name     string
+		s        string
+		substr   string
+		expected bool
+	}{
+		{
+			name:     "exact match",
+			s:        "hello world",
+			substr:   "hello world",
+			expected: true,
+		},
+		{
+			name:     "prefix match",
+			s:        "hello world",
+			substr:   "hello",
+			expected: true,
+		},
+		{
+			name:     "suffix match",
+			s:        "hello world",
+			substr:   "world",
+			expected: true,
+		},
+		{
+			name:     "middle match",
+			s:        "hello world",
+			substr:   "lo wo",
+			expected: true,
+		},
+		{
+			name:     "no match",
+			s:        "hello world",
+			substr:   "goodbye",
+			expected: false,
+		},
+		{
+			name:     "substring longer than string",
+			s:        "hi",
+			substr:   "hello world",
+			expected: false,
+		},
+		{
+			name:     "empty substring",
+			s:        "hello world",
+			substr:   "",
+			expected: true,
+		},
+		{
+			name:     "empty string with non-empty substring",
+			s:        "",
+			substr:   "test",
+			expected: false,
+		},
+		{
+			name:     "both empty",
+			s:        "",
+			substr:   "",
+			expected: true,
+		},
+		{
+			name:     "case sensitive",
+			s:        "Hello World",
+			substr:   "hello",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := contains(tt.s, tt.substr)
+			if result != tt.expected {
+				t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.substr, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestContainsMiddle tests the containsMiddle helper function
+func TestContainsMiddle(t *testing.T) {
+	tests := []struct {
+		name     string
+		s        string
+		substr   string
+		expected bool
+	}{
+		{
+			name:     "match in middle",
+			s:        "hello world",
+			substr:   "lo wo",
+			expected: true,
+		},
+		{
+			name:     "match at start",
+			s:        "hello world",
+			substr:   "hello",
+			expected: true,
+		},
+		{
+			name:     "match at end",
+			s:        "hello world",
+			substr:   "world",
+			expected: true,
+		},
+		{
+			name:     "no match",
+			s:        "hello world",
+			substr:   "goodbye",
+			expected: false,
+		},
+		{
+			name:     "single character match",
+			s:        "abc",
+			substr:   "b",
+			expected: true,
+		},
+		{
+			name:     "empty substring",
+			s:        "hello",
+			substr:   "",
+			expected: true,
+		},
+		{
+			name:     "substring longer than string",
+			s:        "hi",
+			substr:   "hello",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := containsMiddle(tt.s, tt.substr)
+			if result != tt.expected {
+				t.Errorf("containsMiddle(%q, %q) = %v, want %v", tt.s, tt.substr, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestLogRequest tests the LogRequest helper function
+func TestLogRequest(t *testing.T) {
+	// This test just ensures the function doesn't panic
+	// In a real scenario, you'd capture log output
+	req := &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Path: "/v1/sandboxes/test"},
+	}
+	LogRequest(req, "test-request-id")
+}
+
+// TestNewHandlers tests the NewHandlers constructor
+func TestNewHandlers(t *testing.T) {
+	mockMgr := &MockManager{}
+
+	h := NewHandlers(mockMgr)
+
+	if h == nil {
+		t.Fatal("NewHandlers() returned nil")
+	}
+
+	if h.mgr != mockMgr {
+		t.Error("NewHandlers() did not set manager")
+	}
+}
+
+// MockManager is a mock implementation of the Manager interface for testing
+type MockManager struct {
+	cfg         *config.Config
+	k8sClient   *k8s.Client
+	k8sExecutor *k8s.Executor
+	metrics     *observability.MetricsRegistry
+}
+
+func (m *MockManager) GetConfig() *config.Config {
+	if m.cfg == nil {
+		return &config.Config{}
+	}
+	return m.cfg
+}
+
+func (m *MockManager) GetK8sClient() *k8s.Client {
+	return m.k8sClient
+}
+
+func (m *MockManager) GetK8sExecutor() *k8s.Executor {
+	return m.k8sExecutor
+}
+
+func (m *MockManager) GetMetrics() *observability.MetricsRegistry {
+	if m.metrics == nil {
+		return observability.NewMetricsRegistry()
+	}
+	return m.metrics
 }
