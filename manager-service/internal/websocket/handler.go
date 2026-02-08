@@ -413,9 +413,20 @@ func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn 
 }
 
 // forwardIO handles bidirectional I/O between WebSocket and tmux session
-func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *websocket.Conn) error {
+func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn WebSocketConn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Create connection drain for graceful shutdown
+	drain := NewConnectionDrain(conn, DefaultDrainTimeouts())
+	defer func() {
+		// Start graceful drain when connection closes
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drain.timeouts.DrainTimeout)
+		defer drainCancel()
+		if err := drain.StartDrain(drainCtx); err != nil {
+			h.logger.Warn("Connection drain failed for session %s: %v", sess.AgentThreadID, err)
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -442,7 +453,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 			}
 
 			var msg Message
-			if err := conn.ReadJSON(&msg); err != nil {
+			if err := conn.(*websocket.Conn).ReadJSON(&msg); err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					h.logger.Debug("WebSocket closed normally during stdin read")
 				} else if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
@@ -510,14 +521,14 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 
 				// Send to client
 				if outMsg.msgType == "exit" {
-					h.sendExit(conn, outMsg.exitCode)
+					h.sendExit(conn.(*websocket.Conn), outMsg.exitCode)
 					return
 				}
-				h.sendOutput(conn, outMsg.msgType, outMsg.data)
+				h.sendOutput(conn.(*websocket.Conn), outMsg.msgType, outMsg.data)
 
 			case err := <-errorChan:
 				h.logger.Error("Exec error: %v", err)
-				h.sendError(conn, err.Error())
+				h.sendError(conn.(*websocket.Conn), err.Error())
 				return
 
 			case <-activityTicker.C:
