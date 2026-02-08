@@ -1,65 +1,86 @@
-# mbos-sandbox-v1 Makefile
-# Provides unified entry points for testing and development
+SHELL := /bin/bash
+.PHONY: help test test-integration build-manager build-runner build-cleaner build-image \
+	kind-up kind-down kind-status port-forward smoke clean-tools clean-test-deps
 
-.PHONY: help test test-unit test-integration test-e2e test-coverage
-.PHONY: docker-compose-up docker-compose-down test-clean
-.PHONY: build-sbx-client kind-status kind-up
-
-# Variables
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+SBX := $(ROOT)/sbx
 GO ?= go
-GO_TEST_OPTS ?= -v -cover -race
-COVERAGE_FILE ?= coverage.out
-COVERAGE_HTML ?= coverage.html
-DOCKER_COMPOSE_FILE ?= docker-compose.test.yaml
-MINIO_ENDPOINT ?= http://localhost:9000
+MANAGER_DIR := $(ROOT)/manager-service
+KUBECTL := $(ROOT)/tools/bin/linux-amd64/kubectl
 
-help: ## Show this help message
-	@echo "Available targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
+KIND_CLUSTER ?= sandbox-cluster
+KIND_PROXY ?= auto
+HARBOR_CA ?= auto
 
-test: test-unit test-integration ## Run all tests (unit + integration)
+MANAGER_URL ?= http://localhost:8080
+SERVICE_KEY ?= test-key-123
+RUNNER_IMAGE ?=
 
-test-unit: ## Run unit tests only
-	@echo "Running unit tests..."
-	cd manager-service && $(GO) test ./internal/... $(GO_TEST_OPTS)
+help:
+	@cat <<'EOF'
+Targets:
+  make test                # unit tests (skip integration)
+  make test-integration     # full test suite
+  make build-manager        # build manager image
+  make build-runner         # build runner image
+  make build-cleaner        # build gc/cleaner image
+  make build-image IMG=...  # build any image (manager|runner|gc)
+  make kind-up              # fetch tools + create kind cluster + build/deploy
+  make kind-down            # delete kind cluster
+  make kind-status          # cluster status
+  make port-forward         # port-forward manager service to localhost:8080
+  make smoke                # port-forward + run manager API smoke test
+  make clean-test-deps      # remove kind cluster + vendored tools
+EOF
 
-test-integration: docker-compose-up ## Run integration tests (starts dependencies)
-	@echo "Waiting for test dependencies..."
-	./scripts/wait-for-minio.sh
-	@echo "Running integration tests..."
-	cd manager-service && $(GO) test ./integration/... $(GO_TEST_OPTS) \
-		-run Integration
+test:
+	@cd "$(MANAGER_DIR)" && "$(GO)" test -tags=short ./...
 
-test-e2e: build-sbx-client ## Run E2E tests (requires kind cluster)
-	@echo "Checking kind cluster..."
-	./sbx dev status || { echo "Kind cluster not found. Run: ./sbx dev up"; exit 1; }
-	@echo "Running E2E tests..."
-	cd manager-service && $(GO) test ./e2e/... $(GO_TEST_OPTS) -run E2E
+test-integration:
+	@cd "$(MANAGER_DIR)" && "$(GO)" test ./...
 
-test-coverage: test ## Generate coverage report
-	@echo "Generating coverage report..."
-	cd manager-service && $(GO) test ./... -coverprofile=../$(COVERAGE_FILE)
-	$(GO) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
-	@echo "Coverage report: $(COVERAGE_HTML)"
+build-manager:
+	@$(SBX) images build --only manager
 
-docker-compose-up: ## Start Docker Compose test dependencies
-	@echo "Starting test dependencies..."
-	docker-compose -f $(DOCKER_COMPOSE_FILE) up -d
+build-runner:
+	@$(SBX) images build --only runner
 
-docker-compose-down: ## Stop Docker Compose test dependencies
-	@echo "Stopping test dependencies..."
-	docker-compose -f $(DOCKER_COMPOSE_FILE) down -v
+build-cleaner:
+	@$(SBX) images build --only gc
 
-test-clean: docker-compose-down ## Clean up test artifacts
-	@echo "Cleaning up..."
-	rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
+build-image:
+	@if [ -z "$(IMG)" ]; then \
+	  echo "IMG is required (manager|runner|gc)"; exit 2; \
+	fi
+	@$(SBX) images build --only "$(IMG)"
 
-build-sbx-client: ## Build the sandbox client binary
-	@echo "Building sbx-client..."
-	cd manager-service && $(GO) build -o /tmp/sbx-client ./cmd/sbx-client
+kind-up:
+	@$(SBX) tools fetch --proxy "$(KIND_PROXY)"
+	@$(SBX) dev up --force --proxy "$(KIND_PROXY)" --harbor-ca "$(HARBOR_CA)" --cluster "$(KIND_CLUSTER)"
 
-kind-status: ## Show kind cluster status
-	./sbx dev status
+kind-down:
+	@$(SBX) dev down --force --cluster "$(KIND_CLUSTER)"
 
-kind-up: ## Create and setup kind cluster
-	./sbx dev up
+kind-status:
+	@$(SBX) dev status --cluster "$(KIND_CLUSTER)"
+
+port-forward:
+	@"$(KUBECTL)" -n sandbox-system port-forward svc/sandbox-manager 8080:80
+
+smoke:
+	@bash -c 'set -euo pipefail; \
+	  K="$(KUBECTL)"; \
+	  if [ ! -x "$$K" ]; then echo "kubectl not found at $$K (run: make kind-up)"; exit 2; fi; \
+	  "$$K" -n sandbox-system port-forward svc/sandbox-manager 8080:80 >/tmp/sbx-portforward.log 2>&1 & \
+	  pf=$$!; \
+	  trap "kill $$pf >/dev/null 2>&1 || true" EXIT; \
+	  sleep 2; \
+	  args=("$${MANAGER_URL}" "$${SERVICE_KEY}"); \
+	  if [ -n "$${RUNNER_IMAGE}" ]; then args+=("$${RUNNER_IMAGE}"); fi; \
+	  "$(MANAGER_DIR)"/scripts/test-manager.sh "$${args[@]}"; \
+	'
+
+clean-tools:
+	@rm -rf "$(ROOT)/tools/bin"
+
+clean-test-deps: kind-down clean-tools
