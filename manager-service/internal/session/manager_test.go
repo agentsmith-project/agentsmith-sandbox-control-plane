@@ -129,7 +129,7 @@ func TestManager_Delete(t *testing.T) {
 		Config:        SecurityConfig{MaxLifetime: time.Hour},
 	})
 
-	m.Delete(sess.AgentThreadID)
+	_ = m.Delete(ctx, sess.AgentThreadID)
 
 	_, ok := m.Get(sess.AgentThreadID)
 	assert.False(t, ok)
@@ -298,7 +298,7 @@ func TestManager_GetSessionCount(t *testing.T) {
 	assert.Equal(t, 5, m.GetSessionCount())
 
 	// Delete one
-	m.Delete("at_0")
+	_ = m.Delete(ctx, "at_0")
 	assert.Equal(t, 4, m.GetSessionCount())
 }
 

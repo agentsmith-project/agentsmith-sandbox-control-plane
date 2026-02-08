@@ -98,7 +98,18 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn, r 
 	defer func() {
 		if agentThreadID != "" && isNewSession && !cleanupDone {
 			h.logger.Debug("Cleaning up new session %s", agentThreadID)
-			h.sessionManager.Delete(agentThreadID)
+
+			// Mark client disconnected
+			h.sessionManager.MarkClientDisconnected(agentThreadID)
+
+			// Check if session should be deleted (no active connections and expired)
+			sess, ok := h.sessionManager.Get(agentThreadID)
+			if ok && !sess.ClientConnected && sess.IsExpired() {
+				h.logger.Info("Deleting expired session %s", agentThreadID)
+				deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = h.sessionManager.Delete(deleteCtx, agentThreadID)
+			}
 			h.bufferManager.Delete(agentThreadID)
 			cleanupDone = true
 		}
@@ -329,7 +340,8 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 	snapshotKey := h.storageClient.GenerateSnapshotKey("ws_default", "proj_default", payload.AgentThreadID)
 	exists, err := h.storageClient.SnapshotExists(ctx, snapshotKey)
 	if err != nil {
-		h.logger.Warn("Failed to check snapshot existence for %s: %w (continuing without snapshot)", payload.AgentThreadID, err)
+		// Storage unavailable - fail explicitly instead of silently continuing
+		return nil, true, fmt.Errorf("failed to check snapshot existence for %s: %w", payload.AgentThreadID, err)
 	}
 
 	if exists {

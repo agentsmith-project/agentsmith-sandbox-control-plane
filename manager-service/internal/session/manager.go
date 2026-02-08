@@ -120,6 +120,12 @@ func (m *Manager) UpdateState(agentThreadID string, state State) error {
 		return fmt.Errorf("session not found: %s", agentThreadID)
 	}
 
+	// Use state machine for validation
+	if err := s.SetState(state); err != nil {
+		return err
+	}
+
+	// Also update the direct state field for backwards compatibility
 	s.State = state
 	return nil
 }
@@ -181,10 +187,34 @@ func (m *Manager) UpdateActivity(agentThreadID string) error {
 	return nil
 }
 
-func (m *Manager) Delete(agentThreadID string) {
+func (m *Manager) Delete(ctx context.Context, agentThreadID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	sess, ok := m.sessions[agentThreadID]
+	if !ok {
+		return fmt.Errorf("session not found: %s", agentThreadID)
+	}
+
+	// Transition to terminating
+	if err := sess.SetState(StateTerminating); err != nil {
+		m.logger.Warn("Failed to transition session to terminating: %v", err)
+	}
+
+	// Delete pod if exists (would need k8sClient - for now just log)
+	if sess.PodName != "" {
+		m.logger.Info("Would delete pod %s for session %s", sess.PodName, agentThreadID)
+		// TODO: Add k8sClient to Manager and call:
+		// if err := m.k8sClient.DeletePod(ctx, sess.PodNamespace, sess.PodName); err != nil {
+		//     m.logger.Error("Failed to delete pod %s: %v", sess.PodName, err)
+		// }
+	}
+
+	// Remove from map
 	delete(m.sessions, agentThreadID)
+
+	m.logger.Info("Deleted session: %s", agentThreadID)
+	return nil
 }
 
 // StartCleanup starts a background goroutine that periodically cleans up expired sessions.

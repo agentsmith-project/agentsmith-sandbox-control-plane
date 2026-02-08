@@ -88,3 +88,27 @@ func (s *Session) GetExpiresAt() time.Time {
 
 	return maxExpiry
 }
+
+// GetState returns the current state of the session
+func (s *Session) GetState() State {
+	if s.stateMachine == nil {
+		return StateCreating
+	}
+	return s.stateMachine.CurrentState()
+}
+
+// SetState attempts to transition the session to a new state
+func (s *Session) SetState(state State) error {
+	if s.stateMachine == nil {
+		s.stateMachine = NewStateMachine(StateCreating)
+	}
+	return s.stateMachine.Transition(state)
+}
+
+// CanTransition checks if a transition to the target state is allowed
+func (s *Session) CanTransition(state State) bool {
+	if s.stateMachine == nil {
+		return state == StateCreating
+	}
+	return s.stateMachine.CanTransition(state)
+}

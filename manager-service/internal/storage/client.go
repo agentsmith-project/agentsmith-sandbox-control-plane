@@ -91,13 +91,13 @@ func (c *Client) DeleteSnapshot(ctx context.Context, key string) error {
 func (c *Client) SnapshotExists(ctx context.Context, key string) (bool, error) {
 	_, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
+		// ToErrorResponse returns a zero-value ErrorResponse for non-minio errors
+		// Check if Code field is set (non-empty) to identify MinIO errors
 		errResp := minio.ToErrorResponse(err)
-		// Check if this is a valid minio error response (Code is set)
-		// ToErrorResponse returns a zero-value ErrorResponse for non-minio errors,
-		// with Code == "" (empty string), so we check for "NoSuchKey" explicitly
 		if errResp.Code == "NoSuchKey" {
 			return false, nil
 		}
+		// Return the original error for non-MinIO errors or other MinIO errors
 		return false, err
 	}
 	return true, nil
