@@ -7,15 +7,16 @@ import (
 
 // Config is the main configuration structure
 type Config struct {
-	Version    int           `yaml:"version"`
-	Server     ServerConfig  `yaml:"server"`
-	Auth       AuthConfig    `yaml:"auth"`
-	Kubernetes K8sConfig     `yaml:"kubernetes"`
-	Sandbox    SandboxConfig `yaml:"sandbox"`
-	Exec       ExecConfig    `yaml:"exec"`
-	Files      FilesConfig   `yaml:"files"`
-	Storage    StorageConfig `yaml:"storage"`
-	Buffer     BufferConfig  `yaml:"buffer"`
+	Version    int            `yaml:"version"`
+	Server     ServerConfig    `yaml:"server"`
+	Auth       AuthConfig     `yaml:"auth"`
+	Kubernetes K8sConfig      `yaml:"kubernetes"`
+	Sandbox    SandboxConfig  `yaml:"sandbox"`
+	Exec       ExecConfig     `yaml:"exec"`
+	Files      FilesConfig    `yaml:"files"`
+	Storage    StorageConfig  `yaml:"storage"`
+	Buffer     BufferConfig   `yaml:"buffer"`
+	RateLimit  RateLimitConfig `yaml:"rateLimit"`
 	WebSocket  WebSocketConfig `yaml:"websocket"`
 }
 
@@ -195,6 +196,11 @@ type BufferConfig struct {
 	Capacity int `yaml:"capacity"`
 }
 
+// RateLimitConfig contains rate limiting configuration
+type RateLimitConfig struct {
+	RequestsPerMinute int `yaml:"requestsPerMinute"`
+}
+
 // WebSocketConfig contains WebSocket configuration
 type WebSocketConfig struct {
 	ReadBufferSize          int      `yaml:"readBufferSize"`
@@ -359,6 +365,9 @@ func DefaultConfig() *Config {
 		},
 		Buffer: BufferConfig{
 			Capacity: 10000,
+		},
+		RateLimit: RateLimitConfig{
+			RequestsPerMinute: 60,
 		},
 		WebSocket: WebSocketConfig{
 			ReadBufferSize:          1024,

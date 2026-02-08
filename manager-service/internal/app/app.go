@@ -50,6 +50,7 @@ type Manager struct {
 	wsHandler        *websocket.Handler
 	finalizerHandler *finalizer.Handler
 	rateLimiter      *ratelimit.Limiter
+	perUserLimiter  *ratelimit.UserLimiter
 }
 
 // Main is the entry point for the sandbox manager.
@@ -237,6 +238,7 @@ func mainImpl() {
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
 		rateLimiter:      rateLimiter,
+		perUserLimiter:  ratelimit.NewPerUserLimiter(cfg.RateLimit.RequestsPerMinute, time.Minute),
 		ctx:              mgrCtx,
 		cancel:           mgrCancel,
 	}
@@ -334,13 +336,14 @@ func (m *Manager) setupHTTPServer() {
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
 	v1Handler := m.buildV1Handler()
+	var wsHandler http.Handler = http.HandlerFunc(m.wsHandler.ServeHTTP)
 	if m.cfg.Auth.Enabled {
 		if m.tokenAuth != nil {
 			// Use token-based auth
 			authMiddleware := auth.TokenAuthMiddleware(m.tokenAuth)
 			v1Handler = authMiddleware(v1Handler)
 			// WebSocket also uses token auth via header
-			mux.Handle("/ws", authMiddleware(http.HandlerFunc(m.wsHandler.ServeHTTP)))
+			wsHandler = authMiddleware(wsHandler)
 		} else {
 			// Fall back to service key auth
 			authMiddleware := auth.ServiceKeyMiddleware(
@@ -352,17 +355,24 @@ func (m *Manager) setupHTTPServer() {
 			)
 			v1Handler = authMiddleware(v1Handler)
 			// WebSocket uses service key auth via header (not query parameter)
-			mux.Handle("/ws", authMiddleware(http.HandlerFunc(m.wsHandler.ServeHTTP)))
+			wsHandler = authMiddleware(wsHandler)
 		}
-	} else {
-		// Auth disabled, direct WebSocket handler
-		mux.Handle("/ws", http.HandlerFunc(m.wsHandler.ServeHTTP))
 	}
+
+	// Apply per-user rate limiting to WebSocket
+	if m.perUserLimiter != nil {
+		wsHandler = ratelimit.PerUserRateLimitMiddleware(m.perUserLimiter)(wsHandler)
+	}
+
+	mux.Handle("/ws", wsHandler)
 
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
 	v1Handler = reqIDMiddleware(v1Handler)
 	v1Handler = m.observabilityMiddleware(v1Handler)
 	v1Handler = m.rateLimiter.Middleware(v1Handler)
+
+	// Apply per-user rate limiting after authentication
+	v1Handler = ratelimit.PerUserRateLimitMiddleware(m.perUserLimiter)(v1Handler)
 
 	mux.Handle("/v1/", v1Handler)
 
