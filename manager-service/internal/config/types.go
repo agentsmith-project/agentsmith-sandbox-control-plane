@@ -378,3 +378,11 @@ func DefaultConfig() *Config {
 		},
 	}
 }
+
+// DeepCopy creates a deep copy of the Config
+func (c *Config) DeepCopy() *Config {
+	copy := *c
+	// Storage is the only field that needs deep copying since it contains sensitive data
+	copy.Storage = c.Storage
+	return &copy
+}

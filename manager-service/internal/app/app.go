@@ -333,7 +333,18 @@ func (m *Manager) setupHTTPServer() {
 		}
 	}
 
-	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
+	// Setup debug config with authentication if enabled
+	debugHandler := http.HandlerFunc(m.handleDebugConfig)
+	if m.cfg.Auth.Enabled {
+		debugHandler = auth.ServiceKeyMiddleware(
+			m.authValidator,
+			m.cfg.Auth.HeaderName,
+			m.cfg.Auth.AcceptAuthorization,
+			m.cfg.Auth.AuthorizationScheme,
+			http.StatusUnauthorized,
+		)(debugHandler)
+	}
+	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, debugHandler)
 
 	v1Handler := m.buildV1Handler()
 	var wsHandler http.Handler = http.HandlerFunc(m.wsHandler.ServeHTTP)
@@ -547,6 +558,17 @@ func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg, meta := m.cfgWatcher.GetCurrent()
 
+	// Create a copy of the config to avoid modifying the original
+	configCopy := cfg.DeepCopy()
+
+	// Redact sensitive fields
+	if configCopy.Storage.AccessKey != "" {
+		configCopy.Storage.AccessKey = "***REDACTED***"
+	}
+	if configCopy.Storage.SecretKey != "" {
+		configCopy.Storage.SecretKey = "***REDACTED***"
+	}
+
 	resp := httpapi.DebugConfigResponse{
 		Meta: httpapi.DebugConfigMeta{
 			SchemaVersion: meta.SchemaVersion,
@@ -556,7 +578,7 @@ func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 			ReloadCount:   meta.ReloadCount,
 			LastError:     convertConfigError(meta.LastError),
 		},
-		Config: sanitizeConfig(cfg),
+		Config: sanitizeConfig(configCopy),
 		Boot: httpapi.DebugConfigBoot{
 			ConfigPath:       os.Getenv("CONFIG_PATH"),
 			DebounceDuration: os.Getenv("CONFIG_RELOAD_DEBOUNCE"),
