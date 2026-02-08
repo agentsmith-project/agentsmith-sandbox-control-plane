@@ -36,6 +36,7 @@ type PodSpec struct {
 	ContainerName         string
 	Workdir               string
 	Command               string
+	ShellType             string // e.g., "bash", "zsh", "sh", "fish", "nu"
 	Env                   map[string]string
 	ResourceRequests      ResourceRequests
 	ResourceLimits        ResourceLimits
