@@ -1,3 +1,10 @@
+# Build stage for shell-bridge
+FROM golang:1.21-alpine AS shellbridge
+WORKDIR /src
+COPY shell-bridge/ .
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o /shellb ./cmd/shellb
+
 FROM ubuntu:22.04 AS base
 
 # 代理配置（可选，仅用于构建时，不会保留在最终镜像中）
@@ -199,6 +206,9 @@ RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="$
 
 FROM base AS final
 
+# Copy shell-bridge binary
+COPY --from=shellbridge /shellb /usr/local/bin/shellb
+
 # 创建用户和配置（合并操作以减少层数）
 RUN groupadd -g 10001 runner && \
     useradd -m -u 10001 -g 10001 runner && \
@@ -216,4 +226,4 @@ WORKDIR /workspace
 
 USER runner
 ENTRYPOINT ["/usr/bin/tini","--"]
-CMD ["bash","-lc","tail -f /dev/null"]
+CMD ["/usr/local/bin/shellb","--shell=bash","--port=8080","--workdir=/workspace"]
