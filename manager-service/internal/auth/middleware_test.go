@@ -302,3 +302,31 @@ func TestCombineMiddleware_Empty(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+func TestServiceKeyMiddleware_SetsUserContext(t *testing.T) {
+	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
+	require.NoError(t, err)
+
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+
+	var capturedUserCtx *UserContext
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userCtx, ok := GetUserContext(r)
+		require.True(t, ok, "User context should be set")
+		capturedUserCtx = userCtx
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Service-Key", "valid-key-123")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotNil(t, capturedUserCtx, "User context should not be nil")
+	assert.Equal(t, "service-key-auth", capturedUserCtx.UserID, "UserID should be 'service-key-auth'")
+	assert.NotEmpty(t, capturedUserCtx.SessionID, "SessionID should be generated")
+	assert.NotEmpty(t, capturedUserCtx.AuditID, "AuditID should be set")
+	assert.False(t, capturedUserCtx.IsExpired(), "User context should not be expired")
+}

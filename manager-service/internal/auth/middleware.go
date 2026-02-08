@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ErrorCode represents an authentication error code
@@ -70,8 +71,28 @@ func ServiceKeyMiddleware(validator *ServiceKeyValidator, headerName string, acc
 				return
 			}
 
-			// Key is valid, proceed to next handler
-			next.ServeHTTP(w, r)
+			// Key is valid, create user context for service key authentication
+			sessionID, err := generateSessionID()
+			if err != nil {
+				log.Printf("Auth: failed to generate session ID: %v", err)
+				writeAuthError(w, ErrServiceKeyInvalid, "Failed to create session", getRequestID(r), http.StatusInternalServerError)
+				return
+			}
+
+			// Create user context for service key auth
+			// Service key auth uses a generic user ID since there's no specific user
+			userCtx := &UserContext{
+				UserID:      "service-key-auth",
+				SessionID:   sessionID,
+				Permissions: []Permission{}, // Empty permissions - authorization is handled separately
+				AuditID:     sessionID,      // Use session ID as audit ID for tracking
+				ExpiresAt:   time.Now().Add(24 * time.Hour), // Service key sessions expire after 24 hours
+				CreatedAt:   time.Now(),
+			}
+
+			// Add user context to request context
+			ctx := context.WithValue(r.Context(), UserContextKey, userCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
