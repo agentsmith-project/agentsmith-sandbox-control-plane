@@ -339,7 +339,7 @@ func (m *Manager) setupHTTPServer() {
 			// Use token-based auth
 			authMiddleware := auth.TokenAuthMiddleware(m.tokenAuth)
 			v1Handler = authMiddleware(v1Handler)
-			// WebSocket also uses token auth
+			// WebSocket also uses token auth via header
 			mux.Handle("/ws", authMiddleware(http.HandlerFunc(m.wsHandler.ServeHTTP)))
 		} else {
 			// Fall back to service key auth
@@ -351,20 +351,8 @@ func (m *Manager) setupHTTPServer() {
 				m.cfg.Auth.FailStatusCode,
 			)
 			v1Handler = authMiddleware(v1Handler)
-			// WebSocket uses service key auth via query parameter
-			mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				// Get service key from URL query parameter
-				serviceKey := r.URL.Query().Get("service_key")
-
-				// Validate service key
-				if !m.authValidator.Validate(serviceKey) {
-					http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
-					return
-				}
-
-				// Auth successful, forward to WebSocket handler
-				m.wsHandler.ServeHTTP(w, r)
-			})
+			// WebSocket uses service key auth via header (not query parameter)
+			mux.Handle("/ws", authMiddleware(http.HandlerFunc(m.wsHandler.ServeHTTP)))
 		}
 	} else {
 		// Auth disabled, direct WebSocket handler
