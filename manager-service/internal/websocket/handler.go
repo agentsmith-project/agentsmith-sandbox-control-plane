@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/buffer"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
@@ -28,6 +29,7 @@ type Handler struct {
 	logger         observability.Logger
 	cfg            *config.Config
 	upgrader       *websocket.Upgrader
+	authorizer     *auth.Authorizer
 }
 
 // NewHandler creates a new WebSocket handler
@@ -38,6 +40,7 @@ func NewHandler(
 	storageClient *storage.Client,
 	podNamespace string,
 	cfg *config.Config,
+	authorizer *auth.Authorizer,
 ) *Handler {
 	// Build WebSocket config from app config
 	wsCfg := &Config{
@@ -61,6 +64,7 @@ func NewHandler(
 		logger:         observability.GetLogger(),
 		cfg:            cfg,
 		upgrader:       wsCfg.Upgrader(),
+		authorizer:     authorizer,
 	}
 }
 
@@ -79,11 +83,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("WebSocket connection established from %s", r.RemoteAddr)
 
 	// Handle connection
-	h.handleConnection(ctx, conn)
+	h.handleConnection(ctx, conn, r)
 }
 
 // handleConnection manages the WebSocket connection lifecycle
-func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
+func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn, r *http.Request) {
 	var agentThreadID string
 	var sess *session.Session
 	var isNewSession bool // Track if we created a new session
@@ -127,7 +131,7 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 			}
 			agentThreadID = payload.AgentThreadID
 
-			sess, isNewSession, err = h.handleCreate(ctx, payload, conn)
+			sess, isNewSession, err = h.handleCreate(ctx, payload, conn, r)
 			if err != nil {
 				h.sendError(conn, fmt.Sprintf("Create failed: %v", err))
 				if isContextCanceled(err) {
@@ -154,7 +158,7 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 	conn.SetReadDeadline(time.Time{})
 
 	// Attach to existing session
-	if err := h.attachSession(ctx, agentThreadID, conn); err != nil {
+	if err := h.attachSession(ctx, agentThreadID, conn, r); err != nil {
 		h.sendError(conn, fmt.Sprintf("Attach failed: %v", err))
 		if isContextCanceled(err) {
 			h.logger.Debug("Attach canceled for session %s: %w", agentThreadID, err)
@@ -178,9 +182,21 @@ func (h *Handler) parseCreate(data json.RawMessage) (CreatePayload, error) {
 
 // handleCreate processes the create message and creates/attaches to a session
 // Returns the session, whether it's a new session (vs. existing), and any error
-func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn *websocket.Conn) (*session.Session, bool, error) {
+func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn *websocket.Conn, r *http.Request) (*session.Session, bool, error) {
+	// Get user context from request
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		return nil, true, fmt.Errorf("unauthorized: no user context")
+	}
+
 	// Check if session exists
 	if sess, ok := h.sessionManager.Get(payload.AgentThreadID); ok {
+		// Verify user owns this session
+		if sess.OwnerID != "" && sess.OwnerID != userCtx.UserID {
+			h.logger.Warn("User %s attempted to access session %s owned by %s", userCtx.UserID, payload.AgentThreadID, sess.OwnerID)
+			return nil, false, fmt.Errorf("forbidden: not authorized to access this session")
+		}
+
 		// Existing session, just attach
 		h.logger.Info("Attaching to existing session %s", payload.AgentThreadID)
 		h.sendStatus(conn, StatusPayload{
@@ -210,6 +226,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		Command:       payload.Command,
 		Env:           payload.Env,
 		PodNamespace:  h.podNamespace,
+		OwnerID:       userCtx.UserID,
 		Config: session.SecurityConfig{
 			AllowNetworkAccess:  payload.Config.AllowNetworkAccess,
 			ReadonlyFilesystem:  payload.Config.ReadonlyFilesystem,
@@ -353,10 +370,22 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 }
 
 // attachSession attaches to an existing session and starts bidirectional I/O
-func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn *websocket.Conn) error {
+func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn *websocket.Conn, r *http.Request) error {
+	// Get user context from request
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		return fmt.Errorf("unauthorized: no user context")
+	}
+
 	sess, ok := h.sessionManager.Get(agentThreadID)
 	if !ok {
 		return fmt.Errorf("session not found: %s", agentThreadID)
+	}
+
+	// Verify user owns this session
+	if sess.OwnerID != "" && sess.OwnerID != userCtx.UserID {
+		h.logger.Warn("User %s attempted to attach to session %s owned by %s", userCtx.UserID, agentThreadID, sess.OwnerID)
+		return fmt.Errorf("forbidden: not authorized to access this session")
 	}
 
 	// Mark as connected

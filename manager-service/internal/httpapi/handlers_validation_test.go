@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
@@ -496,4 +497,8 @@ func (m *MockManager) GetMetrics() *observability.MetricsRegistry {
 		return observability.NewMetricsRegistry()
 	}
 	return m.metrics
+}
+
+func (m *MockManager) GetAuthorizer() *auth.Authorizer {
+	return nil
 }

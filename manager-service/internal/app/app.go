@@ -36,6 +36,7 @@ type Manager struct {
 	k8sExecutor   *k8s.Executor
 	authValidator *auth.ServiceKeyValidator
 	tokenAuth     *auth.TokenAuthenticator
+	authorizer    *auth.Authorizer
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
@@ -174,6 +175,10 @@ func mainImpl() {
 	}
 	log.Printf("Storage client initialized successfully")
 
+	// Initialize authorizer
+	log.Printf("Initializing authorizer...")
+	authorizer := auth.NewAuthorizer(sessionManager, k8sClient)
+
 	// Initialize WebSocket handler with all dependencies
 	log.Printf("Initializing WebSocket handler...")
 	wsHandler := websocket.NewHandler(
@@ -183,6 +188,7 @@ func mainImpl() {
 		storageClient,
 		cfg.Sandbox.Defaults.Namespace,
 		cfg,
+		authorizer,
 	)
 
 	// Initialize rate limiter
@@ -222,6 +228,7 @@ func mainImpl() {
 		k8sExecutor:      k8sExecutor,
 		authValidator:    authValidator,
 		tokenAuth:        tokenAuth,
+		authorizer:       authorizer,
 		healthChecker:    observability.NewHealthChecker(),
 		metrics:          observability.GetMetrics(),
 		sessionManager:   sessionManager,
@@ -402,6 +409,10 @@ func (m *Manager) GetK8sExecutor() *k8s.Executor {
 
 func (m *Manager) GetMetrics() *observability.MetricsRegistry {
 	return m.metrics
+}
+
+func (m *Manager) GetAuthorizer() *auth.Authorizer {
+	return m.authorizer
 }
 
 func (m *Manager) GetSessionManager() *session.Manager {

@@ -16,6 +16,8 @@ const (
 	// Auth errors
 	ErrServiceKeyMissing ErrorCode = "SERVICE_KEY_MISSING"
 	ErrServiceKeyInvalid ErrorCode = "SERVICE_KEY_INVALID"
+	ErrUnauthorized      ErrorCode = "UNAUTHORIZED"
+	ErrForbidden         ErrorCode = "FORBIDDEN"
 
 	// Config errors
 	ErrConfigNotLoaded ErrorCode = "CONFIG_NOT_LOADED"
@@ -50,9 +52,11 @@ const (
 
 // HTTPStatusMapping maps error codes to HTTP status codes
 var HTTPStatusMapping = map[ErrorCode]int{
-	// Auth - 401
+	// Auth - 401/403
 	ErrServiceKeyMissing: http.StatusUnauthorized,
 	ErrServiceKeyInvalid: http.StatusUnauthorized,
+	ErrUnauthorized:      http.StatusUnauthorized,
+	ErrForbidden:         http.StatusForbidden,
 
 	// Config/Ready - 503
 	ErrConfigNotLoaded: http.StatusServiceUnavailable,
@@ -92,6 +96,10 @@ func (e ErrorCode) DefaultMessage() string {
 		return "Service key is required"
 	case ErrServiceKeyInvalid:
 		return "Service key is invalid"
+	case ErrUnauthorized:
+		return "Authentication required"
+	case ErrForbidden:
+		return "Access forbidden"
 	case ErrConfigNotLoaded:
 		return "Configuration not loaded"
 	case ErrNotReady:

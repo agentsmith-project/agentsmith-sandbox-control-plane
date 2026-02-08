@@ -41,6 +41,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 		LastActivityAt:  now,
 		ExpiresAt:       now.Add(req.Config.MaxLifetime),
 		ClientConnected: false,
+		OwnerID:         req.OwnerID,
 	}
 
 	m.sessions[req.AgentThreadID] = sess
@@ -240,6 +241,33 @@ func (m *Manager) GetSessionCount() int {
 	return len(m.sessions)
 }
 
+// ListByOwner returns all sessions owned by a specific user
+func (m *Manager) ListByOwner(ownerID string) []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var sessions []*Session
+	for _, sess := range m.sessions {
+		if sess.OwnerID == ownerID {
+			sessions = append(sessions, sess)
+		}
+	}
+	return sessions
+}
+
+// GetByPodName finds a session by its pod name
+func (m *Manager) GetByPodName(podName string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, sess := range m.sessions {
+		if sess.PodName == podName {
+			return sess, true
+		}
+	}
+	return nil, false
+}
+
 type CreateRequest struct {
 	AgentThreadID  string
 	Image          string
@@ -247,4 +275,5 @@ type CreateRequest struct {
 	Env            map[string]string
 	PodNamespace   string
 	Config         SecurityConfig
+	OwnerID        string // Owner ID from auth context
 }

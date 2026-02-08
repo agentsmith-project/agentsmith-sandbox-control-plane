@@ -32,6 +32,7 @@ type Session struct {
 	LastActivityAt    time.Time
 	ExpiresAt         time.Time
 	ClientConnected   bool
+	OwnerID           string // Track which user owns this session
 }
 
 type SecurityConfig struct {

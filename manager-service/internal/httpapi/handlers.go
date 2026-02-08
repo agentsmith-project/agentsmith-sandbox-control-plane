@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/exec"
 	"github.com/sandbox/manager/internal/files"
@@ -23,6 +24,7 @@ type Manager interface {
 	GetK8sClient() *k8s.Client
 	GetK8sExecutor() *k8s.Executor
 	GetMetrics() *observability.MetricsRegistry
+	GetAuthorizer() *auth.Authorizer
 }
 
 // Handlers contains all the HTTP handlers
@@ -32,6 +34,7 @@ type Handlers struct {
 	k8sClient   *k8s.Client
 	k8sExecutor *k8s.Executor
 	metrics     *observability.MetricsRegistry
+	authorizer  *auth.Authorizer
 }
 
 // NewHandlers creates a new handlers instance
@@ -42,6 +45,7 @@ func NewHandlers(mgr Manager) *Handlers {
 		k8sClient:   mgr.GetK8sClient(),
 		k8sExecutor: mgr.GetK8sExecutor(),
 		metrics:     mgr.GetMetrics(),
+		authorizer:  mgr.GetAuthorizer(),
 	}
 }
 
@@ -119,9 +123,21 @@ func (h *Handlers) HandleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 // HandleTouch handles POST /v1/sandboxes/{sessionId}/touch
 func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -166,9 +182,21 @@ func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
 
 // HandleExec handles POST /v1/sandboxes/{sessionId}/exec
 func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -300,9 +328,21 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 // HandleUpload handles POST /v1/sandboxes/{sessionId}/files/upload
 func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -365,9 +405,21 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 // HandleDownload handles GET /v1/sandboxes/{sessionId}/files/download
 func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -456,9 +508,21 @@ func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 // HandleDelete handles DELETE /v1/sandboxes/{sessionId}
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
