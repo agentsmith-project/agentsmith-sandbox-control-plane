@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
+	"github.com/sandbox/manager/internal/resources"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
@@ -51,6 +52,7 @@ type Manager struct {
 	finalizerHandler *finalizer.Handler
 	rateLimiter      *ratelimit.Limiter
 	perUserLimiter  *ratelimit.UserLimiter
+	resourceTracker  *resources.ResourceTracker
 }
 
 // Main is the entry point for the sandbox manager.
@@ -221,6 +223,9 @@ func mainImpl() {
 	// Create manager lifecycle context
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
+	// Initialize resource tracker
+	resourceTracker := resources.NewResourceTracker(observability.GetLogger())
+
 	mgr := &Manager{
 		cfg:              cfg,
 		cfgMeta:          cfgMeta,
@@ -239,6 +244,7 @@ func mainImpl() {
 		finalizerHandler: finalizerHandler,
 		rateLimiter:      rateLimiter,
 		perUserLimiter:  ratelimit.NewPerUserLimiter(cfg.RateLimit.RequestsPerMinute, time.Minute),
+		resourceTracker:  resourceTracker,
 		ctx:              mgrCtx,
 		cancel:           mgrCancel,
 	}
@@ -336,15 +342,17 @@ func (m *Manager) setupHTTPServer() {
 	// Setup debug config with authentication if enabled
 	debugHandler := http.HandlerFunc(m.handleDebugConfig)
 	if m.cfg.Auth.Enabled {
-		debugHandler = auth.ServiceKeyMiddleware(
+		authHandler := auth.ServiceKeyMiddleware(
 			m.authValidator,
 			m.cfg.Auth.HeaderName,
 			m.cfg.Auth.AcceptAuthorization,
 			m.cfg.Auth.AuthorizationScheme,
 			http.StatusUnauthorized,
 		)(debugHandler)
+		mux.Handle(m.cfg.Server.Debug.ConfigPath, authHandler)
+	} else {
+		mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, debugHandler)
 	}
-	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, debugHandler)
 
 	v1Handler := m.buildV1Handler()
 	var wsHandler http.Handler = http.HandlerFunc(m.wsHandler.ServeHTTP)
@@ -430,6 +438,10 @@ func (m *Manager) GetSessionManager() *session.Manager {
 
 func (m *Manager) GetBufferManager() *buffer.Manager {
 	return m.bufferManager
+}
+
+func (m *Manager) GetResourceTracker() *resources.ResourceTracker {
+	return m.resourceTracker
 }
 
 func (m *Manager) GetStorageClient() *storage.Client {
@@ -632,6 +644,13 @@ func (m *Manager) waitForShutdown() {
 
 	if err := m.httpServer.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Shutdown resource tracker
+	if m.resourceTracker != nil {
+		if err := m.resourceTracker.Shutdown(ctx); err != nil {
+			log.Printf("ResourceTracker shutdown error: %v", err)
+		}
 	}
 
 	log.Printf("Shutdown complete")
