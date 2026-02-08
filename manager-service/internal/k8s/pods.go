@@ -368,10 +368,25 @@ func buildContainer(spec *PodSpec) v1.Container {
 		Resources:       buildResources(spec.ResourceRequests, spec.ResourceLimits),
 	}
 
-	// Use tmux wrapper script if command is provided
-	if spec.Command != "" {
+	// Use shell-bridge if ShellType is specified
+	if spec.ShellType != "" {
+		shellType := spec.ShellType
+		workdir := spec.Workdir
+		if workdir == "" {
+			workdir = "/workspace"
+		}
+
+		container.Command = []string{"/shellb"}
+		container.Args = []string{
+			"--shell=" + shellType,
+			"--port=8080",
+			"--workdir=" + workdir,
+		}
+	} else if spec.Command != "" {
+		// Use tmux wrapper script if command is provided (backward compatibility)
 		container.Command = []string{"sh", "-c", buildTmuxWrapperScript(spec.Command)}
 	} else {
+		// Default: keep container alive
 		container.Command = []string{"sh", "-lc", "tail -f /dev/null"}
 	}
 
