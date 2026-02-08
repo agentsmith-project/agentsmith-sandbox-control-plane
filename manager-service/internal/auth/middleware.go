@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -12,6 +13,9 @@ type ErrorCode string
 const (
 	ErrServiceKeyMissing ErrorCode = "SERVICE_KEY_MISSING"
 	ErrServiceKeyInvalid ErrorCode = "SERVICE_KEY_INVALID"
+	ErrTokenMissing      ErrorCode = "TOKEN_MISSING"
+	ErrTokenInvalid      ErrorCode = "TOKEN_INVALID"
+	ErrTokenExpired      ErrorCode = "TOKEN_EXPIRED"
 )
 
 // ErrorResponse represents a standard error response
@@ -123,4 +127,58 @@ func CombineMiddleware(middlewares ...func(http.Handler) http.Handler) func(http
 		}
 		return next
 	}
+}
+
+// TokenAuthMiddleware validates JWT tokens from Authorization header
+func TokenAuthMiddleware(authenticator *TokenAuthenticator) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				requestID := getRequestID(r)
+				log.Printf("Auth: missing Authorization header (requestId: %s, path: %s)", requestID, r.URL.Path)
+				writeAuthError(w, ErrTokenMissing, "Authorization header required", requestID, http.StatusUnauthorized)
+				return
+			}
+
+			// Expected format: "Bearer <token>"
+			if len(authHeader) < 7 || authHeader[:7] != "Bearer " {
+				requestID := getRequestID(r)
+				log.Printf("Auth: invalid authorization header format (requestId: %s, path: %s)", requestID, r.URL.Path)
+				writeAuthError(w, ErrTokenInvalid, "Invalid authorization header format", requestID, http.StatusUnauthorized)
+				return
+			}
+
+			token := authHeader[7:]
+			userCtx, err := authenticator.ValidateToken(token)
+			if err != nil {
+				requestID := getRequestID(r)
+				log.Printf("Auth: invalid or expired token (requestId: %s, path: %s): %v", requestID, r.URL.Path, err)
+				writeAuthError(w, ErrTokenInvalid, "Invalid or expired token", requestID, http.StatusUnauthorized)
+				return
+			}
+
+			if userCtx.IsExpired() {
+				requestID := getRequestID(r)
+				log.Printf("Auth: token expired (requestId: %s, path: %s)", requestID, r.URL.Path)
+				writeAuthError(w, ErrTokenExpired, "Token expired", requestID, http.StatusUnauthorized)
+				return
+			}
+
+			// Add user context to request context
+			ctx := context.WithValue(r.Context(), UserContextKey, userCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// Context key for user context
+type contextKey string
+
+const UserContextKey contextKey = "user_context"
+
+// GetUserContext retrieves user context from request context
+func GetUserContext(r *http.Request) (*UserContext, bool) {
+	userCtx, ok := r.Context().Value(UserContextKey).(*UserContext)
+	return userCtx, ok
 }

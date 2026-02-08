@@ -35,6 +35,7 @@ type Manager struct {
 	k8sClient     *k8s.Client
 	k8sExecutor   *k8s.Executor
 	authValidator *auth.ServiceKeyValidator
+	tokenAuth     *auth.TokenAuthenticator
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
@@ -109,6 +110,21 @@ func mainImpl() {
 		log.Fatalf("Failed to initialize service key validator: %v", err)
 	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
+
+	// Initialize token authenticator if JWT_SECRET_KEY is set
+	var tokenAuth *auth.TokenAuthenticator
+	if secretKey := os.Getenv("JWT_SECRET_KEY"); secretKey != "" {
+		tokenExpiration := 24 * time.Hour
+		if expStr := os.Getenv("JWT_EXPIRATION"); expStr != "" {
+			if d, err := time.ParseDuration(expStr); err == nil {
+				tokenExpiration = d
+			} else {
+				log.Printf("Warning: invalid JWT_EXPIRATION %q, using default 24h", expStr)
+			}
+		}
+		tokenAuth = auth.NewTokenAuthenticator("mbos-sandbox", []byte(secretKey), tokenExpiration)
+		log.Printf("Token authenticator initialized (expiration=%v)", tokenExpiration)
+	}
 
 	cfgWatcher := config.NewWatcher(
 		bootCfg.ConfigPath,
@@ -199,6 +215,7 @@ func mainImpl() {
 		k8sClient:        k8sClient,
 		k8sExecutor:      k8sExecutor,
 		authValidator:    authValidator,
+		tokenAuth:        tokenAuth,
 		healthChecker:    observability.NewHealthChecker(),
 		metrics:          observability.GetMetrics(),
 		sessionManager:   sessionManager,
@@ -303,31 +320,42 @@ func (m *Manager) setupHTTPServer() {
 
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
-	// Add WebSocket route with service key authentication via query parameter
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// 从 URL 参数获取 service key
-		serviceKey := r.URL.Query().Get("service_key")
-
-		// 验证 service key
-		if !m.authValidator.Validate(serviceKey) {
-			http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
-			return
-		}
-
-		// 认证通过，转发到 WebSocket handler
-		m.wsHandler.ServeHTTP(w, r)
-	})
-
 	v1Handler := m.buildV1Handler()
 	if m.cfg.Auth.Enabled {
-		authMiddleware := auth.ServiceKeyMiddleware(
-			m.authValidator,
-			m.cfg.Auth.HeaderName,
-			m.cfg.Auth.AcceptAuthorization,
-			m.cfg.Auth.AuthorizationScheme,
-			m.cfg.Auth.FailStatusCode,
-		)
-		v1Handler = authMiddleware(v1Handler)
+		if m.tokenAuth != nil {
+			// Use token-based auth
+			authMiddleware := auth.TokenAuthMiddleware(m.tokenAuth)
+			v1Handler = authMiddleware(v1Handler)
+			// WebSocket also uses token auth
+			mux.Handle("/ws", authMiddleware(http.HandlerFunc(m.wsHandler.ServeHTTP)))
+		} else {
+			// Fall back to service key auth
+			authMiddleware := auth.ServiceKeyMiddleware(
+				m.authValidator,
+				m.cfg.Auth.HeaderName,
+				m.cfg.Auth.AcceptAuthorization,
+				m.cfg.Auth.AuthorizationScheme,
+				m.cfg.Auth.FailStatusCode,
+			)
+			v1Handler = authMiddleware(v1Handler)
+			// WebSocket uses service key auth via query parameter
+			mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+				// 从 URL 参数获取 service key
+				serviceKey := r.URL.Query().Get("service_key")
+
+				// 验证 service key
+				if !m.authValidator.Validate(serviceKey) {
+					http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
+					return
+				}
+
+				// 认证通过，转发到 WebSocket handler
+				m.wsHandler.ServeHTTP(w, r)
+			})
+		}
+	} else {
+		// Auth disabled, direct WebSocket handler
+		mux.Handle("/ws", http.HandlerFunc(m.wsHandler.ServeHTTP))
 	}
 
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
