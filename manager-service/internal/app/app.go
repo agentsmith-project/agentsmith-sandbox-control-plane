@@ -114,6 +114,12 @@ func mainImpl() {
 	// Initialize token authenticator if JWT_SECRET_KEY is set
 	var tokenAuth *auth.TokenAuthenticator
 	if secretKey := os.Getenv("JWT_SECRET_KEY"); secretKey != "" {
+		// Validate JWT secret key length (minimum 32 characters for security)
+		const minSecretKeyLength = 32
+		if len(secretKey) < minSecretKeyLength {
+			log.Fatalf("JWT_SECRET_KEY must be at least %d characters long (current length: %d)", minSecretKeyLength, len(secretKey))
+		}
+
 		tokenExpiration := 24 * time.Hour
 		if expStr := os.Getenv("JWT_EXPIRATION"); expStr != "" {
 			if d, err := time.ParseDuration(expStr); err == nil {
@@ -340,16 +346,16 @@ func (m *Manager) setupHTTPServer() {
 			v1Handler = authMiddleware(v1Handler)
 			// WebSocket uses service key auth via query parameter
 			mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				// 从 URL 参数获取 service key
+				// Get service key from URL query parameter
 				serviceKey := r.URL.Query().Get("service_key")
 
-				// 验证 service key
+				// Validate service key
 				if !m.authValidator.Validate(serviceKey) {
 					http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
 					return
 				}
 
-				// 认证通过，转发到 WebSocket handler
+				// Auth successful, forward to WebSocket handler
 				m.wsHandler.ServeHTTP(w, r)
 			})
 		}

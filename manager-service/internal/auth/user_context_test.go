@@ -73,13 +73,3 @@ func TestUserContext_HasPermission_AllPermissions(t *testing.T) {
 	assert.True(t, uc.HasPermission(auth.PermissionUploadFile))
 	assert.True(t, uc.HasPermission(auth.PermissionDownloadFile))
 }
-
-func TestUserContext_IsExpired_ExactlyNow(t *testing.T) {
-	// Edge case: expires exactly at current time
-	uc := &auth.UserContext{ExpiresAt: time.Now()}
-	// Should be expired since time.Now() moves forward
-	result := uc.IsExpired()
-	// This is a bit flaky, but generally should be true or close to it
-	// We accept either result as the timing is very tight
-	t.Logf("IsExpired result for time.Now(): %v", result)
-}

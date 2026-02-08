@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 )
 
 // ErrorCode represents an authentication error code
@@ -16,6 +17,8 @@ const (
 	ErrTokenMissing      ErrorCode = "TOKEN_MISSING"
 	ErrTokenInvalid      ErrorCode = "TOKEN_INVALID"
 	ErrTokenExpired      ErrorCode = "TOKEN_EXPIRED"
+
+	bearerPrefix = "Bearer "
 )
 
 // ErrorResponse represents a standard error response
@@ -142,14 +145,14 @@ func TokenAuthMiddleware(authenticator *TokenAuthenticator) func(http.Handler) h
 			}
 
 			// Expected format: "Bearer <token>"
-			if len(authHeader) < 7 || authHeader[:7] != "Bearer " {
+			if !strings.HasPrefix(authHeader, bearerPrefix) || len(authHeader) == len(bearerPrefix) {
 				requestID := getRequestID(r)
 				log.Printf("Auth: invalid authorization header format (requestId: %s, path: %s)", requestID, r.URL.Path)
 				writeAuthError(w, ErrTokenInvalid, "Invalid authorization header format", requestID, http.StatusUnauthorized)
 				return
 			}
 
-			token := authHeader[7:]
+			token := authHeader[len(bearerPrefix):]
 			userCtx, err := authenticator.ValidateToken(token)
 			if err != nil {
 				requestID := getRequestID(r)

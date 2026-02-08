@@ -91,12 +91,17 @@ func TestTokenAuthenticator_ValidateToken_MalformedToken(t *testing.T) {
 func TestTokenAuthenticator_GenerateToken_SessionIDUnique(t *testing.T) {
 	authenticator := auth.NewTokenAuthenticator("test-issuer", []byte("test-secret"), 1*time.Hour)
 
-	token1, _ := authenticator.GenerateToken("user123")
-	token2, _ := authenticator.GenerateToken("user123")
+	token1, err1 := authenticator.GenerateToken("user123")
+	token2, err2 := authenticator.GenerateToken("user123")
+
+	require.NoError(t, err1)
+	require.NoError(t, err2)
 
 	// Same user should get different session IDs
-	userCtx1, _ := authenticator.ValidateToken(token1)
-	userCtx2, _ := authenticator.ValidateToken(token2)
+	userCtx1, err1 := authenticator.ValidateToken(token1)
+	userCtx2, err2 := authenticator.ValidateToken(token2)
 
+	require.NoError(t, err1)
+	require.NoError(t, err2)
 	assert.NotEqual(t, userCtx1.SessionID, userCtx2.SessionID)
 }

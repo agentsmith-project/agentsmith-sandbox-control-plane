@@ -29,7 +29,10 @@ func NewTokenAuthenticator(issuer string, secretKey []byte, expiration time.Dura
 }
 
 func (t *TokenAuthenticator) GenerateToken(userID string) (string, error) {
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
 
 	now := time.Now()
 	claims := &Claims{
@@ -73,8 +76,10 @@ func (t *TokenAuthenticator) ValidateToken(tokenString string) (*UserContext, er
 	}, nil
 }
 
-func generateSessionID() string {
+func generateSessionID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return base64.URLEncoding.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
 }
