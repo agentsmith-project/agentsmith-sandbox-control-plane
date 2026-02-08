@@ -24,11 +24,12 @@ const (
 	ErrNotReady        ErrorCode = "NOT_READY"
 
 	// Request validation errors
-	ErrBadRequest     ErrorCode = "BAD_REQUEST"
-	ErrInvalidEnvKey  ErrorCode = "INVALID_ENV_KEY"
-	ErrInvalidWorkdir ErrorCode = "INVALID_WORKDIR"
-	ErrInvalidPath    ErrorCode = "INVALID_PATH"
-	ErrUploadTooLarge ErrorCode = "UPLOAD_TOO_LARGE"
+	ErrBadRequest             ErrorCode = "BAD_REQUEST"
+	ErrInvalidEnvKey          ErrorCode = "INVALID_ENV_KEY"
+	ErrInvalidWorkdir         ErrorCode = "INVALID_WORKDIR"
+	ErrInvalidPath            ErrorCode = "INVALID_PATH"
+	ErrUploadTooLarge         ErrorCode = "UPLOAD_TOO_LARGE"
+	ErrUnsupportedMediaType ErrorCode = "UNSUPPORTED_MEDIA_TYPE"
 
 	// Kubernetes/sandbox errors
 	ErrPodCreateFailed ErrorCode = "POD_CREATE_FAILED"
@@ -62,12 +63,13 @@ var HTTPStatusMapping = map[ErrorCode]int{
 	ErrConfigNotLoaded: http.StatusServiceUnavailable,
 	ErrNotReady:        http.StatusServiceUnavailable,
 
-	// Validation - 400/413/422
-	ErrBadRequest:     http.StatusBadRequest,
-	ErrInvalidEnvKey:  http.StatusUnprocessableEntity,
-	ErrInvalidWorkdir: http.StatusUnprocessableEntity,
-	ErrInvalidPath:    http.StatusUnprocessableEntity,
-	ErrUploadTooLarge: 413, // http.StatusEntityTooLarge
+	// Validation - 400/413/415/422
+	ErrBadRequest:             http.StatusBadRequest,
+	ErrInvalidEnvKey:          http.StatusUnprocessableEntity,
+	ErrInvalidWorkdir:         http.StatusUnprocessableEntity,
+	ErrInvalidPath:            http.StatusUnprocessableEntity,
+	ErrUploadTooLarge:         413, // http.StatusEntityTooLarge
+	ErrUnsupportedMediaType:  415, // http.StatusUnsupportedMediaType
 
 	// Pod errors - 404/500/503/504
 	ErrPodNotFound:     http.StatusNotFound,
@@ -114,6 +116,8 @@ func (e ErrorCode) DefaultMessage() string {
 		return "Invalid file path"
 	case ErrUploadTooLarge:
 		return "Upload exceeds maximum size"
+	case ErrUnsupportedMediaType:
+		return "Unsupported media type"
 	case ErrPodCreateFailed:
 		return "Failed to create sandbox pod"
 	case ErrPodGetFailed:

@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox/manager/internal/files"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/validation"
 )
 
 // Manager is the interface for handlers to interact with the service
@@ -368,6 +369,17 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[ERROR] Failed to ensure pod for Upload session %s: %v", sessionId, err)
 		}
 		WriteErrorWithCause(w, r, ErrPodNotReady, "Pod not ready", err)
+		return
+	}
+
+	// Validate content type
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		WriteError(w, r, ErrBadRequest, "Content-Type header is required")
+		return
+	}
+	if !validation.ValidateUploadContentType(contentType) {
+		WriteError(w, r, ErrUnsupportedMediaType, fmt.Sprintf("Unsupported content type: %s. Supported types: gzip, tar", contentType))
 		return
 	}
 
