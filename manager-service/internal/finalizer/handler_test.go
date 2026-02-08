@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	mboscontext "github.com/sandbox/manager/internal/context"
 )
 
 // K8sClientInterface defines the interface for K8s client operations needed by Handler.
@@ -584,8 +586,9 @@ func TestDefaultConstants(t *testing.T) {
 		t.Errorf("Expected DefaultCheckInterval to be 10s, got %v", DefaultCheckInterval)
 	}
 
-	if DefaultSnapshotTimeout != 5*time.Minute {
-		t.Errorf("Expected DefaultSnapshotTimeout to be 5m, got %v", DefaultSnapshotTimeout)
+	// Verify the handler uses context.SnapshotTimeout as default
+	if mboscontext.SnapshotTimeout != 10*time.Minute {
+		t.Errorf("Expected context.SnapshotTimeout to be 10m, got %v", mboscontext.SnapshotTimeout)
 	}
 }
 

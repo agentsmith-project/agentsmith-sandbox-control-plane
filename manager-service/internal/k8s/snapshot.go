@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
+
+	mboscontext "github.com/sandbox/manager/internal/context"
 )
 
 // SnapshotWorkspace creates a tar.gz of /workspace
@@ -22,8 +23,9 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 		default:
 		}
 
-		// Set a timeout for the snapshot operation (2 minutes)
-		execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		// Set a timeout for the snapshot operation using the dedicated snapshot timeout
+		// This ensures the goroutine respects both parent cancellation and timeouts
+		execCtx, cancel := mboscontext.WithSnapshotTimeout(ctx)
 		defer cancel()
 
 		// Execute tar command

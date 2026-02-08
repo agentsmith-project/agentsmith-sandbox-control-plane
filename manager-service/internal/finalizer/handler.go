@@ -8,6 +8,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 
+	mboscontext "github.com/sandbox/manager/internal/context"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/storage"
 )
@@ -18,9 +19,6 @@ const (
 
 	// DefaultCheckInterval is the default interval between checks for pods to process
 	DefaultCheckInterval = 10 * time.Second
-
-	// DefaultSnapshotTimeout is the default timeout for snapshot operations
-	DefaultSnapshotTimeout = 5 * time.Minute
 
 	// maxRemoveFinalizerRetries is the maximum number of retries for removing a finalizer
 	maxRemoveFinalizerRetries = 3
@@ -69,7 +67,7 @@ func NewHandler(cfg *HandlerConfig) (*Handler, error) {
 
 	snapshotTimeout := cfg.SnapshotTimeout
 	if snapshotTimeout == 0 {
-		snapshotTimeout = DefaultSnapshotTimeout
+		snapshotTimeout = mboscontext.SnapshotTimeout
 	}
 
 	return &Handler{
@@ -137,6 +135,7 @@ func (h *Handler) processPod(ctx context.Context, pod *v1.Pod) error {
 	agentThreadID := h.getAgentThreadID(pod)
 
 	// Create a context with timeout for the snapshot operation
+	// Use the configured timeout (default: context.SnapshotTimeout)
 	snapshotCtx, cancel := context.WithTimeout(ctx, h.snapshotTimeout)
 	defer cancel()
 
