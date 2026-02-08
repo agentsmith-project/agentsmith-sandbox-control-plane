@@ -552,6 +552,7 @@ func (h *Handlers) buildPodSpec(sessionId string, req *CreateSandboxRequest) *k8
 		EphemeralStorageLimit: ephemLimit,
 		ContainerName:         containerName,
 		Workdir:               workdir,
+		ShellType:             "bash", // Enable shell-bridge
 		Env:                   req.Env,
 		ResourceRequests: k8s.ResourceRequests{
 			CPU:    h.cfg.Sandbox.Defaults.Resources.Requests.CPU,
