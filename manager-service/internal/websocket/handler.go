@@ -243,6 +243,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		MemoryLimit:     payload.Config.MemoryLimit,
 		ContainerName:   "sandbox",
 		Workdir:         "/workspace",
+		ShellType:       "bash", // Enable shell-bridge
 		AgentThreadID:   payload.AgentThreadID,
 		ResourceLimits: k8s.ResourceLimits{
 			CPU:              payload.Config.CPULimit,
