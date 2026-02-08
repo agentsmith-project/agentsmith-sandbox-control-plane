@@ -4,13 +4,33 @@ import (
 	"time"
 )
 
+const (
+	// DefaultMaxLifetime is the default maximum lifetime for a session.
+	// This is used when a session is created via GetOrCreate without a CreateRequest.
+	DefaultMaxLifetime = 24 * time.Hour
+)
+
 type State string
 
 const (
-	StateCreating    State = "creating"
-	StateRestoring   State = "restoring"
-	StateReady       State = "ready"
-	StateOffline     State = "offline"
+	// StateCreating is the initial state when a session is being created
+	StateCreating State = "creating"
+	// StateRestoring is when a session is being restored from a snapshot
+	StateRestoring State = "restoring"
+	// StateReady is when the session is ready for use
+	StateReady State = "ready"
+	// StateOffline is when the session is disconnected but may be reconnected
+	StateOffline State = "offline"
+	// StateTerminating is when the session is being terminated
+	StateTerminating State = "terminating"
+	// StateTerminated is when the session has been terminated
+	StateTerminated State = "terminated"
+	// StateFailed is when the session has failed
+	StateFailed State = "failed"
+	// StateSnapshotting is when a snapshot is being created
+	StateSnapshotting State = "snapshotting"
+	// StateSnapshotFailed is when snapshot creation has failed
+	StateSnapshotFailed State = "snapshot_failed"
 )
 
 type Session struct {
@@ -18,6 +38,7 @@ type Session struct {
 	PodName           string
 	PodNamespace      string
 	State             State
+	stateMachine      *StateMachine // State machine for managing state transitions
 	Image             string
 	Command           []string
 	Env               map[string]string
@@ -26,6 +47,7 @@ type Session struct {
 	LastActivityAt    time.Time
 	ExpiresAt         time.Time
 	ClientConnected   bool
+	OwnerID           string // Track which user owns this session
 }
 
 type SecurityConfig struct {
@@ -65,4 +87,28 @@ func (s *Session) GetExpiresAt() time.Time {
 	}
 
 	return maxExpiry
+}
+
+// GetState returns the current state of the session
+func (s *Session) GetState() State {
+	if s.stateMachine == nil {
+		return StateCreating
+	}
+	return s.stateMachine.CurrentState()
+}
+
+// SetState attempts to transition the session to a new state
+func (s *Session) SetState(state State) error {
+	if s.stateMachine == nil {
+		s.stateMachine = NewStateMachine(StateCreating)
+	}
+	return s.stateMachine.Transition(state)
+}
+
+// CanTransition checks if a transition to the target state is allowed
+func (s *Session) CanTransition(state State) bool {
+	if s.stateMachine == nil {
+		return state == StateCreating
+	}
+	return s.stateMachine.CanTransition(state)
 }

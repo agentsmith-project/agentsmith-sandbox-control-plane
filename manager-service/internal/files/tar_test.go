@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sandbox/manager/internal/k8s"
+	"github.com/stretchr/testify/require"
 )
 
 // MockExecutor is a mock implementation of K8sExecutor for testing
@@ -896,6 +898,109 @@ func BenchmarkIsUnderRoot(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = u.isUnderRoot(validPath)
 	}
+}
+
+// setupTestDownloader creates a test downloader with mock executor
+func setupTestDownloader(t *testing.T) *Downloader {
+	return &Downloader{
+		k8sExec: &MockExecutor{},
+		config: &DownloadConfig{
+			RootPrefix: "/workspace",
+			DefaultSrc: "/workspace",
+			TarBin:     "tar",
+		},
+	}
+}
+
+// TestDownloader_Download_PropagatesContextCancellation tests that context cancellation is propagated
+func TestDownloader_Download_PropagatesContextCancellation(t *testing.T) {
+	downloader := setupTestDownloader(t)
+
+	// Create a cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Track if the context passed to Exec respects cancellation
+	var receivedCtx context.Context
+	execCalled := make(chan struct{}, 1)
+
+	downloader.k8sExec = &MockExecutor{
+		ExecFunc: func(ctx context.Context, podName string, opts *k8s.ExecOptions) (*k8s.ExecResult, error) {
+			receivedCtx = ctx
+			close(execCalled)
+			// Block until context is cancelled
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	// Start the download
+	reader, err := downloader.Download(ctx, "test-pod", "/workspace")
+	require.NoError(t, err)
+
+	// Wait for exec to be called
+	<-execCalled
+
+	// Verify the received context is derived from the parent context
+	select {
+	case <-receivedCtx.Done():
+		t.Fatal("Context should not be cancelled yet")
+	default:
+		// Context is still active, which is correct
+	}
+
+	// Now cancel the parent context
+	cancel()
+
+	// Reading should fail because the context was cancelled
+	buf := make([]byte, 1024)
+	n, err := reader.Read(buf)
+
+	// We expect either:
+	// 1. An error (context.Canceled)
+	// 2. Or zero bytes with EOF/error
+	if err == nil {
+		t.Errorf("Read should return error, got n=%d and nil error", n)
+	} else if err != io.EOF && err != context.Canceled {
+		// Any error is acceptable - the important part is that the operation stopped
+		t.Logf("Got expected error: %v", err)
+	}
+
+	reader.Close()
+}
+
+// TestDownloader_Download_ContextTimeout tests that context timeout is propagated
+func TestDownloader_Download_ContextTimeout(t *testing.T) {
+	downloader := setupTestDownloader(t)
+
+	// Create a context with short timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	// Create a slow mock that never completes
+	downloader.k8sExec = &MockExecutor{
+		ExecFunc: func(ctx context.Context, podName string, opts *k8s.ExecOptions) (*k8s.ExecResult, error) {
+			// Wait for context to be done (timeout or cancellation)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	// Start the download
+	reader, err := downloader.Download(ctx, "test-pod", "/workspace")
+	require.NoError(t, err)
+
+	// Wait for timeout
+	time.Sleep(50 * time.Millisecond)
+
+	// Reading should fail because of timeout
+	buf := make([]byte, 1024)
+	n, err := reader.Read(buf)
+
+	if err == nil {
+		t.Errorf("Read should return error after timeout, got n=%d", n)
+	}
+
+	reader.Close()
 }
 
 // TestValidateTarEntry tests tar entry security validation

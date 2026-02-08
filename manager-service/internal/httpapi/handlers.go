@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/exec"
 	"github.com/sandbox/manager/internal/files"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/validation"
 )
 
 // Manager is the interface for handlers to interact with the service
@@ -23,6 +25,7 @@ type Manager interface {
 	GetK8sClient() *k8s.Client
 	GetK8sExecutor() *k8s.Executor
 	GetMetrics() *observability.MetricsRegistry
+	GetAuthorizer() *auth.Authorizer
 }
 
 // Handlers contains all the HTTP handlers
@@ -32,6 +35,7 @@ type Handlers struct {
 	k8sClient   *k8s.Client
 	k8sExecutor *k8s.Executor
 	metrics     *observability.MetricsRegistry
+	authorizer  *auth.Authorizer
 }
 
 // NewHandlers creates a new handlers instance
@@ -42,6 +46,7 @@ func NewHandlers(mgr Manager) *Handlers {
 		k8sClient:   mgr.GetK8sClient(),
 		k8sExecutor: mgr.GetK8sExecutor(),
 		metrics:     mgr.GetMetrics(),
+		authorizer:  mgr.GetAuthorizer(),
 	}
 }
 
@@ -55,9 +60,11 @@ func (h *Handlers) HandleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	var req CreateSandboxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorWithCause(w, r, ErrBadRequest, "Invalid request", err)
+		WriteErrorWithCause(w, r, ErrBadRequest, "Invalid request body", err)
 		return
 	}
+	// Close the request body to prevent resource leaks
+	defer r.Body.Close()
 
 	// Validate environment variable keys
 	for key := range req.Env {
@@ -84,14 +91,19 @@ func (h *Handlers) HandleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		h.metrics.RecordK8sAPIFailure("EnsurePod")
-		WriteErrorWithCause(w, r, ErrPodCreateFailed, "Failed to ensure pod", err)
+		if isContextCanceled(err) {
+			log.Printf("[DEBUG] CreateSandbox canceled for session %s: %v", sessionId, err)
+		} else {
+			log.Printf("[ERROR] Failed to ensure pod for session %s: %v", sessionId, err)
+		}
+		WriteErrorWithCause(w, r, ErrPodCreateFailed, fmt.Sprintf("Failed to ensure pod for session %s", sessionId), err)
 		return
 	}
 
 	// Get pod to read expiresAt
 	pod, err := h.k8sClient.GetPod(ctx, result.PodName)
 	if err != nil {
-		WriteErrorWithCause(w, r, ErrPodGetFailed, "Failed to get pod", err)
+		WriteErrorWithCause(w, r, ErrPodGetFailed, fmt.Sprintf("Failed to get pod %s", result.PodName), err)
 		return
 	}
 
@@ -102,16 +114,31 @@ func (h *Handlers) HandleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Log error but response already sent
+		log.Printf("[ERROR] Failed to encode JSON response for CreateSandbox: %v", err)
+	}
 
 	h.metrics.RecordSandboxCreate()
 }
 
 // HandleTouch handles POST /v1/sandboxes/{sessionId}/touch
 func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -122,14 +149,19 @@ func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
 		// Auto-create if not exists
-		if err := h.ensurePodReady(ctx, sessionId, podName); err != nil {
+		if ensureErr := h.ensurePodReady(ctx, sessionId, podName); ensureErr != nil {
 			h.metrics.RecordK8sAPIFailure("EnsurePod")
-			WriteErrorWithCause(w, r, ErrPodCreateFailed, "Failed to ensure pod", err)
+			if isContextCanceled(ensureErr) {
+				log.Printf("[DEBUG] Touch canceled for session %s: %v", sessionId, ensureErr)
+			} else {
+				log.Printf("[ERROR] Failed to ensure pod for session %s: %v", sessionId, ensureErr)
+			}
+			WriteErrorWithCause(w, r, ErrPodCreateFailed, fmt.Sprintf("Failed to ensure pod for session %s", sessionId), ensureErr)
 			return
 		}
 		pod, err = h.k8sClient.GetPod(ctx, podName)
 		if err != nil {
-			WriteErrorWithCause(w, r, ErrPodGetFailed, "Failed to get pod", err)
+			WriteErrorWithCause(w, r, ErrPodGetFailed, fmt.Sprintf("Failed to get pod %s", podName), err)
 			return
 		}
 	}
@@ -141,7 +173,7 @@ func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.k8sClient.PatchActivity(ctx, podName, ttl); err != nil {
 		h.metrics.RecordK8sAPIFailure("PatchActivity")
-		WriteErrorWithCause(w, r, ErrPodPatchFailed, "Failed to patch activity", err)
+		WriteErrorWithCause(w, r, ErrPodPatchFailed, fmt.Sprintf("Failed to patch activity for pod %s", podName), err)
 		return
 	}
 
@@ -151,17 +183,30 @@ func (h *Handlers) HandleTouch(w http.ResponseWriter, r *http.Request) {
 
 // HandleExec handles POST /v1/sandboxes/{sessionId}/exec
 func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
 		return
 	}
 
-	var req ExecRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorWithCause(w, r, ErrBadRequest, "Invalid request", err)
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
+
+	var req ExecRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteErrorWithCause(w, r, ErrBadRequest, "Invalid request body", err)
+		return
+	}
+	defer r.Body.Close()
 
 	// Validate command
 	if len(req.Cmd) == 0 {
@@ -192,6 +237,11 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	// Ensure pod exists and is ready (with auto-creation)
 	if err := h.ensurePodReady(ctx, sessionId, podName); err != nil {
 		h.metrics.RecordK8sAPIFailure("EnsurePod")
+		if isContextCanceled(err) {
+			log.Printf("[DEBUG] Exec canceled for session %s: %v", sessionId, err)
+		} else {
+			log.Printf("[ERROR] Failed to ensure pod for Exec session %s: %v", sessionId, err)
+		}
 		WriteErrorWithCause(w, r, ErrPodNotReady, "Pod not ready", err)
 		return
 	}
@@ -240,8 +290,12 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.k8sExecutor.ExecWithExitCode(ctx, podName, execOpts, h.cfg.Exec.ExitCodeMarker.Key)
 	if err != nil && result.TimedOut {
-		WriteError(w, r, ErrExecTimeout, fmt.Sprintf("Command timed out after %v", timeout))
+		WriteError(w, r, ErrExecTimeout, fmt.Sprintf("Command timed out after %v for session %s", timeout, sessionId))
 		return
+	}
+	if err != nil && !result.TimedOut {
+		// Log non-timeout exec errors but still return the result (which may have partial output)
+		log.Printf("[WARN] Exec command failed for session %s: %v", sessionId, err)
 	}
 
 	duration := time.Since(startTime)
@@ -251,7 +305,10 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	if ttl == 0 {
 		ttl = h.cfg.Sandbox.Defaults.TTLSeconds
 	}
-	h.k8sClient.PatchActivity(ctx, podName, ttl)
+	if err := h.k8sClient.PatchActivity(ctx, podName, ttl); err != nil {
+		// Log the error but don't fail the request - the exec already succeeded
+		log.Printf("[WARN] Failed to patch activity for pod %s after exec: %v", podName, err)
+	}
 
 	resp := ExecResponse{
 		ExitCode:   result.ExitCode,
@@ -262,16 +319,31 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Log error but response already sent
+		log.Printf("[ERROR] Failed to encode JSON response for Exec: %v", err)
+	}
 
 	h.metrics.RecordSandboxExec()
 }
 
 // HandleUpload handles POST /v1/sandboxes/{sessionId}/files/upload
 func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -291,7 +363,23 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure pod exists and is ready
 	if err := h.ensurePodReady(ctx, sessionId, podName); err != nil {
+		if isContextCanceled(err) {
+			log.Printf("[DEBUG] Upload canceled for session %s: %v", sessionId, err)
+		} else {
+			log.Printf("[ERROR] Failed to ensure pod for Upload session %s: %v", sessionId, err)
+		}
 		WriteErrorWithCause(w, r, ErrPodNotReady, "Pod not ready", err)
+		return
+	}
+
+	// Validate content type
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		WriteError(w, r, ErrBadRequest, "Content-Type header is required")
+		return
+	}
+	if !validation.ValidateUploadContentType(contentType) {
+		WriteError(w, r, ErrUnsupportedMediaType, fmt.Sprintf("Unsupported content type: %s. Supported types: gzip, tar", contentType))
 		return
 	}
 
@@ -319,7 +407,7 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, r, ErrUploadValidationFailed, err.Error())
 			return
 		}
-		WriteErrorWithCause(w, r, ErrUploadExecFailed, "Upload failed", err)
+		WriteErrorWithCause(w, r, ErrUploadExecFailed, fmt.Sprintf("Upload failed for session %s", sessionId), err)
 		return
 	}
 
@@ -329,9 +417,21 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 // HandleDownload handles GET /v1/sandboxes/{sessionId}/files/download
 func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -353,8 +453,13 @@ func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
 		// Auto-create if not exists
-		if err := h.ensurePodReady(ctx, sessionId, podName); err != nil {
-			WriteErrorWithCause(w, r, ErrPodNotFound, "Pod not ready", err)
+		if ensureErr := h.ensurePodReady(ctx, sessionId, podName); ensureErr != nil {
+			if isContextCanceled(ensureErr) {
+				log.Printf("[DEBUG] Download canceled for session %s: %v", sessionId, ensureErr)
+			} else {
+				log.Printf("[ERROR] Failed to ensure pod for Download session %s: %v", sessionId, ensureErr)
+			}
+			WriteErrorWithCause(w, r, ErrPodNotFound, "Pod not ready", ensureErr)
 			return
 		}
 		pod, err = h.k8sClient.GetPod(ctx, podName)
@@ -379,10 +484,14 @@ func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	// Download
 	stream, err := downloader.Download(ctx, podName, src)
 	if err != nil {
-		WriteErrorWithCause(w, r, ErrDownloadExecFailed, "Download failed", err)
+		WriteErrorWithCause(w, r, ErrDownloadExecFailed, fmt.Sprintf("Download failed for session %s", sessionId), err)
 		return
 	}
-	defer stream.Close()
+	defer func() {
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("[WARN] Failed to close download stream for session %s: %v", sessionId, closeErr)
+		}
+	}()
 
 	// Set headers
 	w.Header().Set("Content-Type", "application/x-gzip")
@@ -390,23 +499,42 @@ func (h *Handlers) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Stream to client
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, stream)
+	if _, err := io.Copy(w, stream); err != nil {
+		// Log streaming errors but we've already sent the status code
+		log.Printf("[WARN] Error streaming download for session %s: %v", sessionId, err)
+		return
+	}
 
 	// Update activity
 	ttl := k8s.GetTTLFromPod(pod)
 	if ttl == 0 {
 		ttl = h.cfg.Sandbox.Defaults.TTLSeconds
 	}
-	h.k8sClient.PatchActivity(ctx, podName, ttl)
+	if err := h.k8sClient.PatchActivity(ctx, podName, ttl); err != nil {
+		// Log the error but don't fail the request - the download already succeeded
+		log.Printf("[WARN] Failed to patch activity for pod %s after download: %v", podName, err)
+	}
 
 	h.metrics.RecordSandboxDownload()
 }
 
 // HandleDelete handles DELETE /v1/sandboxes/{sessionId}
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		WriteError(w, r, ErrUnauthorized, "Unauthorized")
+		return
+	}
+
 	sessionId := extractSessionId(r.URL.Path)
 	if sessionId == "" {
 		WriteError(w, r, ErrBadRequest, "sessionId required")
+		return
+	}
+
+	// Verify access
+	if err := h.authorizer.VerifySessionAccess(r.Context(), userCtx, sessionId); err != nil {
+		WriteError(w, r, ErrForbidden, err.Error())
 		return
 	}
 
@@ -414,7 +542,12 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	podName := k8s.PodName(sessionId)
 
 	if err := h.k8sClient.DeletePod(ctx, podName, 0); err != nil {
-		WriteErrorWithCause(w, r, ErrPodDeleteFailed, "Failed to delete pod", err)
+		if isContextCanceled(err) {
+			log.Printf("[DEBUG] Delete canceled for session %s: %v", sessionId, err)
+		} else {
+			log.Printf("[ERROR] Failed to delete pod %s for session %s: %v", podName, sessionId, err)
+		}
+		WriteErrorWithCause(w, r, ErrPodDeleteFailed, fmt.Sprintf("Failed to delete pod %s for session %s", podName, sessionId), err)
 		return
 	}
 
@@ -495,6 +628,7 @@ func (h *Handlers) buildPodSpec(sessionId string, req *CreateSandboxRequest) *k8
 		EphemeralStorageLimit: ephemLimit,
 		ContainerName:         containerName,
 		Workdir:               workdir,
+		ShellType:             "bash", // Enable shell-bridge
 		Env:                   req.Env,
 		ResourceRequests: k8s.ResourceRequests{
 			CPU:    h.cfg.Sandbox.Defaults.Resources.Requests.CPU,
@@ -561,4 +695,39 @@ func extractSessionId(path string) string {
 // LogRequest logs HTTP request details
 func LogRequest(r *http.Request, requestId string) {
 	log.Printf("[%s] %s %s from %s", requestId, r.Method, r.URL.Path, r.RemoteAddr)
+}
+
+// isContextCanceled checks if an error is due to context cancellation
+func isContextCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for context.Canceled
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return true
+	}
+	// Check if error message contains context cancellation indicators
+	errMsg := err.Error()
+	return contains(errMsg, "context canceled") ||
+		contains(errMsg, "operation was canceled") ||
+		contains(errMsg, "deadline exceeded")
+}
+
+// contains checks if a string contains a substring (case-insensitive for error matching)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		len(s) > len(substr) && (
+			s[:len(substr)] == substr ||
+			s[len(s)-len(substr):] == substr ||
+			containsMiddle(s, substr)))
+}
+
+// containsMiddle checks if substr is in the middle of s
+func containsMiddle(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

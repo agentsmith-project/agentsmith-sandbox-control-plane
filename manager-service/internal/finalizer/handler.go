@@ -8,6 +8,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 
+	mboscontext "github.com/sandbox/manager/internal/context"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/storage"
 )
@@ -19,8 +20,11 @@ const (
 	// DefaultCheckInterval is the default interval between checks for pods to process
 	DefaultCheckInterval = 10 * time.Second
 
-	// DefaultSnapshotTimeout is the default timeout for snapshot operations
-	DefaultSnapshotTimeout = 5 * time.Minute
+	// maxRemoveFinalizerRetries is the maximum number of retries for removing a finalizer
+	maxRemoveFinalizerRetries = 3
+
+	// removeFinalizerBaseBackoff is the base backoff duration for finalizer removal retries
+	removeFinalizerBaseBackoff = 100 * time.Millisecond
 )
 
 // Handler handles finalizers for pods
@@ -63,7 +67,7 @@ func NewHandler(cfg *HandlerConfig) (*Handler, error) {
 
 	snapshotTimeout := cfg.SnapshotTimeout
 	if snapshotTimeout == 0 {
-		snapshotTimeout = DefaultSnapshotTimeout
+		snapshotTimeout = mboscontext.SnapshotTimeout
 	}
 
 	return &Handler{
@@ -131,6 +135,7 @@ func (h *Handler) processPod(ctx context.Context, pod *v1.Pod) error {
 	agentThreadID := h.getAgentThreadID(pod)
 
 	// Create a context with timeout for the snapshot operation
+	// Use the configured timeout (default: context.SnapshotTimeout)
 	snapshotCtx, cancel := context.WithTimeout(ctx, h.snapshotTimeout)
 	defer cancel()
 
@@ -141,12 +146,47 @@ func (h *Handler) processPod(ctx context.Context, pod *v1.Pod) error {
 	}
 
 	// Remove the finalizer so the pod can be deleted
-	if err := h.k8sClient.RemoveFinalizer(ctx, h.namespace, podName, SnapshotFinalizer); err != nil {
+	if err := h.removeFinalizerWithRetry(ctx, podName); err != nil {
 		return fmt.Errorf("failed to remove finalizer: %w", err)
 	}
 
 	log.Printf("Finalizer: completed processing pod %s", podName)
 	return nil
+}
+
+// removeFinalizerWithRetry removes the finalizer with retry logic
+func (h *Handler) removeFinalizerWithRetry(ctx context.Context, podName string) error {
+	var lastErr error
+	backoff := removeFinalizerBaseBackoff
+
+	for attempt := 1; attempt <= maxRemoveFinalizerRetries; attempt++ {
+		err := h.k8sClient.RemoveFinalizer(ctx, h.namespace, podName, SnapshotFinalizer)
+		if err == nil {
+			// Success
+			if attempt > 1 {
+				log.Printf("Finalizer: successfully removed finalizer for pod %s on attempt %d", podName, attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// Log retry attempt
+		if attempt < maxRemoveFinalizerRetries {
+			log.Printf("Finalizer: attempt %d failed to remove finalizer for pod %s: %v, retrying in %v", attempt, podName, err, backoff)
+			// Wait with exponential backoff, checking for context cancellation
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
+			case <-time.After(backoff):
+				// Continue to next retry
+			}
+			backoff *= 2
+		}
+	}
+
+	// All retries failed
+	return fmt.Errorf("failed to remove finalizer after %d attempts: %w", maxRemoveFinalizerRetries, lastErr)
 }
 
 // snapshotWorkspace creates a snapshot of the workspace and uploads it to storage

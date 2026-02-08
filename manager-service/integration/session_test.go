@@ -484,7 +484,7 @@ func TestSessionLifecycle_Delete(t *testing.T) {
 		assert.True(t, ok)
 
 		// Delete session
-		m.Delete(sess.AgentThreadID)
+		_ = m.Delete(ctx, sess.AgentThreadID)
 
 		// Verify session is gone
 		_, ok = m.Get(sess.AgentThreadID)
@@ -493,7 +493,7 @@ func TestSessionLifecycle_Delete(t *testing.T) {
 
 	t.Run("delete non-existent session is no-op", func(t *testing.T) {
 		// Should not panic
-		m.Delete("nonexistent")
+		_ = m.Delete(context.Background(), "nonexistent")
 		_, ok := m.Get("nonexistent")
 		assert.False(t, ok)
 	})
@@ -547,7 +547,7 @@ func TestSessionLifecycle_MultipleSessions(t *testing.T) {
 	assert.False(t, s2.ClientConnected)
 
 	// Delete one session
-	m.Delete(sessions[3].AgentThreadID)
+	_ = m.Delete(context.Background(), sessions[3].AgentThreadID)
 	_, ok := m.Get(sessions[3].AgentThreadID)
 	assert.False(t, ok)
 
@@ -619,7 +619,7 @@ func TestSessionLifecycle_CompleteWorkflow(t *testing.T) {
 	assert.Equal(t, session.StateOffline, updated.State)
 
 	// Step 8: Delete session
-	m.Delete(sess.AgentThreadID)
+	_ = m.Delete(context.Background(), sess.AgentThreadID)
 	_, ok := m.Get(sess.AgentThreadID)
 	assert.False(t, ok, "Session should be deleted")
 }

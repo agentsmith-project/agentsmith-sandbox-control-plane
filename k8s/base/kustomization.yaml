@@ -15,8 +15,6 @@ resources:
   - manager-deployment.yaml
   - manager-service.yaml
   - network-policy.yaml
-  - rbac-gc.yaml
-  - gc-cronjob.yaml
   - cleaner-cronjob.yaml
 
 # 通用标签
@@ -30,12 +28,9 @@ commonLabels:
 images:
   - name: sandbox-manager
     newName: sandbox-manager
-    newTag: "2.0.0"
+    newTag: "2.0.2"
   - name: sandbox-runner
     newName: sandbox-runner
-    newTag: "1.0.0"
-  - name: sandbox-gc
-    newName: sandbox-gc
     newTag: "1.0.0"
 
 # 通用注解

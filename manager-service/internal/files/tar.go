@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	mboscontext "github.com/sandbox/manager/internal/context"
 	"github.com/sandbox/manager/internal/k8s"
 )
 
@@ -323,16 +324,33 @@ func (d *Downloader) Download(ctx context.Context, podName string, src string) (
 	go func() {
 		defer pw.Close()
 
+		// Check if context is already cancelled
+		select {
+		case <-ctx.Done():
+			pw.CloseWithError(ctx.Err())
+			return
+		default:
+		}
+
 		// Create a separate context with timeout for the exec operation
-		execCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		// Use the parent context to propagate cancellation
+		execCtx, cancel := mboscontext.WithLongTimeout(ctx)
 		defer cancel()
+
+		// Check again before starting the exec
+		select {
+		case <-execCtx.Done():
+			pw.CloseWithError(execCtx.Err())
+			return
+		default:
+		}
 
 		opts := &k8s.ExecOptions{
 			Command: cmd,
 			Stdout:  pw,
 			Stderr:  new(bytes.Buffer),
 			TTY:     false,
-			Timeout: 120 * time.Second, // Download timeout
+			Timeout: mboscontext.LongTimeout, // Download timeout
 		}
 
 		_, err := d.k8sExec.Exec(execCtx, podName, opts)

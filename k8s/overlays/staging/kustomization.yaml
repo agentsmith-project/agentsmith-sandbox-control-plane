@@ -9,15 +9,10 @@ images:
 - name: sandbox-runner
   newName: harbor.pullot.com:28443/agentsmith/sandbox-runner
   newTag: 1.0.0
-- name: sandbox-gc
-  newName: harbor.pullot.com:28443/agentsmith/sandbox-gc
-  newTag: 1.0.0
 patches:
 - path: patches/manager-replicas.yaml
 - path: patches/resource-limits.yaml
 - path: patches/configmap-ttl.yaml
 - path: patches/configmap-runner-image-full.yaml
 - path: patches/configmap-runner-image.yaml
-- path: patches/configmap-gc.yaml
 - path: patches/image-pull-secrets.yaml
-- path: patches/gc-image-pull-secrets.yaml

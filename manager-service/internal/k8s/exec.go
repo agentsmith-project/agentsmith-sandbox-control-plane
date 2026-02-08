@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -119,11 +120,22 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 		Duration: duration,
 	}
 
+	// Try to get output from buffers
 	if stdoutBuf != nil {
 		result.Stdout = stdoutBuf.String()
+	} else if opts.Stdout != nil {
+		// If a writer was provided, try to get its output if it supports String()
+		if str, ok := opts.Stdout.(interface{ String() string }); ok {
+			result.Stdout = str.String()
+		}
 	}
 	if stderrBuf != nil {
 		result.Stderr = stderrBuf.String()
+	} else if opts.Stderr != nil {
+		// If a writer was provided, try to get its output if it supports String()
+		if str, ok := opts.Stderr.(interface{ String() string }); ok {
+			result.Stderr = str.String()
+		}
 	}
 
 	// Check for timeout
@@ -187,6 +199,7 @@ func (e *Executor) buildExecURL(podName string, command []string, container stri
 // bufferWriter is a thread-safe buffer for capturing output
 type bufferWriter struct {
 	data []byte
+	mu   sync.Mutex
 }
 
 func newBufferWriter() *bufferWriter {
@@ -194,11 +207,15 @@ func newBufferWriter() *bufferWriter {
 }
 
 func (b *bufferWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
 	b.data = append(b.data, p...)
+	b.mu.Unlock()
 	return len(p), nil
 }
 
 func (b *bufferWriter) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return string(b.data)
 }
 

@@ -19,6 +19,8 @@ import (
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/ratelimit"
+	"github.com/sandbox/manager/internal/resources"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
@@ -34,9 +36,13 @@ type Manager struct {
 	k8sClient     *k8s.Client
 	k8sExecutor   *k8s.Executor
 	authValidator *auth.ServiceKeyValidator
+	tokenAuth     *auth.TokenAuthenticator
+	authorizer    *auth.Authorizer
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	// New components
 	sessionManager   *session.Manager
@@ -44,6 +50,9 @@ type Manager struct {
 	storageClient    *storage.Client
 	wsHandler        *websocket.Handler
 	finalizerHandler *finalizer.Handler
+	rateLimiter      *ratelimit.Limiter
+	perUserLimiter  *ratelimit.UserLimiter
+	resourceTracker  *resources.ResourceTracker
 }
 
 // Main is the entry point for the sandbox manager.
@@ -100,8 +109,32 @@ func mainImpl() {
 	k8sExecutor := k8s.NewExecutor(k8sClient)
 
 	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
-	authValidator := auth.NewServiceKeyValidator(serviceKeys)
+	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
+	if err != nil {
+		log.Fatalf("Failed to initialize service key validator: %v", err)
+	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
+
+	// Initialize token authenticator if JWT_SECRET_KEY is set
+	var tokenAuth *auth.TokenAuthenticator
+	if secretKey := os.Getenv("JWT_SECRET_KEY"); secretKey != "" {
+		// Validate JWT secret key length (minimum 32 characters for security)
+		const minSecretKeyLength = 32
+		if len(secretKey) < minSecretKeyLength {
+			log.Fatalf("JWT_SECRET_KEY must be at least %d characters long (current length: %d)", minSecretKeyLength, len(secretKey))
+		}
+
+		tokenExpiration := 24 * time.Hour
+		if expStr := os.Getenv("JWT_EXPIRATION"); expStr != "" {
+			if d, err := time.ParseDuration(expStr); err == nil {
+				tokenExpiration = d
+			} else {
+				log.Printf("Warning: invalid JWT_EXPIRATION %q, using default 24h", expStr)
+			}
+		}
+		tokenAuth = auth.NewTokenAuthenticator("mbos-sandbox", []byte(secretKey), tokenExpiration)
+		log.Printf("Token authenticator initialized (expiration=%v)", tokenExpiration)
+	}
 
 	cfgWatcher := config.NewWatcher(
 		bootCfg.ConfigPath,
@@ -122,19 +155,32 @@ func mainImpl() {
 	log.Printf("Initializing buffer manager...")
 	bufferManager := buffer.NewManager()
 
-	// Initialize storage client from environment variables
-	storageEndpoint := getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000")
-	storageAccessKey := getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin")
-	storageSecretKey := getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin")
-	storageBucket := getEnvOrDefault("STORAGE_BUCKET", "sandboxes")
-	storageUseSSL := os.Getenv("STORAGE_USE_SSL") == "true"
+	// Initialize storage client
+	// Try loading from credentials file first, fall back to environment variables
+	storageCreds, err := storage.LoadCredentials()
+	if err != nil {
+		log.Printf("Failed to load storage credentials, using defaults: %v", err)
+		// Use defaults for local development
+		storageCreds = &storage.Credentials{
+			Endpoint:  getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000"),
+			AccessKey: getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin"),
+			SecretKey: getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin"),
+			Bucket:    getEnvOrDefault("STORAGE_BUCKET", "sandboxes"),
+			UseSSL:    os.Getenv("STORAGE_USE_SSL") == "true",
+		}
+	}
 
-	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)", storageEndpoint, storageBucket, storageUseSSL)
-	storageClient, err := storage.NewClient(storageEndpoint, storageAccessKey, storageSecretKey, storageBucket, storageUseSSL)
+	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)",
+		storageCreds.Endpoint, storageCreds.Bucket, storageCreds.UseSSL)
+	storageClient, err := storage.NewClientWithCreds(storageCreds)
 	if err != nil {
 		log.Fatalf("Failed to create storage client: %v", err)
 	}
 	log.Printf("Storage client initialized successfully")
+
+	// Initialize authorizer
+	log.Printf("Initializing authorizer...")
+	authorizer := auth.NewAuthorizer(sessionManager, k8sClient)
 
 	// Initialize WebSocket handler with all dependencies
 	log.Printf("Initializing WebSocket handler...")
@@ -144,7 +190,23 @@ func mainImpl() {
 		k8sClient,
 		storageClient,
 		cfg.Sandbox.Defaults.Namespace,
+		cfg,
+		authorizer,
 	)
+
+	// Initialize rate limiter
+	log.Printf("Initializing rate limiter...")
+	rateLimiterConfig := &ratelimit.Config{
+		GlobalRPS:       100,
+		GlobalBurst:     200,
+		PerIPRPS:        10,
+		PerIPBurst:      20,
+		PerSessionRPS:   5,
+		PerSessionBurst: 10,
+		CleanupInterval: 5 * time.Minute,
+	}
+	rateLimiter := ratelimit.NewLimiter(rateLimiterConfig)
+	log.Printf("Rate limiter initialized")
 
 	// Initialize finalizer handler
 	log.Printf("Initializing finalizer handler...")
@@ -158,6 +220,12 @@ func mainImpl() {
 		log.Fatalf("Failed to create finalizer handler: %v", err)
 	}
 
+	// Create manager lifecycle context
+	mgrCtx, mgrCancel := context.WithCancel(context.Background())
+
+	// Initialize resource tracker
+	resourceTracker := resources.NewResourceTracker(observability.GetLogger())
+
 	mgr := &Manager{
 		cfg:              cfg,
 		cfgMeta:          cfgMeta,
@@ -165,6 +233,8 @@ func mainImpl() {
 		k8sClient:        k8sClient,
 		k8sExecutor:      k8sExecutor,
 		authValidator:    authValidator,
+		tokenAuth:        tokenAuth,
+		authorizer:       authorizer,
 		healthChecker:    observability.NewHealthChecker(),
 		metrics:          observability.GetMetrics(),
 		sessionManager:   sessionManager,
@@ -172,14 +242,23 @@ func mainImpl() {
 		storageClient:    storageClient,
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
+		rateLimiter:      rateLimiter,
+		perUserLimiter:  ratelimit.NewPerUserLimiter(cfg.RateLimit.RequestsPerMinute, time.Minute),
+		resourceTracker:  resourceTracker,
+		ctx:              mgrCtx,
+		cancel:           mgrCancel,
 	}
 
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
 
-	// Start finalizer handler in background goroutine
-	go mgr.finalizerHandler.Start(context.Background())
+	// Start finalizer handler in background goroutine with manager lifecycle context
+	go mgr.finalizerHandler.Start(mgr.ctx)
 	log.Printf("Finalizer handler started")
+
+	// Start session cleanup goroutine with manager lifecycle context
+	go mgr.sessionManager.StartCleanup(mgr.ctx, 5*time.Minute)
+	log.Printf("Session cleanup started (interval=5m)")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -260,26 +339,59 @@ func (m *Manager) setupHTTPServer() {
 		}
 	}
 
-	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
-
-	// Add WebSocket route - no auth required for WebSocket
-	mux.Handle("/ws", m.wsHandler)
-
-	v1Handler := m.buildV1Handler()
+	// Setup debug config with authentication if enabled
+	debugHandler := http.HandlerFunc(m.handleDebugConfig)
 	if m.cfg.Auth.Enabled {
-		authMiddleware := auth.ServiceKeyMiddleware(
+		authHandler := auth.ServiceKeyMiddleware(
 			m.authValidator,
 			m.cfg.Auth.HeaderName,
 			m.cfg.Auth.AcceptAuthorization,
 			m.cfg.Auth.AuthorizationScheme,
-			m.cfg.Auth.FailStatusCode,
-		)
-		v1Handler = authMiddleware(v1Handler)
+			http.StatusUnauthorized,
+		)(debugHandler)
+		mux.Handle(m.cfg.Server.Debug.ConfigPath, authHandler)
+	} else {
+		mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, debugHandler)
 	}
+
+	v1Handler := m.buildV1Handler()
+	var wsHandler http.Handler = http.HandlerFunc(m.wsHandler.ServeHTTP)
+	if m.cfg.Auth.Enabled {
+		if m.tokenAuth != nil {
+			// Use token-based auth
+			authMiddleware := auth.TokenAuthMiddleware(m.tokenAuth)
+			v1Handler = authMiddleware(v1Handler)
+			// WebSocket also uses token auth via header
+			wsHandler = authMiddleware(wsHandler)
+		} else {
+			// Fall back to service key auth
+			authMiddleware := auth.ServiceKeyMiddleware(
+				m.authValidator,
+				m.cfg.Auth.HeaderName,
+				m.cfg.Auth.AcceptAuthorization,
+				m.cfg.Auth.AuthorizationScheme,
+				m.cfg.Auth.FailStatusCode,
+			)
+			v1Handler = authMiddleware(v1Handler)
+			// WebSocket uses service key auth via header (not query parameter)
+			wsHandler = authMiddleware(wsHandler)
+		}
+	}
+
+	// Apply per-user rate limiting to WebSocket
+	if m.perUserLimiter != nil {
+		wsHandler = ratelimit.PerUserRateLimitMiddleware(m.perUserLimiter)(wsHandler)
+	}
+
+	mux.Handle("/ws", wsHandler)
 
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
 	v1Handler = reqIDMiddleware(v1Handler)
 	v1Handler = m.observabilityMiddleware(v1Handler)
+	v1Handler = m.rateLimiter.Middleware(v1Handler)
+
+	// Apply per-user rate limiting after authentication
+	v1Handler = ratelimit.PerUserRateLimitMiddleware(m.perUserLimiter)(v1Handler)
 
 	mux.Handle("/v1/", v1Handler)
 
@@ -316,12 +428,20 @@ func (m *Manager) GetMetrics() *observability.MetricsRegistry {
 	return m.metrics
 }
 
+func (m *Manager) GetAuthorizer() *auth.Authorizer {
+	return m.authorizer
+}
+
 func (m *Manager) GetSessionManager() *session.Manager {
 	return m.sessionManager
 }
 
 func (m *Manager) GetBufferManager() *buffer.Manager {
 	return m.bufferManager
+}
+
+func (m *Manager) GetResourceTracker() *resources.ResourceTracker {
+	return m.resourceTracker
 }
 
 func (m *Manager) GetStorageClient() *storage.Client {
@@ -450,6 +570,17 @@ func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg, meta := m.cfgWatcher.GetCurrent()
 
+	// Create a copy of the config to avoid modifying the original
+	configCopy := cfg.DeepCopy()
+
+	// Redact sensitive fields
+	if configCopy.Storage.AccessKey != "" {
+		configCopy.Storage.AccessKey = "***REDACTED***"
+	}
+	if configCopy.Storage.SecretKey != "" {
+		configCopy.Storage.SecretKey = "***REDACTED***"
+	}
+
 	resp := httpapi.DebugConfigResponse{
 		Meta: httpapi.DebugConfigMeta{
 			SchemaVersion: meta.SchemaVersion,
@@ -459,7 +590,7 @@ func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 			ReloadCount:   meta.ReloadCount,
 			LastError:     convertConfigError(meta.LastError),
 		},
-		Config: sanitizeConfig(cfg),
+		Config: sanitizeConfig(configCopy),
 		Boot: httpapi.DebugConfigBoot{
 			ConfigPath:       os.Getenv("CONFIG_PATH"),
 			DebounceDuration: os.Getenv("CONFIG_RELOAD_DEBOUNCE"),
@@ -502,11 +633,24 @@ func (m *Manager) waitForShutdown() {
 
 	log.Printf("Shutdown signal received, gracefully shutting down...")
 
+	// Cancel manager lifecycle context to stop all background goroutines
+	// This includes the finalizer handler which was started with m.ctx
+	if m.cancel != nil {
+		m.cancel()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := m.httpServer.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Shutdown resource tracker
+	if m.resourceTracker != nil {
+		if err := m.resourceTracker.Shutdown(ctx); err != nil {
+			log.Printf("ResourceTracker shutdown error: %v", err)
+		}
 	}
 
 	log.Printf("Shutdown complete")
@@ -542,6 +686,9 @@ func convertConfigError(err *config.ConfigError) *httpapi.ConfigError {
 	}
 }
 
+// sanitizeConfig creates a safe subset of configuration for debug output.
+// NOTE: Storage configuration (AccessKey, SecretKey) is intentionally excluded
+// to prevent credential exposure via debug endpoint.
 func sanitizeConfig(cfg *config.Config) httpapi.DebugConfigConfig {
 	return httpapi.DebugConfigConfig{
 		Version: cfg.Version,

@@ -1,0 +1,11 @@
+# Test configuration for MinIO/S3 storage
+endpoint: "http://localhost:9000"
+accessKey: "minioadmin"
+secretKey: "minioadmin"
+bucket: "sandbox-snapshots"
+region: "us-east-1"
+useSSL: false
+
+# Snapshot settings
+snapshotPrefix: "test-snapshot/"
+snapshotTTL: 24h

@@ -24,7 +24,7 @@ images_build() {
       --builder) builder="${2:-}"; shift 2 ;;
       --only) only="${2:-}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only manager|runner|gc]"
+        echo "Usage: ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only manager|runner]"
         return 0
         ;;
       *)
@@ -55,14 +55,12 @@ images_build() {
     build_args="--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy="
   fi
 
-  local manager_ver runner_ver gc_ver
+  local manager_ver runner_ver
   manager_ver="$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)"
   runner_ver="$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)"
-  gc_ver="$(cat "${root}/images/gc/VERSION" 2>/dev/null || echo dev)"
 
   local tag_manager="sandbox-manager:${manager_ver}"
   local tag_runner="sandbox-runner:${runner_ver}"
-  local tag_gc="sandbox-gc:${gc_ver}"
 
   # shellcheck disable=SC2206
   local build_arg_array=($build_args)
@@ -74,16 +72,12 @@ images_build() {
     "" )
       docker_build_image "${root}/images/runner" "${root}/images/runner/Dockerfile" "$tag_runner" "$platform" "${build_arg_array[@]}"
       docker_build_image "${root}/manager-service" "${root}/manager-service/Dockerfile" "$tag_manager" "$platform" "${build_arg_array[@]}"
-      docker_build_image "${root}/images/gc" "${root}/images/gc/Dockerfile" "$tag_gc" "$platform" "${build_arg_array[@]}"
       ;;
     runner)
       docker_build_image "${root}/images/runner" "${root}/images/runner/Dockerfile" "$tag_runner" "$platform" "${build_arg_array[@]}"
       ;;
     manager)
       docker_build_image "${root}/manager-service" "${root}/manager-service/Dockerfile" "$tag_manager" "$platform" "${build_arg_array[@]}"
-      ;;
-    gc)
-      docker_build_image "${root}/images/gc" "${root}/images/gc/Dockerfile" "$tag_gc" "$platform" "${build_arg_array[@]}"
       ;;
     *)
       die "Unknown --only value: $only"
@@ -93,7 +87,7 @@ images_build() {
   log_info "Built images:"
   echo "  $tag_manager"
   echo "  $tag_runner"
-  echo "  $tag_gc"
+  echo "  (cleaner is built into manager image)"
 }
 
 images_push_harbor() {
@@ -122,7 +116,7 @@ images_push_harbor() {
       --build-proxy) build_proxy_mode="${2:-auto}"; shift 2 ;;
       --only) only="${2:-}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only manager|runner|gc]"
+        echo "Usage: ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only manager|runner]"
         return 0
         ;;
       *)
@@ -136,18 +130,16 @@ images_push_harbor() {
   [ -n "$username" ] || die "--username is required"
   [ -n "$password" ] || die "--password is required"
 
-  local manager_ver runner_ver gc_ver
+  local manager_ver runner_ver
   manager_ver="$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)"
   runner_ver="$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)"
-  gc_ver="$(cat "${root}/images/gc/VERSION" 2>/dev/null || echo dev)"
 
   local src_manager="docker-daemon:sandbox-manager:${manager_ver}"
   local src_runner="docker-daemon:sandbox-runner:${runner_ver}"
-  local src_gc="docker-daemon:sandbox-gc:${gc_ver}"
 
   case "$only" in
-    ""|manager|runner|gc) : ;;
-    *) die "--only must be one of: manager|runner|gc" ;;
+    ""|manager|runner) : ;;
+    *) die "--only must be one of: manager|runner" ;;
   esac
 
   if [ "$source_mode" != "archive" ]; then
@@ -157,14 +149,10 @@ images_push_harbor() {
     if [ -z "$only" ] || [ "$only" = "runner" ]; then
       docker_image_exists "sandbox-runner:${runner_ver}" || die "Missing local image sandbox-runner:${runner_ver} (run: ./sbx images build --only runner)"
     fi
-    if [ -z "$only" ] || [ "$only" = "gc" ]; then
-      docker_image_exists "sandbox-gc:${gc_ver}" || die "Missing local image sandbox-gc:${gc_ver} (run: ./sbx images build --only gc)"
-    fi
   fi
 
   local dest_manager="docker://${registry}/${project}/sandbox-manager:${manager_ver}"
   local dest_runner="docker://${registry}/${project}/sandbox-runner:${runner_ver}"
-  local dest_gc="docker://${registry}/${project}/sandbox-gc:${gc_ver}"
 
   log_info "Pushing images to harbor: ${registry}/${project}"
   if [ "$source_mode" = "archive" ]; then
@@ -207,24 +195,13 @@ images_push_harbor() {
         skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-runner.tar" "$dest_runner" --dest-creds "${username}:${password}"
       fi
     fi
-
-    if [ -z "$only" ] || [ "$only" = "gc" ]; then
-      docker_build_archive "${root}/images/gc" "${root}/images/gc/Dockerfile" "sandbox-gc:${gc_ver}" "$platform" "${tmpdir}/sandbox-gc.tar" "${args_build[@]}"
-      if [ "$no_proxy_skopeo" = "true" ]; then
-        SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-gc.tar" "$dest_gc" --dest-creds "${username}:${password}"
-      else
-        skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-gc.tar" "$dest_gc" --dest-creds "${username}:${password}"
-      fi
-    fi
   else
     if [ "$(proxy_effective_enabled "$proxy_mode")" = "false" ]; then
       if [ -z "$only" ] || [ "$only" = "manager" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_manager" "$dest_manager" --dest-creds "${username}:${password}"; fi
       if [ -z "$only" ] || [ "$only" = "runner" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
-      if [ -z "$only" ] || [ "$only" = "gc" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_gc" "$dest_gc" --dest-creds "${username}:${password}"; fi
     else
       if [ -z "$only" ] || [ "$only" = "manager" ]; then skopeo_copy "$root" "$src_manager" "$dest_manager" --dest-creds "${username}:${password}"; fi
       if [ -z "$only" ] || [ "$only" = "runner" ]; then skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
-      if [ -z "$only" ] || [ "$only" = "gc" ]; then skopeo_copy "$root" "$src_gc" "$dest_gc" --dest-creds "${username}:${password}"; fi
     fi
   fi
 
@@ -233,11 +210,9 @@ images_push_harbor() {
   jqbin="$(tools_resolve "$root" jq)" || die "jq not found (run: ./sbx tools fetch or install jq)"
   for pair in \
     "sandbox-manager:${manager_ver} ${dest_manager}" \
-    "sandbox-runner:${runner_ver} ${dest_runner}" \
-    "sandbox-gc:${gc_ver} ${dest_gc}"; do
+    "sandbox-runner:${runner_ver} ${dest_runner}"; do
     if [ "$only" = "manager" ] && [[ "$pair" != sandbox-manager:* ]]; then continue; fi
     if [ "$only" = "runner" ] && [[ "$pair" != sandbox-runner:* ]]; then continue; fi
-    if [ "$only" = "gc" ] && [[ "$pair" != sandbox-gc:* ]]; then continue; fi
     local ref="${pair%% *}"
     local dest="${pair#* }"
     local local_layers remote_layers

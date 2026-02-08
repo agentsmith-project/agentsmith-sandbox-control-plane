@@ -16,17 +16,20 @@ const (
 	// Auth errors
 	ErrServiceKeyMissing ErrorCode = "SERVICE_KEY_MISSING"
 	ErrServiceKeyInvalid ErrorCode = "SERVICE_KEY_INVALID"
+	ErrUnauthorized      ErrorCode = "UNAUTHORIZED"
+	ErrForbidden         ErrorCode = "FORBIDDEN"
 
 	// Config errors
 	ErrConfigNotLoaded ErrorCode = "CONFIG_NOT_LOADED"
 	ErrNotReady        ErrorCode = "NOT_READY"
 
 	// Request validation errors
-	ErrBadRequest     ErrorCode = "BAD_REQUEST"
-	ErrInvalidEnvKey  ErrorCode = "INVALID_ENV_KEY"
-	ErrInvalidWorkdir ErrorCode = "INVALID_WORKDIR"
-	ErrInvalidPath    ErrorCode = "INVALID_PATH"
-	ErrUploadTooLarge ErrorCode = "UPLOAD_TOO_LARGE"
+	ErrBadRequest             ErrorCode = "BAD_REQUEST"
+	ErrInvalidEnvKey          ErrorCode = "INVALID_ENV_KEY"
+	ErrInvalidWorkdir         ErrorCode = "INVALID_WORKDIR"
+	ErrInvalidPath            ErrorCode = "INVALID_PATH"
+	ErrUploadTooLarge         ErrorCode = "UPLOAD_TOO_LARGE"
+	ErrUnsupportedMediaType ErrorCode = "UNSUPPORTED_MEDIA_TYPE"
 
 	// Kubernetes/sandbox errors
 	ErrPodCreateFailed ErrorCode = "POD_CREATE_FAILED"
@@ -50,20 +53,23 @@ const (
 
 // HTTPStatusMapping maps error codes to HTTP status codes
 var HTTPStatusMapping = map[ErrorCode]int{
-	// Auth - 401
+	// Auth - 401/403
 	ErrServiceKeyMissing: http.StatusUnauthorized,
 	ErrServiceKeyInvalid: http.StatusUnauthorized,
+	ErrUnauthorized:      http.StatusUnauthorized,
+	ErrForbidden:         http.StatusForbidden,
 
 	// Config/Ready - 503
 	ErrConfigNotLoaded: http.StatusServiceUnavailable,
 	ErrNotReady:        http.StatusServiceUnavailable,
 
-	// Validation - 400/413/422
-	ErrBadRequest:     http.StatusBadRequest,
-	ErrInvalidEnvKey:  http.StatusUnprocessableEntity,
-	ErrInvalidWorkdir: http.StatusUnprocessableEntity,
-	ErrInvalidPath:    http.StatusUnprocessableEntity,
-	ErrUploadTooLarge: 413, // http.StatusEntityTooLarge
+	// Validation - 400/413/415/422
+	ErrBadRequest:             http.StatusBadRequest,
+	ErrInvalidEnvKey:          http.StatusUnprocessableEntity,
+	ErrInvalidWorkdir:         http.StatusUnprocessableEntity,
+	ErrInvalidPath:            http.StatusUnprocessableEntity,
+	ErrUploadTooLarge:         413, // http.StatusEntityTooLarge
+	ErrUnsupportedMediaType:  415, // http.StatusUnsupportedMediaType
 
 	// Pod errors - 404/500/503/504
 	ErrPodNotFound:     http.StatusNotFound,
@@ -92,6 +98,10 @@ func (e ErrorCode) DefaultMessage() string {
 		return "Service key is required"
 	case ErrServiceKeyInvalid:
 		return "Service key is invalid"
+	case ErrUnauthorized:
+		return "Authentication required"
+	case ErrForbidden:
+		return "Access forbidden"
 	case ErrConfigNotLoaded:
 		return "Configuration not loaded"
 	case ErrNotReady:
@@ -106,6 +116,8 @@ func (e ErrorCode) DefaultMessage() string {
 		return "Invalid file path"
 	case ErrUploadTooLarge:
 		return "Upload exceeds maximum size"
+	case ErrUnsupportedMediaType:
+		return "Unsupported media type"
 	case ErrPodCreateFailed:
 		return "Failed to create sandbox pod"
 	case ErrPodGetFailed:
@@ -185,24 +197,36 @@ func NewAPIError(code ErrorCode, message string) *APIError {
 }
 
 // WithCause adds a cause to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithCause(cause error) *APIError {
-	e.Cause = cause
-	return e
+	copy := *e
+	copy.Cause = cause
+	return &copy
 }
 
 // WithRequestID adds a request ID to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithRequestID(requestID string) *APIError {
-	e.RequestID = requestID
-	return e
+	copy := *e
+	copy.RequestID = requestID
+	return &copy
 }
 
 // WithDetail adds a detail to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithDetail(key string, value interface{}) *APIError {
-	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+	copy := *e
+	if copy.Details == nil {
+		copy.Details = make(map[string]interface{})
+	} else {
+		// Copy the existing map to avoid shared mutations
+		copy.Details = make(map[string]interface{}, len(e.Details))
+		for k, v := range e.Details {
+			copy.Details[k] = v
+		}
 	}
-	e.Details[key] = value
-	return e
+	copy.Details[key] = value
+	return &copy
 }
 
 // Write writes the error response to the HTTP response writer
@@ -210,20 +234,21 @@ func (e *APIError) Write(w http.ResponseWriter, r *http.Request) {
 	status := e.Code.HTTPStatus()
 
 	// Get request ID if not set
-	if e.RequestID == "" {
-		e.RequestID = GetRequestID(r)
+	requestID := e.RequestID
+	if requestID == "" {
+		requestID = GetRequestID(r)
 	}
 
 	// Build response
 	var resp ErrorResponse
 	resp.Error.Code = string(e.Code)
 	resp.Error.Message = e.Message
-	resp.Error.RequestID = e.RequestID
+	resp.Error.RequestID = requestID
 	resp.Error.Details = e.Details
 
 	// Log the error
 	log.Printf("API error: code=%s status=%d requestId=%s message=%s",
-		e.Code, status, e.RequestID, e.Message)
+		e.Code, status, requestID, e.Message)
 	if e.Cause != nil {
 		log.Printf("  cause: %v", e.Cause)
 	}
@@ -231,7 +256,10 @@ func (e *APIError) Write(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Log error but response already sent
+		log.Printf("[ERROR] Failed to encode JSON error response: %v", err)
+	}
 }
 
 // WriteError writes an API error to the response

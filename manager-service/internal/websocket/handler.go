@@ -10,20 +10,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/buffer"
+	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
 
 // Handler manages WebSocket connections and sandbox sessions
 type Handler struct {
@@ -33,6 +27,9 @@ type Handler struct {
 	storageClient  *storage.Client
 	podNamespace   string
 	logger         observability.Logger
+	cfg            *config.Config
+	upgrader       *websocket.Upgrader
+	authorizer     *auth.Authorizer
 }
 
 // NewHandler creates a new WebSocket handler
@@ -42,7 +39,22 @@ func NewHandler(
 	k8sClient *k8s.Client,
 	storageClient *storage.Client,
 	podNamespace string,
+	cfg *config.Config,
+	authorizer *auth.Authorizer,
 ) *Handler {
+	// Build WebSocket config from app config
+	wsCfg := &Config{
+		ReadBufferSize:          cfg.WebSocket.ReadBufferSize,
+		WriteBufferSize:         cfg.WebSocket.WriteBufferSize,
+		AllowedOrigins:          cfg.WebSocket.AllowedOrigins,
+		AllowNonBrowserRequests: cfg.WebSocket.AllowNonBrowserRequests,
+	}
+	if cfg.WebSocket.HandshakeTimeout != "" {
+		if d, err := time.ParseDuration(cfg.WebSocket.HandshakeTimeout); err == nil {
+			wsCfg.HandshakeTimeout = d
+		}
+	}
+
 	return &Handler{
 		sessionManager: sessionManager,
 		bufferManager:  bufferManager,
@@ -50,15 +62,19 @@ func NewHandler(
 		storageClient:  storageClient,
 		podNamespace:   podNamespace,
 		logger:         observability.GetLogger(),
+		cfg:            cfg,
+		upgrader:       wsCfg.Upgrader(),
+		authorizer:     authorizer,
 	}
 }
 
 // ServeHTTP handles WebSocket upgrade and connection
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Upgrade to WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// Upgrade to WebSocket with configured upgrader
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("websocket upgrade failed: %v", err), http.StatusBadRequest)
+		h.logger.Warn("WebSocket upgrade failed from %s: %w", r.RemoteAddr, err)
+		http.Error(w, "websocket upgrade failed", http.StatusBadRequest)
 		return
 	}
 	defer conn.Close()
@@ -67,13 +83,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("WebSocket connection established from %s", r.RemoteAddr)
 
 	// Handle connection
-	h.handleConnection(ctx, conn)
+	h.handleConnection(ctx, conn, r)
 }
 
 // handleConnection manages the WebSocket connection lifecycle
-func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
+func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn, r *http.Request) {
 	var agentThreadID string
 	var sess *session.Session
+	var isNewSession bool // Track if we created a new session
+	cleanupDone := false  // Flag to prevent double cleanup
+
+	// Defer cleanup: only clean up new sessions on connection close
+	// Existing sessions are preserved for reconnection
+	defer func() {
+		if agentThreadID != "" && isNewSession && !cleanupDone {
+			h.logger.Debug("Cleaning up new session %s", agentThreadID)
+
+			// Mark client disconnected
+			h.sessionManager.MarkClientDisconnected(agentThreadID)
+
+			// Check if session should be deleted (no active connections and expired)
+			sess, ok := h.sessionManager.Get(agentThreadID)
+			if ok && !sess.ClientConnected && sess.IsExpired() {
+				h.logger.Info("Deleting expired session %s", agentThreadID)
+				deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = h.sessionManager.Delete(deleteCtx, agentThreadID)
+			}
+			h.bufferManager.Delete(agentThreadID)
+			cleanupDone = true
+		}
+	}()
 
 	// Set read deadline for initial message
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -83,9 +123,11 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 		var msg Message
 		if err := conn.ReadJSON(&msg); err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				h.logger.Debug("WebSocket closed normally: %v", err)
+				h.logger.Debug("WebSocket closed normally during initial read: %v", err)
+			} else if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				h.logger.Warn("WebSocket closed unexpectedly during initial read: %w", err)
 			} else {
-				h.logger.Error("Failed to read WebSocket message: %v", err)
+				h.logger.Warn("Failed to read initial WebSocket message: %w", err)
 			}
 			return
 		}
@@ -95,15 +137,19 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 			payload, err := h.parseCreate(msg.Data)
 			if err != nil {
 				h.sendError(conn, fmt.Sprintf("Invalid create payload: %v", err))
-				h.logger.Error("Failed to parse create payload: %v", err)
+				h.logger.Warn("Failed to parse create payload: %w", err)
 				return
 			}
 			agentThreadID = payload.AgentThreadID
 
-			sess, err = h.handleCreate(ctx, payload, conn)
+			sess, isNewSession, err = h.handleCreate(ctx, payload, conn, r)
 			if err != nil {
 				h.sendError(conn, fmt.Sprintf("Create failed: %v", err))
-				h.logger.Error("Failed to handle create: %v", err)
+				if isContextCanceled(err) {
+					h.logger.Debug("Create canceled for session %s: %w", payload.AgentThreadID, err)
+				} else {
+					h.logger.Error("Failed to handle create for session %s: %w", payload.AgentThreadID, err)
+				}
 				return
 			}
 			break
@@ -123,9 +169,13 @@ func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 	conn.SetReadDeadline(time.Time{})
 
 	// Attach to existing session
-	if err := h.attachSession(ctx, agentThreadID, conn); err != nil {
+	if err := h.attachSession(ctx, agentThreadID, conn, r); err != nil {
 		h.sendError(conn, fmt.Sprintf("Attach failed: %v", err))
-		h.logger.Error("Failed to attach session: %v", err)
+		if isContextCanceled(err) {
+			h.logger.Debug("Attach canceled for session %s: %w", agentThreadID, err)
+		} else {
+			h.logger.Error("Failed to attach to session %s: %w", agentThreadID, err)
+		}
 	}
 }
 
@@ -142,9 +192,22 @@ func (h *Handler) parseCreate(data json.RawMessage) (CreatePayload, error) {
 }
 
 // handleCreate processes the create message and creates/attaches to a session
-func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn *websocket.Conn) (*session.Session, error) {
+// Returns the session, whether it's a new session (vs. existing), and any error
+func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn *websocket.Conn, r *http.Request) (*session.Session, bool, error) {
+	// Get user context from request
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		return nil, true, fmt.Errorf("unauthorized: no user context")
+	}
+
 	// Check if session exists
 	if sess, ok := h.sessionManager.Get(payload.AgentThreadID); ok {
+		// Verify user owns this session
+		if sess.OwnerID != "" && sess.OwnerID != userCtx.UserID {
+			h.logger.Warn("User %s attempted to access session %s owned by %s", userCtx.UserID, payload.AgentThreadID, sess.OwnerID)
+			return nil, false, fmt.Errorf("forbidden: not authorized to access this session")
+		}
+
 		// Existing session, just attach
 		h.logger.Info("Attaching to existing session %s", payload.AgentThreadID)
 		h.sendStatus(conn, StatusPayload{
@@ -152,7 +215,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 			Message:  "Attached to existing session",
 			Progress: 1.0,
 		})
-		return sess, nil
+		return sess, false, nil // false = not a new session
 	}
 
 	h.logger.Info("Creating new session %s", payload.AgentThreadID)
@@ -164,7 +227,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		idleTimeout = 30 * time.Minute
 	}
 	if maxLifetime == 0 {
-		maxLifetime = 24 * time.Hour
+		maxLifetime = session.DefaultMaxLifetime
 	}
 
 	// Create session
@@ -174,6 +237,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		Command:       payload.Command,
 		Env:           payload.Env,
 		PodNamespace:  h.podNamespace,
+		OwnerID:       userCtx.UserID,
 		Config: session.SecurityConfig{
 			AllowNetworkAccess:  payload.Config.AllowNetworkAccess,
 			ReadonlyFilesystem:  payload.Config.ReadonlyFilesystem,
@@ -186,7 +250,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session: %w", err)
+		return nil, true, fmt.Errorf("session manager create failed for %s: %w", payload.AgentThreadID, err)
 	}
 
 	// Send creating status
@@ -207,6 +271,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		MemoryLimit:     payload.Config.MemoryLimit,
 		ContainerName:   "sandbox",
 		Workdir:         "/workspace",
+		ShellType:       "bash", // Enable shell-bridge
 		AgentThreadID:   payload.AgentThreadID,
 		ResourceLimits: k8s.ResourceLimits{
 			CPU:              payload.Config.CPULimit,
@@ -243,8 +308,7 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 	// Create pod
 	result, err := h.k8sClient.CreatePod(ctx, podSpec)
 	if err != nil {
-		h.sessionManager.Delete(payload.AgentThreadID)
-		return nil, fmt.Errorf("failed to create pod: %w", err)
+		return nil, true, fmt.Errorf("k8s pod creation failed for session %s: %w", payload.AgentThreadID, err)
 	}
 
 	sess.PodName = result.PodName
@@ -259,8 +323,11 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 	})
 
 	ready, err := h.k8sClient.WaitForPodReady(ctx, result.PodName, 5*time.Minute, 2*time.Second)
-	if err != nil || !ready {
-		return nil, fmt.Errorf("pod not ready: %w", err)
+	if err != nil {
+		return nil, true, fmt.Errorf("pod readiness check failed for %s: %w", result.PodName, err)
+	}
+	if !ready {
+		return nil, true, fmt.Errorf("pod %s did not become ready within timeout", result.PodName)
 	}
 
 	// Check for snapshot
@@ -271,7 +338,11 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 	})
 
 	snapshotKey := h.storageClient.GenerateSnapshotKey("ws_default", "proj_default", payload.AgentThreadID)
-	exists, _ := h.storageClient.SnapshotExists(ctx, snapshotKey)
+	exists, err := h.storageClient.SnapshotExists(ctx, snapshotKey)
+	if err != nil {
+		// Storage unavailable - fail explicitly instead of silently continuing
+		return nil, true, fmt.Errorf("failed to check snapshot existence for %s: %w", payload.AgentThreadID, err)
+	}
 
 	if exists {
 		h.logger.Info("Found snapshot for session %s, restoring...", payload.AgentThreadID)
@@ -282,10 +353,16 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		})
 
 		tarData, _, err := h.storageClient.DownloadSnapshot(ctx, snapshotKey)
-		if err == nil {
-			defer tarData.Close()
+		if err != nil {
+			h.logger.Warn("Failed to download snapshot for %s: %w (continuing without restore)", payload.AgentThreadID, err)
+		} else {
+			defer func() {
+				if closeErr := tarData.Close(); closeErr != nil {
+					h.logger.Warn("Failed to close snapshot data stream for %s: %w", payload.AgentThreadID, closeErr)
+				}
+			}()
 			if err := h.k8sClient.RestoreWorkspace(ctx, h.podNamespace, result.PodName, tarData); err != nil {
-				h.logger.Warn("Failed to restore workspace: %v", err)
+				h.logger.Warn("Failed to restore workspace for %s: %w (continuing anyway)", payload.AgentThreadID, err)
 			} else {
 				h.logger.Info("Restored workspace for session %s", payload.AgentThreadID)
 			}
@@ -301,14 +378,26 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 	})
 
 	h.logger.Info("Session %s is ready", payload.AgentThreadID)
-	return sess, nil
+	return sess, true, nil // true = new session
 }
 
 // attachSession attaches to an existing session and starts bidirectional I/O
-func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn *websocket.Conn) error {
+func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn *websocket.Conn, r *http.Request) error {
+	// Get user context from request
+	userCtx, ok := auth.GetUserContext(r)
+	if !ok {
+		return fmt.Errorf("unauthorized: no user context")
+	}
+
 	sess, ok := h.sessionManager.Get(agentThreadID)
 	if !ok {
 		return fmt.Errorf("session not found: %s", agentThreadID)
+	}
+
+	// Verify user owns this session
+	if sess.OwnerID != "" && sess.OwnerID != userCtx.UserID {
+		h.logger.Warn("User %s attempted to attach to session %s owned by %s", userCtx.UserID, agentThreadID, sess.OwnerID)
+		return fmt.Errorf("forbidden: not authorized to access this session")
 	}
 
 	// Mark as connected
@@ -336,9 +425,20 @@ func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn 
 }
 
 // forwardIO handles bidirectional I/O between WebSocket and tmux session
-func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *websocket.Conn) error {
+func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn WebSocketConn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Create connection drain for graceful shutdown
+	drain := NewConnectionDrain(conn, DefaultDrainTimeouts())
+	defer func() {
+		// Start graceful drain when connection closes
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drain.timeouts.DrainTimeout)
+		defer drainCancel()
+		if err := drain.StartDrain(drainCtx); err != nil {
+			h.logger.Warn("Connection drain failed for session %s: %v", sess.AgentThreadID, err)
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -365,11 +465,13 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 			}
 
 			var msg Message
-			if err := conn.ReadJSON(&msg); err != nil {
+			if err := conn.(*websocket.Conn).ReadJSON(&msg); err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					h.logger.Debug("WebSocket closed normally")
-				} else if err != nil {
-					h.logger.Error("Failed to read from WebSocket: %v", err)
+					h.logger.Debug("WebSocket closed normally during stdin read")
+				} else if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					h.logger.Warn("WebSocket closed unexpectedly during stdin read: %w", err)
+				} else {
+					h.logger.Warn("Failed to read stdin message from WebSocket: %w", err)
 				}
 				return
 			}
@@ -431,14 +533,14 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 
 				// Send to client
 				if outMsg.msgType == "exit" {
-					h.sendExit(conn, outMsg.exitCode)
+					h.sendExit(conn.(*websocket.Conn), outMsg.exitCode)
 					return
 				}
-				h.sendOutput(conn, outMsg.msgType, outMsg.data)
+				h.sendOutput(conn.(*websocket.Conn), outMsg.msgType, outMsg.data)
 
 			case err := <-errorChan:
 				h.logger.Error("Exec error: %v", err)
-				h.sendError(conn, err.Error())
+				h.sendError(conn.(*websocket.Conn), err.Error())
 				return
 
 			case <-activityTicker.C:
@@ -448,7 +550,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 			case <-pingTicker.C:
 				// Send ping
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-					h.logger.Error("Failed to send ping: %v", err)
+					h.logger.Debug("Failed to send ping to %s: %w", sess.AgentThreadID, err)
 					return
 				}
 			}
@@ -509,7 +611,12 @@ func (h *Handler) parseStdin(data json.RawMessage) (StdinPayload, error) {
 
 // marshalJSON marshals a value to JSON
 func (h *Handler) marshalJSON(v interface{}) json.RawMessage {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		h.logger.Error("Failed to marshal JSON: %w", err)
+		// Return empty JSON object instead of nil to avoid panic
+		return []byte("{}")
+	}
 	return data
 }
 
@@ -524,6 +631,41 @@ type outputMessage struct {
 func containsSpace(s string) bool {
 	for _, c := range s {
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			return true
+		}
+	}
+	return false
+}
+
+// isContextCanceled checks if an error is due to context cancellation
+func isContextCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for context.Canceled
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return true
+	}
+	// Check if error message contains context cancellation indicators
+	errMsg := err.Error()
+	return contains(errMsg, "context canceled") ||
+		contains(errMsg, "operation was canceled") ||
+		contains(errMsg, "deadline exceeded")
+}
+
+// contains checks if a string contains a substring (case-insensitive for error matching)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		len(s) > len(substr) && (
+			s[:len(substr)] == substr ||
+			s[len(s)-len(substr):] == substr ||
+			containsMiddle(s, substr)))
+}
+
+// containsMiddle checks if substr is in the middle of s
+func containsMiddle(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
 			return true
 		}
 	}

@@ -62,6 +62,34 @@ tools/bin/linux-amd64/kubectl -n sandbox-system port-forward svc/sandbox-manager
 {"type":"create","agent_thread_id":"test-123","image":"python:3.11","command":["/bin/bash"]}
 ```
 
+### Make Targets (Convenience)
+
+```bash
+make test
+make test-integration
+make build-manager
+make build-runner
+make build-cleaner
+make kind-up
+make kind-status
+make smoke
+```
+
+### WS Client (Interactive)
+
+Build and run the CLI client:
+
+```bash
+cd manager-service
+go build -o ../bin/ws-client ./cmd/ws-client
+../bin/ws-client --url ws://localhost:8080/ws --agent-thread-id at_demo --image python:3.11 --command /bin/bash
+```
+
+Notes:
+- Raw TTY mode enabled by default; exit with `Ctrl-]` (or `--exit-key ctrl-c`).
+- Auto reconnect with backoff on disconnect.
+- Terminal resize is detected and sent automatically when running in a TTY.
+
 ## Project Structure
 
 ```
@@ -237,6 +265,102 @@ cd manager-service
 cd manager-service
 ./scripts/test.sh
 ```
+
+## Testing
+
+The project uses a comprehensive testing strategy with unit tests, integration tests, and E2E tests.
+
+### Prerequisites
+
+- Go 1.21+
+- Docker and Docker Compose
+- kind (Kubernetes in Docker) for E2E tests
+- kubectl
+
+### Running Tests
+
+#### Unit Tests
+
+Run unit tests only:
+
+```bash
+make test-unit
+```
+
+#### Integration Tests
+
+Integration tests require external services (MinIO). The Makefile automatically starts these services:
+
+```bash
+make test-integration
+```
+
+To manually start test dependencies:
+
+```bash
+make docker-compose-up
+./scripts/wait-for-minio.sh
+```
+
+#### E2E Tests
+
+E2E tests require a kind cluster with the sandbox manager deployed:
+
+```bash
+# Ensure kind cluster is running
+./sbx dev up
+
+# Run E2E tests
+make test-e2e
+```
+
+#### All Tests
+
+Run unit and integration tests:
+
+```bash
+make test
+```
+
+#### Coverage Report
+
+Generate HTML coverage report:
+
+```bash
+make test-coverage
+```
+
+The report is saved to `coverage.html`.
+
+### Test Structure
+
+```
+manager-service/
+├── internal/           # Unit tests alongside source code
+├── integration/        # Integration tests with external services
+├── e2e/               # End-to-end tests with full stack
+└── testdata/          # Test fixtures and configurations
+```
+
+### Sandbox Client
+
+The `sbx-client` CLI tool can be used for manual testing:
+
+```bash
+make build-sbx-client
+/tmp/sbx-client create
+/tmp/sbx-client attach <session-id>
+/tmp/sbx-client exec "echo hello"
+/tmp/sbx-client close
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MINIO_ENDPOINT` | `http://localhost:9000` | MinIO endpoint for integration tests |
+| `SBX_MANAGER_URL` | `ws://localhost:8080` | Manager WebSocket URL |
+| `SBX_SERVICE_KEY` | `test-service-key` | Service key for authentication |
 
 ### Code Quality
 

@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sandbox-config
-  namespace: sandbox-system
-data:
-  # GC 配置（生产环境）
-  gc-schedule: "*/1 * * * *"  # 每 1 分钟执行一次
-  gc-skew-seconds: "5"         # 时间偏差容忍度（秒）

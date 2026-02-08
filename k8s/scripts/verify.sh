@@ -73,11 +73,11 @@ else
     echo "  ✗ Manager Service 不存在"
 fi
 
-# 检查 GC CronJob
-if kubectl get cronjob sandbox-gc -n sandbox-system &> /dev/null; then
-    echo "  ✓ GC CronJob 存在"
+# 检查 Cleaner CronJob
+if kubectl get cronjob sandbox-cleaner -n sandbox-system &> /dev/null; then
+    echo "  ✓ Cleaner CronJob 存在"
 else
-    echo "  ✗ GC CronJob 不存在"
+    echo "  ✗ Cleaner CronJob 不存在"
 fi
 
 # 验证镜像版本
