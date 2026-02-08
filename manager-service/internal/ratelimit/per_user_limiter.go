@@ -15,16 +15,50 @@ type UserLimiter struct {
 }
 
 type TokenBucket struct {
-	tokens     int
-	lastRefill time.Time
+	tokens      int
+	lastRefill  time.Time
+	lastAccess  time.Time
 }
 
 func NewPerUserLimiter(maxReq int, window time.Duration) *UserLimiter {
+	if maxReq <= 0 {
+		panic("maxReq must be greater than 0")
+	}
+	if window <= 0 {
+		panic("window must be greater than 0")
+	}
+
 	return &UserLimiter{
 		limits: make(map[string]*TokenBucket),
 		maxReq: maxReq,
 		window: window,
 	}
+}
+
+// Cleanup removes users that haven't been accessed in the specified duration
+func (ul *UserLimiter) Cleanup(inactiveFor time.Duration) int {
+	ul.mu.Lock()
+	defer ul.mu.Unlock()
+
+	now := time.Now()
+	var removed int
+
+	for userID, bucket := range ul.limits {
+		if now.Sub(bucket.lastAccess) >= inactiveFor {
+			delete(ul.limits, userID)
+			removed++
+		}
+	}
+
+	return removed
+}
+
+// GetActiveUserCount returns the number of active users
+func (ul *UserLimiter) GetActiveUserCount() int {
+	ul.mu.RLock()
+	defer ul.mu.RUnlock()
+
+	return len(ul.limits)
 }
 
 func (ul *UserLimiter) Allow(userCtx *auth.UserContext) bool {
@@ -38,6 +72,7 @@ func (ul *UserLimiter) Allow(userCtx *auth.UserContext) bool {
 		bucket = &TokenBucket{
 			tokens:     ul.maxReq - 1,
 			lastRefill: now,
+			lastAccess: now,
 		}
 		ul.limits[userCtx.UserID] = bucket
 		return true
@@ -48,6 +83,7 @@ func (ul *UserLimiter) Allow(userCtx *auth.UserContext) bool {
 	if elapsed >= ul.window {
 		bucket.tokens = ul.maxReq - 1
 		bucket.lastRefill = now
+		bucket.lastAccess = now
 		return true
 	}
 
@@ -58,9 +94,11 @@ func (ul *UserLimiter) Allow(userCtx *auth.UserContext) bool {
 		bucket.tokens = ul.maxReq
 	}
 	bucket.lastRefill = now
+	bucket.lastAccess = now
 
 	if bucket.tokens > 0 {
 		bucket.tokens--
+		bucket.lastAccess = now
 		return true
 	}
 
