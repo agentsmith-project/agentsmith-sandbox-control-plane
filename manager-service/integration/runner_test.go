@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sandbox/manager/internal/k8s"
+	"github.com/sandbox/manager/internal/shellbridge"
 )
 
 func TestRunner_KubernetesIntegration(t *testing.T) {
@@ -92,13 +93,13 @@ func TestRunner_KubernetesIntegration(t *testing.T) {
 	t.Run("Execute Command in Pod", func(t *testing.T) {
 		sessionID := "test-exec-" + time.Now().Format("20060102150405")
 
-		// Create pod
+		// Create pod with shell-bridge
 		spec := &k8s.PodSpec{
 			SessionID:       sessionID,
 			Image:           "nginx:alpine",
 			ImagePullPolicy: "IfNotPresent",
 			TTLSeconds:      300,
-			Command:         "sleep 300",
+			ShellType:       "sh", // Use shell-bridge instead of Command
 			ContainerName:   "runner",
 		}
 
@@ -113,8 +114,9 @@ func TestRunner_KubernetesIntegration(t *testing.T) {
 			t.Fatal("Pod did not become ready")
 		}
 
-		// Execute command
-		execResult, err := executor.Exec(ctx, result.PodName, &k8s.ExecOptions{
+		// Execute command using shell-bridge executor
+		shellBridgeExec := shellbridge.NewK8sAdapter(client)
+		execResult, err := shellBridgeExec.Exec(ctx, result.PodName, &k8s.ExecOptions{
 			Command: []string{"sh", "-c", "echo 'hello from runner'"},
 			Timeout: 10 * time.Second,
 		})
@@ -124,7 +126,7 @@ func TestRunner_KubernetesIntegration(t *testing.T) {
 		assert.Greater(t, execResult.Duration, time.Duration(0), "Duration should be positive")
 
 		// Test command with stderr
-		execResult, err = executor.Exec(ctx, result.PodName, &k8s.ExecOptions{
+		execResult, err = shellBridgeExec.Exec(ctx, result.PodName, &k8s.ExecOptions{
 			Command: []string{"sh", "-c", "echo 'error message' >&2"},
 			Timeout: 10 * time.Second,
 		})
@@ -132,7 +134,7 @@ func TestRunner_KubernetesIntegration(t *testing.T) {
 		assert.Contains(t, execResult.Stderr, "error message", "Stderr should contain error message")
 
 		// Test failing command
-		execResult, err = executor.Exec(ctx, result.PodName, &k8s.ExecOptions{
+		execResult, err = shellBridgeExec.Exec(ctx, result.PodName, &k8s.ExecOptions{
 			Command: []string{"sh", "-c", "exit 42"},
 			Timeout: 10 * time.Second,
 		})
@@ -148,13 +150,13 @@ func TestRunner_KubernetesIntegration(t *testing.T) {
 	t.Run("EnsurePod - Get Existing Pod", func(t *testing.T) {
 		sessionID := "test-ensure-" + time.Now().Format("20060102150405")
 
-		// Create pod
+		// Create pod with shell-bridge
 		spec := &k8s.PodSpec{
 			SessionID:       sessionID,
 			Image:           "nginx:alpine",
 			ImagePullPolicy: "IfNotPresent",
 			TTLSeconds:      300,
-			Command:         "sleep 300",
+			ShellType:       "sh", // Use shell-bridge instead of Command
 			ContainerName:   "runner",
 		}
 

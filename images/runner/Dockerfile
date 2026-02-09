@@ -40,7 +40,7 @@ RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="$
     # 系统管理工具
     bash bash-completion zsh tar coreutils tini \
     vim nano emacs-nox git htop procps strace lsof tree less \
-    grep sed gawk findutils tmux \
+    grep sed gawk findutils \
     # JSON 处理工具
     jq \
     # 其他实用工具

@@ -156,23 +156,3 @@ func TestGetAgentThreadIDFromPod_NilLabels(t *testing.T) {
 
 	assert.Equal(t, "", result)
 }
-
-func TestBuildTmuxWrapperScript_GeneratesValidScript(t *testing.T) {
-	script := buildTmuxWrapperScript("echo hello")
-
-	assert.Contains(t, script, "echo hello")
-	assert.Contains(t, script, "tmux")
-	assert.Contains(t, script, "SESSION_NAME=\"sandbox-session\"")
-}
-
-func TestBuildTmuxWrapperScript_HandlesSpecialCharacters(t *testing.T) {
-	script := buildTmuxWrapperScript("echo 'test with quotes'")
-
-	assert.Contains(t, script, "echo 'test with quotes'")
-}
-
-func TestBuildTmuxWrapperScript_EmptyCommand(t *testing.T) {
-	script := buildTmuxWrapperScript("")
-
-	assert.Contains(t, script, "SESSION_NAME=\"sandbox-session\"")
-}

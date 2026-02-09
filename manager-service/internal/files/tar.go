@@ -15,6 +15,10 @@ import (
 	"github.com/sandbox/manager/internal/k8s"
 )
 
+// ExecOptions defines the interface for executing commands in pods
+// This abstracts the execution mechanism (kubectl exec vs shell-bridge)
+type ExecOptions interface{}
+
 // K8sExecutor defines the interface for executing commands in pods
 type K8sExecutor interface {
 	Exec(ctx context.Context, podName string, opts *k8s.ExecOptions) (*k8s.ExecResult, error)

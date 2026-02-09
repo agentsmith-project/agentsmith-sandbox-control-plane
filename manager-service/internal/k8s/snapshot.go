@@ -8,6 +8,7 @@ import (
 )
 
 // SnapshotWorkspace creates a tar.gz of /workspace
+// Uses kubectl exec for streaming (shell-bridge doesn't support stdout streaming yet)
 func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName string) (io.ReadCloser, error) {
 	reader, writer := io.Pipe()
 
@@ -26,7 +27,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 		execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 
-		// Execute tar command
+		// Execute tar command using kubectl exec (for streaming support)
 		err := c.Exec(execCtx, namespace, podName, "runner", []string{
 			"tar", "czf", "-", "-C", "/workspace", ".",
 		}, StreamOptions{
@@ -42,24 +43,11 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 }
 
 // RestoreWorkspace extracts tar.gz to /workspace
+// Uses kubectl exec for streaming (shell-bridge doesn't support stdin streaming yet)
 func (c *Client) RestoreWorkspace(ctx context.Context, namespace, podName string, tarData io.Reader) error {
 	return c.Exec(ctx, namespace, podName, "runner", []string{
 		"tar", "xzf", "-", "-C", "/workspace",
 	}, StreamOptions{
 		Stdin: tarData,
 	})
-}
-
-// CheckTmux checks if tmux session exists
-func (c *Client) CheckTmux(ctx context.Context, namespace, podName string) (bool, error) {
-	output, err := c.ExecWithOutput(ctx, namespace, podName, "runner", []string{
-		"tmux", "has-session", "-t", "sandbox",
-	})
-
-	if err != nil {
-		return false, err
-	}
-
-	// Exit code 0 = session exists, 1 = not found
-	return len(output) == 0, nil
 }

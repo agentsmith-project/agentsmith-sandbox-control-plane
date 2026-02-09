@@ -35,8 +35,7 @@ type PodSpec struct {
 	EphemeralStorageLimit string
 	ContainerName         string
 	Workdir               string
-	Command               string
-	ShellType             string // e.g., "bash", "zsh", "sh", "fish", "nu"
+	ShellType             string // e.g., "bash", "zsh", "sh", "fish", "nu" (required)
 	Env                   map[string]string
 	ResourceRequests      ResourceRequests
 	ResourceLimits        ResourceLimits
@@ -368,26 +367,21 @@ func buildContainer(spec *PodSpec) v1.Container {
 		Resources:       buildResources(spec.ResourceRequests, spec.ResourceLimits),
 	}
 
-	// Use shell-bridge if ShellType is specified
-	if spec.ShellType != "" {
-		shellType := spec.ShellType
-		workdir := spec.Workdir
-		if workdir == "" {
-			workdir = "/workspace"
-		}
+	// Always use shell-bridge
+	shellType := spec.ShellType
+	if shellType == "" {
+		shellType = "bash" // Default
+	}
+	workdir := spec.Workdir
+	if workdir == "" {
+		workdir = "/workspace"
+	}
 
-		container.Command = []string{"/shellb"}
-		container.Args = []string{
-			"--shell=" + shellType,
-			"--port=8080",
-			"--workdir=" + workdir,
-		}
-	} else if spec.Command != "" {
-		// Use tmux wrapper script if command is provided (backward compatibility)
-		container.Command = []string{"sh", "-c", buildTmuxWrapperScript(spec.Command)}
-	} else {
-		// Default: keep container alive
-		container.Command = []string{"sh", "-lc", "tail -f /dev/null"}
+	container.Command = []string{"/shellb"}
+	container.Args = []string{
+		"--shell=" + shellType,
+		"--port=8080",
+		"--workdir=" + workdir,
 	}
 
 	// Add environment variables
@@ -407,33 +401,6 @@ func buildContainer(spec *PodSpec) v1.Container {
 	}
 
 	return container
-}
-
-// buildTmuxWrapperScript builds a shell script that wraps the user command in tmux
-func buildTmuxWrapperScript(userCommand string) string {
-	return fmt.Sprintf(`#!/bin/sh
-# Check if tmux exists
-if ! command -v tmux >/dev/null 2>&1; then
-    echo "tmux not found, running command directly"
-    exec sh -c "%s"
-fi
-
-# Set session name
-SESSION_NAME="sandbox-session"
-
-# Check if session already exists
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "Session $SESSION_NAME already exists, attaching..."
-    exec tail -f /dev/null
-fi
-
-# Create new session with user command and keep it running
-tmux new-session -d -s "$SESSION_NAME" sh -c "%s"
-echo "Created tmux session $SESSION_NAME"
-
-# Keep container running
-exec tail -f /dev/null
-`, userCommand, userCommand)
 }
 
 // buildSecurityContext builds the security context
@@ -550,17 +517,11 @@ func GetSessionIDFromPod(pod *v1.Pod) string {
 }
 
 // GetExpiresAtFromPod extracts expires at from pod annotations
-// Checks sandbox/expiresAt first, then falls back to expires_at for backward compatibility
 func GetExpiresAtFromPod(pod *v1.Pod) string {
 	if pod.Annotations == nil {
 		return ""
 	}
-	// Check sandbox/expiresAt first (canonical format)
-	if expiresAt, ok := pod.Annotations["sandbox/expiresAt"]; ok {
-		return expiresAt
-	}
-	// Fallback to expires_at for backward compatibility
-	return pod.Annotations["expires_at"]
+	return pod.Annotations["sandbox/expiresAt"]
 }
 
 // GetAgentThreadIDFromPod extracts agent thread ID from pod labels

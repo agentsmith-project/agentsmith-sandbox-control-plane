@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/session"
+	"github.com/sandbox/manager/internal/shellbridge"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
 )
@@ -33,7 +34,7 @@ type Manager struct {
 	cfgMeta       *config.ConfigMeta
 	cfgWatcher    *config.Watcher
 	k8sClient     *k8s.Client
-	k8sExecutor   *k8s.Executor
+	k8sExecutor   *shellbridge.K8sAdapter // Uses shell-bridge for simple commands, falls back to kubectl exec for stdin
 	authValidator *auth.ServiceKeyValidator
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
@@ -101,7 +102,7 @@ func mainImpl() {
 		log.Fatalf("K8s readiness check failed: %v", err)
 	}
 
-	k8sExecutor := k8s.NewExecutor(k8sClient)
+	k8sExecutor := shellbridge.NewK8sAdapter(k8sClient)
 
 	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
 	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
@@ -386,7 +387,7 @@ func (m *Manager) GetK8sClient() *k8s.Client {
 	return m.k8sClient
 }
 
-func (m *Manager) GetK8sExecutor() *k8s.Executor {
+func (m *Manager) GetK8sExecutor() *shellbridge.K8sAdapter {
 	return m.k8sExecutor
 }
 

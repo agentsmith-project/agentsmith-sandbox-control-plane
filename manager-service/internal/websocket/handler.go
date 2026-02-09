@@ -260,23 +260,6 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		Env: payload.Env,
 	}
 
-	// Build command if provided
-	if len(payload.Command) > 0 {
-		cmdStr := ""
-		for i, c := range payload.Command {
-			if i > 0 {
-				cmdStr += " "
-			}
-			// Simple quoting - in production use proper shell escaping
-			if containsSpace(c) {
-				cmdStr += fmt.Sprintf("'%s'", c)
-			} else {
-				cmdStr += c
-			}
-		}
-		podSpec.Command = cmdStr
-	}
-
 	// Create pod
 	result, err := h.k8sClient.CreatePod(ctx, podSpec)
 	if err != nil {
@@ -383,7 +366,7 @@ func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn 
 	return h.forwardIO(ctx, sess, conn)
 }
 
-// forwardIO handles bidirectional I/O between WebSocket and tmux session
+// forwardIO handles bidirectional I/O between WebSocket and shell-bridge session
 func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -399,7 +382,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 	outputChan := make(chan outputMessage, 100)
 	errorChan := make(chan error, 1)
 
-	// WebSocket → tmux (stdin)
+	// WebSocket → shell-bridge (stdin)
 	go func() {
 		defer wg.Done()
 		defer cancel()
@@ -439,7 +422,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 					h.logger.Error("Failed to decode stdin data: %v", err)
 					continue
 				}
-				// Write stdin to the tmux session
+				// Write stdin to the shell-bridge session
 				// For now, we'll buffer this - in a full implementation,
 				// we'd have a persistent stdin stream
 				h.logger.Debug("Received stdin data: %d bytes", len(data))
@@ -454,7 +437,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 		}
 	}()
 
-	// tmux → WebSocket (stdout/stderr)
+	// shell-bridge → WebSocket (stdout/stderr)
 	go func() {
 		defer wg.Done()
 		defer cancel()
