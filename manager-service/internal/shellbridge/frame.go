@@ -5,6 +5,12 @@ import (
 	"errors"
 )
 
+const (
+	// MaxFrameSize is the maximum allowed size for a binary frame (10MB)
+	// This prevents integer overflow when converting uint32 to int
+	MaxFrameSize = 10 * 1024 * 1024
+)
+
 // BinaryDataType represents the type of binary data in a frame
 type BinaryDataType byte
 
@@ -34,6 +40,11 @@ func ParseBinaryFrame(data []byte) (*BinaryFrame, error) {
 		Length: binary.BigEndian.Uint32(data[1:5]),
 	}
 
+	// Check frame size BEFORE converting to int to prevent integer overflow
+	if frame.Length > MaxFrameSize {
+		return nil, errors.New("frame size exceeds maximum allowed size")
+	}
+
 	if frame.Length > 0 {
 		if len(data) < 5+int(frame.Length) {
 			return nil, errors.New("incomplete frame data")
@@ -47,6 +58,10 @@ func ParseBinaryFrame(data []byte) (*BinaryFrame, error) {
 // EncodeBinaryFrame encodes a binary frame for sending to shell-bridge
 // Used by WebSocket handlers to send output to clients
 func EncodeBinaryFrame(frameType BinaryDataType, data []byte) ([]byte, error) {
+	if len(data) > MaxFrameSize {
+		return nil, errors.New("data size exceeds maximum frame size")
+	}
+
 	buf := make([]byte, 5+len(data))
 
 	// Type

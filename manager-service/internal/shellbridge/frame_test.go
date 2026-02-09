@@ -209,3 +209,121 @@ func TestBinaryDataTypeValues(t *testing.T) {
 		})
 	}
 }
+
+func TestFrameSizeLimit(t *testing.T) {
+	// Create a frame larger than 10MB
+	largeData := make([]byte, 11*1024*1024) // 11MB
+
+	frame := &BinaryFrame{
+		Type:   DataTypeStdout,
+		Length: uint32(len(largeData)),
+		Data:   largeData,
+	}
+
+	_, err := EncodeBinaryFrame(frame.Type, frame.Data)
+
+	if err == nil {
+		t.Error("Expected error for frame > 10MB, got nil")
+	}
+}
+
+func TestFrameOverflowProtection(t *testing.T) {
+	// Create malicious frame with Length that overflows when converted to int
+	// Max uint32 value (2^32 - 1) would be problematic
+	buf := make([]byte, 5)
+	buf[0] = byte(DataTypeStdout)
+	// Max uint32 value - this should be rejected before int conversion
+	buf[1] = 0xFF
+	buf[2] = 0xFF
+	buf[3] = 0xFF
+	buf[4] = 0xFF
+
+	_, err := ParseBinaryFrame(buf)
+	if err == nil {
+		t.Error("Expected error for oversized frame, got nil")
+	}
+}
+
+func TestFrameOverflowProtectionNearLimit(t *testing.T) {
+	// Test with value slightly larger than maxFrameSize (10MB)
+	maxSize := 10 * 1024 * 1024
+	_ = maxSize + 1 // Used for clarity in test below
+
+	buf := make([]byte, 5)
+	buf[0] = byte(DataTypeStdout)
+	// Put length that's 1 byte larger than max: 0x00A00001 (10MB + 1)
+	buf[1] = 0x00
+	buf[2] = 0xA0
+	buf[3] = 0x00
+	buf[4] = 0x01
+
+	_, err := ParseBinaryFrame(buf)
+	if err == nil {
+		t.Error("Expected error for frame exceeding max size, got nil")
+	}
+}
+
+func TestValidFrameUnderLimit(t *testing.T) {
+	// Test with valid frame at exactly 10MB (should work)
+	tenMB := 10 * 1024 * 1024
+	buf := make([]byte, 5+tenMB)
+	buf[0] = byte(DataTypeStdout)
+	// Put length exactly 10MB in big endian: 0x00A00000
+	buf[1] = 0x00
+	buf[2] = 0xA0
+	buf[3] = 0x00
+	buf[4] = 0x00
+	// Fill rest with valid data
+	for i := 5; i < len(buf); i++ {
+		buf[i] = 0x42 // 'B'
+	}
+
+	frame, err := ParseBinaryFrame(buf)
+	if err != nil {
+		t.Errorf("Expected success for frame at max size, got error: %v", err)
+	}
+	if frame != nil {
+		if frame.Type != DataTypeStdout {
+			t.Errorf("Expected Type DataTypeStdout, got %v", frame.Type)
+		}
+		if frame.Length != uint32(tenMB) {
+			t.Errorf("Expected Length %d, got %d", tenMB, frame.Length)
+		}
+		if len(frame.Data) != tenMB {
+			t.Errorf("Expected data length %d, got %d", tenMB, len(frame.Data))
+		}
+	}
+}
+
+func TestValidSmallFrameParses(t *testing.T) {
+	// Create a valid frame with 5 bytes of data
+	buf := []byte{
+		0x01,       // Type: DataTypeStdout
+		0x00, 0x00, 0x00, 0x05, // Length: 5
+		0x48, 0x65, 0x6C, 0x6C, 0x6F, // Data: 'H', 'e', 'l', 'l', 'o'
+	}
+
+	frame, err := ParseBinaryFrame(buf)
+	if err != nil {
+		t.Fatalf("Expected success, got error: %v", err)
+	}
+	if frame.Type != DataTypeStdout {
+		t.Errorf("Expected Type DataTypeStdout, got 0x%02x", frame.Type)
+	}
+	if frame.Length != 5 {
+		t.Errorf("Expected Length 5, got %d", frame.Length)
+	}
+	if len(frame.Data) != 5 {
+		t.Errorf("Expected data length 5, got %d", len(frame.Data))
+	}
+	if string(frame.Data) != "Hello" {
+		t.Errorf("Expected data 'Hello', got '%s'", string(frame.Data))
+	}
+}
+
+func TestMaxFrameSizeConstant(t *testing.T) {
+	// Verify MaxFrameSize is exported and has the expected value
+	if MaxFrameSize != 10*1024*1024 {
+		t.Errorf("Expected MaxFrameSize to be 10MB, got %d", MaxFrameSize)
+	}
+}
