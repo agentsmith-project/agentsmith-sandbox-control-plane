@@ -303,7 +303,20 @@ func (m *Manager) setupHTTPServer() {
 		}
 	}
 
-	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
+	// Debug config endpoint with optional authentication
+	if m.cfg.Server.Metrics.RequireServiceKey {
+		authMiddleware := auth.ServiceKeyMiddleware(
+			m.authValidator,
+			m.cfg.Auth.HeaderName,
+			m.cfg.Auth.AcceptAuthorization,
+			m.cfg.Auth.AuthorizationScheme,
+			m.cfg.Auth.FailStatusCode,
+			m.cfg.Auth.AllowUnauthenticated,
+		)
+		mux.Handle(m.cfg.Server.Debug.ConfigPath, authMiddleware(http.HandlerFunc(m.handleDebugConfig)))
+	} else {
+		mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
+	}
 
 	// Add WebSocket route with service key authentication via X-Service-Key header
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

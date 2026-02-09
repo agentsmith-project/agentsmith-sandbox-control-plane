@@ -615,8 +615,10 @@ func (h *Handler) marshalJSON(v interface{}) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
 		h.logger.Error("Failed to marshal JSON: %w", err)
-		// Return empty JSON object instead of nil to avoid panic
-		return []byte("{}")
+		// Return error message in JSON format instead of empty object
+		// This ensures the client receives actionable error information
+		errorMsg := fmt.Sprintf(`{"error":"Failed to marshal message: %s"}`, err.Error())
+		return json.RawMessage(errorMsg)
 	}
 	return data
 }

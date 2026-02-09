@@ -478,3 +478,159 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("DefaultConfig() validation failed: %d errors", len(result.Errors))
 	}
 }
+
+// TestQPSUpperBound tests QPS upper bound validation
+func TestQPSUpperBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		qps     int
+		wantErr bool
+	}{
+		{"valid qps 1000", 1000, false},
+		{"valid qps 500", 500, false},
+		{"invalid qps 1001", 1001, true},
+		{"invalid qps 9999", 9999, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Kubernetes.QPS = tt.qps
+			errs := validateK8sConfig(&cfg.Kubernetes)
+			if (len(errs) > 0) != tt.wantErr {
+				t.Errorf("validateK8sConfig() QPS=%d errors=%v, wantErr %v", tt.qps, errs, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestBurstUpperBound tests Burst upper bound validation
+func TestBurstUpperBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		burst   int
+		wantErr bool
+	}{
+		{"valid burst 2000", 2000, false},
+		{"valid burst 1000", 1000, false},
+		{"invalid burst 2001", 2001, true},
+		{"invalid burst 9999", 9999, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Kubernetes.Burst = tt.burst
+			errs := validateK8sConfig(&cfg.Kubernetes)
+			if (len(errs) > 0) != tt.wantErr {
+				t.Errorf("validateK8sConfig() Burst=%d errors=%v, wantErr %v", tt.burst, errs, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestConfigConcurrentValidation tests concurrent config validation
+func TestConfigConcurrentValidation(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Run multiple validations concurrently
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			result := cfg.Validate()
+			if !result.Valid {
+				t.Errorf("Concurrent validation failed: %d errors", len(result.Errors))
+			}
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// TestConfigEdgeCases tests edge case configurations
+func TestConfigEdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr bool
+	}{
+		{
+			name: "zero qps",
+			modify: func(c *Config) {
+				c.Kubernetes.QPS = 0
+			},
+			wantErr: false, // 0 is valid (non-negative)
+		},
+		{
+			name: "zero burst",
+			modify: func(c *Config) {
+				c.Kubernetes.Burst = 0
+			},
+			wantErr: false, // 0 is valid (non-negative)
+		},
+		{
+			name: "minimum timeout",
+			modify: func(c *Config) {
+				c.Kubernetes.RequestTimeout = 0
+			},
+			wantErr: false, // 0 is valid (non-negative)
+		},
+		{
+			name: "maximum timeout",
+			modify: func(c *Config) {
+				c.Kubernetes.RequestTimeout = 5 * time.Minute
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative timeout",
+			modify: func(c *Config) {
+				c.Kubernetes.RequestTimeout = -1 * time.Second
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty workdir",
+			modify: func(c *Config) {
+				c.Sandbox.Defaults.Workdir = ""
+			},
+			wantErr: true,
+		},
+		{
+			name: "workdir with trailing slash",
+			modify: func(c *Config) {
+				c.Sandbox.Defaults.Workdir = "/workspace/"
+			},
+			wantErr: false, // trailing slash is valid
+		},
+		{
+			name: "max ttl seconds",
+			modify: func(c *Config) {
+				c.Sandbox.Defaults.TTLSeconds = 86400
+			},
+			wantErr: false,
+		},
+		{
+			name: "exceeds max ttl seconds",
+			modify: func(c *Config) {
+				c.Sandbox.Defaults.TTLSeconds = 86401
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.modify(cfg)
+			result := cfg.Validate()
+			if result.Valid == tt.wantErr {
+				t.Errorf("Validate() Valid=%v, wantErr %v", result.Valid, tt.wantErr)
+			}
+		})
+	}
+}

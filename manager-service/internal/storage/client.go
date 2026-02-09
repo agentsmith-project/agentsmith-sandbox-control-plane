@@ -85,7 +85,11 @@ func (c *Client) DownloadSnapshot(ctx context.Context, key string) (io.ReadClose
 }
 
 func (c *Client) DeleteSnapshot(ctx context.Context, key string) error {
-	return c.client.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{})
+	err := c.client.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete snapshot %s: %w", key, err)
+	}
+	return nil
 }
 
 func (c *Client) SnapshotExists(ctx context.Context, key string) (bool, error) {

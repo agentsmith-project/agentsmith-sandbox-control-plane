@@ -365,3 +365,152 @@ func TestIsConfigFileReadable_UnreadableFile_ReturnsError(t *testing.T) {
 
 	assert.Error(t, err)
 }
+
+// TestWatcherConcurrentAccess tests concurrent access to watcher methods
+func TestWatcherConcurrentAccess(t *testing.T) {
+	cfg := &Config{Version: 1}
+	meta := &ConfigMeta{CurrentHash: "abc123"}
+	watcher := NewWatcher("test.yaml", cfg, meta, nil)
+
+	// Run concurrent operations
+	done := make(chan bool, 20)
+	for i := 0; i < 10; i++ {
+		go func() {
+			_, _ = watcher.GetCurrent()
+			done <- true
+		}()
+		go func() {
+			_ = watcher.GetStats()
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+// TestConcurrentConfigValidation tests concurrent config validation with edge cases
+func TestConcurrentConfigValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *Config
+	}{
+		{
+			name:   "default config",
+			config: DefaultConfig(),
+		},
+		{
+			name: "zero qps config",
+			config: func() *Config {
+				c := DefaultConfig()
+				c.Kubernetes.QPS = 0
+				return c
+			}(),
+		},
+		{
+			name: "max qps config",
+			config: func() *Config {
+				c := DefaultConfig()
+				c.Kubernetes.QPS = 1000
+				return c
+			}(),
+		},
+		{
+			name: "max burst config",
+			config: func() *Config {
+				c := DefaultConfig()
+				c.Kubernetes.Burst = 2000
+				return c
+			}(),
+		},
+		{
+			name: "min ttl config",
+			config: func() *Config {
+				c := DefaultConfig()
+				c.Sandbox.Defaults.TTLSeconds = 1
+				return c
+			}(),
+		},
+		{
+			name: "max ttl config",
+			config: func() *Config {
+				c := DefaultConfig()
+				c.Sandbox.Defaults.TTLSeconds = 86400
+				return c
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Run 5 concurrent validations for each config
+			done := make(chan bool, 5)
+			for i := 0; i < 5; i++ {
+				go func(cfg *Config) {
+					result := cfg.Validate()
+					assert.True(t, result.Valid, "Validation should succeed")
+					done <- true
+				}(tt.config)
+			}
+
+			// Wait for all goroutines to complete
+			for i := 0; i < 5; i++ {
+				<-done
+			}
+		})
+	}
+}
+
+// TestConfigCloneValidatesAfterClone tests that cloned configs can be validated
+func TestConfigCloneValidatesAfterClone(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Clone the default config (which is valid)
+	clone, err := cfg.Clone()
+	assert.NoError(t, err)
+	assert.NotNil(t, clone)
+
+	// Verify the clone is valid (cloned configs should be validated by caller)
+	result := clone.Validate()
+	assert.True(t, result.Valid, "Cloned config should be valid")
+}
+
+// TestConfigClonePreservesValidity tests that cloning preserves validity
+func TestConfigClonePreservesValidity(t *testing.T) {
+	// Create a config, validate it first
+	cfg := DefaultConfig()
+	originalResult := cfg.Validate()
+	assert.True(t, originalResult.Valid, "Original config should be valid")
+
+	// Clone the validated config
+	clone, err := cfg.Clone()
+	assert.NoError(t, err)
+	assert.NotNil(t, clone)
+
+	// The clone should also be valid
+	cloneResult := clone.Validate()
+	assert.True(t, cloneResult.Valid, "Cloned config should remain valid")
+}
+
+// TestConfigCloneConcurrent tests concurrent config cloning
+func TestConfigCloneConcurrent(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Run 10 concurrent clones
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			clone, err := cfg.Clone()
+			assert.NoError(t, err)
+			assert.NotNil(t, clone)
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}

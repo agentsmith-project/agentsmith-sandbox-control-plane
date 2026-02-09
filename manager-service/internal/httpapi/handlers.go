@@ -307,6 +307,9 @@ func (h *Handlers) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Close the request body to prevent resource leaks
+	defer r.Body.Close()
+
 	dest := r.URL.Query().Get("dest")
 	if dest == "" {
 		dest = h.cfg.Files.Upload.DefaultDest
