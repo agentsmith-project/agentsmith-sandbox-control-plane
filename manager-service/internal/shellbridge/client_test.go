@@ -50,12 +50,98 @@ func TestExecCommandWithoutConnect(t *testing.T) {
 	client := NewClient("10.0.0.1", 8080)
 	ctx := context.Background()
 
-	// This will panic because conn is nil
-	// In production, always call Connect() first
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("ExecCommand() did not panic with nil conn, expected panic")
+	// Should return error, not panic
+	err := client.ExecCommand(ctx, "bash", "echo test", nil)
+	if err == nil {
+		t.Error("ExecCommand() succeeded without Connect, expected error")
+	}
+}
+
+func TestReceiveOutputWithoutConnect(t *testing.T) {
+	client := NewClient("10.0.0.1", 8080)
+	ctx := context.Background()
+
+	// Should return error, not panic
+	_, err := client.ReceiveOutput(ctx)
+	if err == nil {
+		t.Error("ReceiveOutput() succeeded without Connect, expected error")
+	}
+}
+
+func TestExecCommandAfterClose(t *testing.T) {
+	client := NewClient("10.0.0.1", 8080)
+	ctx := context.Background()
+
+	// Close without connecting
+	_ = client.Close()
+
+	// Should return error, not panic
+	err := client.ExecCommand(ctx, "bash", "echo test", nil)
+	if err == nil {
+		t.Error("ExecCommand() succeeded after Close, expected error")
+	}
+}
+
+func TestReceiveOutputAfterClose(t *testing.T) {
+	client := NewClient("10.0.0.1", 8080)
+	ctx := context.Background()
+
+	// Close without connecting
+	_ = client.Close()
+
+	// Should return error, not panic
+	_, err := client.ReceiveOutput(ctx)
+	if err == nil {
+		t.Error("ReceiveOutput() succeeded after Close, expected error")
+	}
+}
+
+func TestClientCloseIdempotent(t *testing.T) {
+	client := NewClient("10.0.0.1", 8080)
+
+	// Multiple closes should not panic
+	err := client.Close()
+	if err != nil {
+		t.Errorf("First Close() failed: %v", err)
+	}
+
+	err = client.Close()
+	if err != nil {
+		t.Errorf("Second Close() failed: %v", err)
+	}
+}
+
+func TestClientConcurrentCloseAndExec(t *testing.T) {
+	client := NewClient("10.0.0.1", 8080)
+	ctx := context.Background()
+
+	done := make(chan bool)
+
+	// Try to close while another goroutine tries to exec
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = client.ExecCommand(ctx, "bash", "ls", nil)
 		}
+		done <- true
 	}()
-	_ = client.ExecCommand(ctx, "bash", "echo test", nil)
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = client.Close()
+		}
+		done <- true
+	}()
+
+	// Wait for both goroutines (with timeout to avoid hanging)
+	timeout := time.After(5 * time.Second)
+	completed := 0
+	for completed < 2 {
+		select {
+		case <-done:
+			completed++
+		case <-timeout:
+			t.Error("Test timed out - possible deadlock")
+			return
+		}
+	}
 }

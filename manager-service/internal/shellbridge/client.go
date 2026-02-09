@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,6 +21,8 @@ const (
 // Client is a WebSocket client for shell-bridge
 type Client struct {
 	conn       *websocket.Conn
+	connMu     sync.RWMutex
+	connected  bool
 	url        string
 	httpClient *http.Client
 }
@@ -42,7 +45,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to shell-bridge: %w", err)
 	}
+	c.connMu.Lock()
 	c.conn = conn
+	c.connected = true
+	c.connMu.Unlock()
 	return nil
 }
 
@@ -56,13 +62,21 @@ type ExecMessage struct {
 
 // ExecCommand sends a command to the shell
 func (c *Client) ExecCommand(ctx context.Context, shell, command string, env []string) error {
+	c.connMu.RLock()
+	if !c.connected || c.conn == nil {
+		c.connMu.RUnlock()
+		return fmt.Errorf("not connected to shell-bridge")
+	}
+	conn := c.conn
+	c.connMu.RUnlock()
+
 	msg := ExecMessage{Type: "exec", Shell: shell, Command: command, Env: env}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	c.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // Output represents shell output with metadata
@@ -74,6 +88,14 @@ type Output struct {
 // ReceiveOutput waits for output from the shell
 // Returns io.EOF when the shell closes
 func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
+	c.connMu.RLock()
+	if !c.connected || c.conn == nil {
+		c.connMu.RUnlock()
+		return nil, fmt.Errorf("not connected to shell-bridge")
+	}
+	conn := c.conn
+	c.connMu.RUnlock()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,7 +103,7 @@ func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
 		default:
 		}
 
-		msgType, data, err := c.conn.ReadMessage()
+		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			if err == io.EOF || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				return nil, io.EOF
@@ -102,11 +124,18 @@ func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
 
 // Close closes the WebSocket connection gracefully
 func (c *Client) Close() error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
 	if c.conn != nil {
 		// Send close frame
 		c.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		return c.conn.Close()
+		err := c.conn.Close()
+		c.conn = nil
+		c.connected = false
+		return err
 	}
+	c.connected = false
 	return nil
 }
