@@ -11,8 +11,10 @@ import (
 )
 
 func TestServiceKeyMiddleware_NoKeysConfigured_AllowsRequest(t *testing.T) {
+	// This test verifies the old insecure behavior is preserved for backward compatibility
+	// when dev mode is explicitly enabled via allowUnauthenticated=true parameter
 	validator := &ServiceKeyValidator{}
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -32,7 +34,7 @@ func TestServiceKeyMiddleware_ValidKey_AllowsRequest(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -53,7 +55,7 @@ func TestServiceKeyMiddleware_MissingKey_Returns401(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -77,7 +79,7 @@ func TestServiceKeyMiddleware_InvalidKey_Returns401(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -102,7 +104,7 @@ func TestServiceKeyMiddleware_AuthorizationHeader_AcceptsValidKey(t *testing.T) 
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", true, "ServiceKey", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", true, "ServiceKey", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -121,7 +123,7 @@ func TestServiceKeyMiddleware_CustomHeaderTakesPrecedence(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"custom-key", "auth-key"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", true, "ServiceKey", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", true, "ServiceKey", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -142,7 +144,7 @@ func TestServiceKeyMiddleware_RequestID_IncludedInResponse(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -166,7 +168,7 @@ func TestServiceKeyMiddleware_CustomStatusCode(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 403)
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 403, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -213,7 +215,7 @@ func TestGetRequestID_NoRequestID(t *testing.T) {
 
 func TestOptionalAuthMiddleware_NoKeys_AllowsRequest(t *testing.T) {
 	validator := &ServiceKeyValidator{}
-	middleware := OptionalAuthMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := OptionalAuthMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -231,7 +233,7 @@ func TestOptionalAuthMiddleware_WithKeys_EnforcesAuth(t *testing.T) {
 	validator, err := NewServiceKeyValidator([]string{"valid-key-123"})
 	require.NoError(t, err)
 
-	middleware := OptionalAuthMiddleware(validator, "X-Service-Key", false, "", 401)
+	middleware := OptionalAuthMiddleware(validator, "X-Service-Key", false, "", 401, false)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -301,4 +303,105 @@ func TestCombineMiddleware_Empty(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// Tests for P0-1 authentication bypass vulnerability fix
+
+func TestAuthenticationBypass_NoKeysDevModeOff_Returns500(t *testing.T) {
+	validator := &ServiceKeyValidator{}
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var resp ErrorResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "SERVICE_NOT_CONFIGURED", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "Service not configured")
+}
+
+func TestAuthenticationBypass_NoKeysDevModeOn_AllowsRequest(t *testing.T) {
+	validator := &ServiceKeyValidator{}
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("success"))
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "success", rec.Body.String())
+}
+
+func TestAuthenticationBypass_WithKeysDevModeOff_RequiresAuth(t *testing.T) {
+	validator, err := NewServiceKeyValidator([]string{"test-key"})
+	require.NoError(t, err)
+
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, false)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Request without key should be rejected
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestAuthenticationBypass_WithKeyDevModeOn_ValidKeySucceeds(t *testing.T) {
+	validator, err := NewServiceKeyValidator([]string{"test-key"})
+	require.NoError(t, err)
+
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("success"))
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Service-Key", "test-key")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "success", rec.Body.String())
+}
+
+func TestAuthenticationBypass_WithKeyDevModeOn_InvalidKeyFails(t *testing.T) {
+	validator, err := NewServiceKeyValidator([]string{"test-key"})
+	require.NoError(t, err)
+
+	middleware := ServiceKeyMiddleware(validator, "X-Service-Key", false, "", 401, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Service-Key", "wrong-key")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }

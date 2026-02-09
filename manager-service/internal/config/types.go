@@ -57,6 +57,7 @@ type AuthConfig struct {
 	AcceptAuthorization bool   `yaml:"acceptAuthorization"`
 	AuthorizationScheme string `yaml:"authorizationScheme"`
 	FailStatusCode      int    `yaml:"failStatusCode"`
+	AllowUnauthenticated bool   `yaml:"allowUnauthenticated"`
 }
 
 // K8sConfig contains Kubernetes client configuration

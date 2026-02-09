@@ -294,6 +294,7 @@ func (m *Manager) setupHTTPServer() {
 				m.cfg.Auth.AcceptAuthorization,
 				m.cfg.Auth.AuthorizationScheme,
 				m.cfg.Auth.FailStatusCode,
+				m.cfg.Auth.AllowUnauthenticated,
 			)
 			mux.Handle(m.cfg.Server.Metrics.Path, authMiddleware(http.HandlerFunc(metricsHandler)))
 		} else {
@@ -305,16 +306,38 @@ func (m *Manager) setupHTTPServer() {
 
 	// Add WebSocket route with service key authentication via query parameter
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// 从 URL 参数获取 service key
+		// Fail-closed: If no keys are configured, check allowUnauthenticated flag
+		if !m.authValidator.HasKeys() {
+			if !m.cfg.Auth.AllowUnauthenticated {
+				// Not configured and dev mode is OFF - return 500
+				// Extract request ID from common headers
+				requestID := r.Header.Get("X-Request-Id")
+				if requestID == "" {
+					requestID = r.Header.Get("X-Request-ID")
+				}
+				if requestID == "" {
+					requestID = r.Header.Get("Request-Id")
+				}
+				log.Printf("Auth: service not configured (requestId: %s, path: %s)", requestID, r.URL.Path)
+				http.Error(w, "Service not configured: no service keys configured", http.StatusInternalServerError)
+				return
+			}
+			// Dev mode is ON - log and allow request
+			log.Printf("Auth: dev mode enabled - allowing unauthenticated WebSocket request (path: %s)", r.URL.Path)
+			m.wsHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// Get service key from URL parameter
 		serviceKey := r.URL.Query().Get("service_key")
 
-		// 验证 service key
+		// Validate service key
 		if !m.authValidator.Validate(serviceKey) {
 			http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
 			return
 		}
 
-		// 认证通过，转发到 WebSocket handler
+		// Authentication successful, forward to WebSocket handler
 		m.wsHandler.ServeHTTP(w, r)
 	})
 
@@ -326,6 +349,7 @@ func (m *Manager) setupHTTPServer() {
 			m.cfg.Auth.AcceptAuthorization,
 			m.cfg.Auth.AuthorizationScheme,
 			m.cfg.Auth.FailStatusCode,
+			m.cfg.Auth.AllowUnauthenticated,
 		)
 		v1Handler = authMiddleware(v1Handler)
 	}
