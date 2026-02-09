@@ -304,8 +304,11 @@ func (c *Client) PatchActivity(ctx context.Context, name string, ttlSeconds int)
 		},
 	}
 
-	patchBytes, _ := json.Marshal(patch)
-	_, err := c.clientset.CoreV1().Pods(c.namespace).Patch(ctx, name, "application/merge-patch+json", patchBytes, metav1.PatchOptions{})
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
+	}
+	_, err = c.clientset.CoreV1().Pods(c.namespace).Patch(ctx, name, "application/merge-patch+json", patchBytes, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to patch pod: %w", err)
 	}

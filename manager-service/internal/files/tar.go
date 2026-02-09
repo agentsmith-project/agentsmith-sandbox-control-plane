@@ -323,7 +323,7 @@ func (d *Downloader) Download(ctx context.Context, podName string, src string) (
 	go func() {
 		defer pw.Close()
 
-		// Check if context is already cancelled
+		// Check if context is already cancelled before starting
 		select {
 		case <-ctx.Done():
 			pw.CloseWithError(ctx.Err())
@@ -332,17 +332,9 @@ func (d *Downloader) Download(ctx context.Context, podName string, src string) (
 		}
 
 		// Create a separate context with timeout for the exec operation
-		// Use the parent context to propagate cancellation
+		// This ensures the exec is cancelled if the parent context is cancelled
 		execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
-
-		// Check again before starting the exec
-		select {
-		case <-execCtx.Done():
-			pw.CloseWithError(execCtx.Err())
-			return
-		default:
-		}
 
 		opts := &k8s.ExecOptions{
 			Command: cmd,
@@ -352,13 +344,36 @@ func (d *Downloader) Download(ctx context.Context, podName string, src string) (
 			Timeout: 120 * time.Second, // Download timeout
 		}
 
-		_, err := d.k8sExec.Exec(execCtx, podName, opts)
+		// Execute and handle context cancellation
+		err := d.execWithContextCheck(execCtx, podName, opts, pw)
 		if err != nil {
 			pw.CloseWithError(fmt.Errorf("download exec failed: %w", err))
 		}
 	}()
 
 	return pr, nil
+}
+
+// execWithContextCheck executes the command with proper context cancellation handling
+func (d *Downloader) execWithContextCheck(ctx context.Context, podName string, opts *k8s.ExecOptions, pw *io.PipeWriter) error {
+	// Create a channel to receive the exec result
+	resultCh := make(chan error, 1)
+
+	// Run the exec in a separate goroutine
+	go func() {
+		_, err := d.k8sExec.Exec(ctx, podName, opts)
+		resultCh <- err
+	}()
+
+	// Wait for either completion or context cancellation
+	select {
+	case <-ctx.Done():
+		// Context was cancelled, return the cancellation error
+		return ctx.Err()
+	case err := <-resultCh:
+		// Exec completed (successfully or with an error)
+		return err
+	}
 }
 
 // ValidateSrc validates and normalizes the source path

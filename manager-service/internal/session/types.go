@@ -72,3 +72,24 @@ func (s *Session) GetExpiresAt() time.Time {
 
 	return maxExpiry
 }
+
+// Initialized checks if the session has been properly initialized with required fields.
+// A session is considered initialized if it has an AgentThreadID and a non-empty Config.
+func (s *Session) Initialized() bool {
+	return s.AgentThreadID != "" && s.CreatedAt.IsZero() == false
+}
+
+// Validate checks if the session is in a valid state.
+// Returns an error if the session has invalid configuration or state.
+func (s *Session) Validate() error {
+	if s.AgentThreadID == "" {
+		return fmt.Errorf("session: AgentThreadID is required")
+	}
+	if s.CreatedAt.IsZero() {
+		return fmt.Errorf("session: CreatedAt is required")
+	}
+	if s.Config.MaxLifetime <= 0 {
+		return fmt.Errorf("session: MaxLifetime must be positive")
+	}
+	return nil
+}

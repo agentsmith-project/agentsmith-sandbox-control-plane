@@ -215,6 +215,9 @@ func ComputeHash(data []byte) string {
 }
 
 // Clone creates a deep copy of the configuration
+// Note: This method does not validate the cloned config. If the original config
+// was validated, the clone will preserve the same structure. Call Validate()
+// on the cloned config if you need to ensure it's still valid after cloning.
 func (c *Config) Clone() (*Config, error) {
 	data, err := yaml.Marshal(c)
 	if err != nil {

@@ -242,6 +242,16 @@ func validateK8sConfig(cfg *K8sConfig) []*ConfigError {
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+	if cfg.QPS > 1000 {
+		errors = append(errors, &ConfigError{
+			Code:      "CONFIG_VALIDATION_FAILED",
+			FieldPath: "kubernetes.qps",
+			RuleID:    "RANGE",
+			Rule:      "qps must be <= 1000",
+			Message:   fmt.Sprintf("Invalid qps: %d", cfg.QPS),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
 
 	// Burst
 	if cfg.Burst < 0 {
@@ -250,6 +260,16 @@ func validateK8sConfig(cfg *K8sConfig) []*ConfigError {
 			FieldPath: "kubernetes.burst",
 			RuleID:    "RANGE",
 			Rule:      "burst must be non-negative",
+			Message:   fmt.Sprintf("Invalid burst: %d", cfg.Burst),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	if cfg.Burst > 2000 {
+		errors = append(errors, &ConfigError{
+			Code:      "CONFIG_VALIDATION_FAILED",
+			FieldPath: "kubernetes.burst",
+			RuleID:    "RANGE",
+			Rule:      "burst must be <= 2000",
 			Message:   fmt.Sprintf("Invalid burst: %d", cfg.Burst),
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
