@@ -454,3 +454,72 @@ func TestManager_GetOrCreate_RaceWithCreate(t *testing.T) {
 	// Should have exactly one session
 	assert.Equal(t, 1, m.GetSessionCount())
 }
+
+func TestManager_Create_ReturnsExistingSession(t *testing.T) {
+	m := NewManager()
+	ctx := context.Background()
+	const agentThreadID = "at_test"
+
+	// Create first session
+	firstSess, err := m.Create(ctx, CreateRequest{
+		AgentThreadID: agentThreadID,
+		Image:         "test:latest",
+		PodNamespace:  "sandbox",
+		Config:        SecurityConfig{MaxLifetime: 1 * time.Hour},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, firstSess)
+
+	// Create with same ID should return existing session
+	secondSess, err := m.Create(ctx, CreateRequest{
+		AgentThreadID: agentThreadID,
+		Image:         "different:image", // This should be ignored
+		PodNamespace:  "different",
+		Config:        SecurityConfig{MaxLifetime: 2 * time.Hour},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, m.GetSessionCount(), "should only have one session")
+
+	// Verify the original session is returned (unchanged)
+	assert.Equal(t, firstSess.AgentThreadID, secondSess.AgentThreadID)
+	assert.Equal(t, "test:latest", secondSess.Image, "image should not be updated")
+	assert.Equal(t, "sandbox", secondSess.PodNamespace, "namespace should not be updated")
+}
+
+func TestManager_Create_ConcurrentSameID(t *testing.T) {
+	m := NewManager()
+	ctx := context.Background()
+	const agentThreadID = "at_concurrent"
+	const numGoroutines = 50
+
+	results := make(chan *Session, numGoroutines)
+
+	// Launch multiple goroutines trying to Create with same ID
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			sess, _ := m.Create(ctx, CreateRequest{
+				AgentThreadID: agentThreadID,
+				Image:         "test:latest",
+				PodNamespace:  "sandbox",
+				Config:        SecurityConfig{MaxLifetime: 1 * time.Hour},
+			})
+			results <- sess
+		}()
+	}
+
+	// Collect results
+	var sessions []*Session
+	for i := 0; i < numGoroutines; i++ {
+		sessions = append(sessions, <-results)
+	}
+
+	// All should return the same session instance
+	assert.Equal(t, 1, m.GetSessionCount(), "should only have one session")
+
+	// Verify all returned sessions point to the same instance
+	firstAddr := uintptr(unsafe.Pointer(sessions[0]))
+	for _, sess := range sessions[1:] {
+		addr := uintptr(unsafe.Pointer(sess))
+		assert.Equal(t, firstAddr, addr, "all goroutines should return the same session instance")
+	}
+}

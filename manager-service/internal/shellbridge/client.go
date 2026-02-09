@@ -15,6 +15,7 @@ import (
 const (
 	HandshakeTimeout = 10 * time.Second
 	WriteTimeout     = 5 * time.Second
+	ReadTimeout      = 30 * time.Second
 	DefaultPort      = 8080
 )
 
@@ -97,14 +98,25 @@ func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
 	c.connMu.RUnlock()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		// Set a read deadline to prevent busy-wait loop
+		err := conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+		if err != nil {
+			return nil, fmt.Errorf("failed to set read deadline: %w", err)
 		}
 
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
+			// Check for timeout (net.Error with Timeout())
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				// On timeout, check if context is cancelled
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
+					// Continue waiting for data
+					continue
+				}
+			}
 			if err == io.EOF || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				return nil, io.EOF
 			}
@@ -114,7 +126,8 @@ func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
 		if msgType == websocket.BinaryMessage {
 			frame, err := ParseBinaryFrame(data)
 			if err != nil {
-				continue // Skip malformed frames
+				// Return error immediately instead of silently continuing
+				return nil, fmt.Errorf("failed to parse binary frame: %w", err)
 			}
 			return &Output{Type: byte(frame.Type), Data: frame.Data}, nil
 		}

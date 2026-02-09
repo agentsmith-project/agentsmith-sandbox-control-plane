@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -36,6 +37,8 @@ type Handler struct {
 	namespace       string
 	checkInterval   time.Duration
 	snapshotTimeout time.Duration
+	wg              sync.WaitGroup
+	stopCh          chan struct{}
 }
 
 // HandlerConfig contains configuration for creating a new Handler
@@ -78,6 +81,7 @@ func NewHandler(cfg *HandlerConfig) (*Handler, error) {
 		namespace:       cfg.Namespace,
 		checkInterval:   checkInterval,
 		snapshotTimeout: snapshotTimeout,
+		stopCh:          make(chan struct{}),
 	}, nil
 }
 
@@ -85,19 +89,48 @@ func NewHandler(cfg *HandlerConfig) (*Handler, error) {
 func (h *Handler) Start(ctx context.Context) {
 	log.Printf("Finalizer: starting handler (namespace=%s, interval=%v)", h.namespace, h.checkInterval)
 
-	ticker := time.NewTicker(h.checkInterval)
-	defer ticker.Stop()
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		ticker := time.NewTicker(h.checkInterval)
+		defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Finalizer: stopping handler")
-			return
-		case <-ticker.C:
-			if err := h.processPods(ctx); err != nil {
-				log.Printf("Finalizer: error processing pods: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("Finalizer: stopping handler due to context cancellation")
+				return
+			case <-h.stopCh:
+				log.Printf("Finalizer: stopping handler due to stop signal")
+				return
+			case <-ticker.C:
+				if err := h.processPods(ctx); err != nil {
+					log.Printf("Finalizer: error processing pods: %v", err)
+				}
 			}
 		}
+	}()
+}
+
+// Shutdown gracefully stops the finalizer handler with a timeout.
+// The context is used to control the shutdown timeout.
+func (h *Handler) Shutdown(ctx context.Context) error {
+	// Signal the goroutine to stop
+	close(h.stopCh)
+
+	// Wait for the goroutine to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Printf("Finalizer: handler stopped gracefully")
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("finalizer shutdown timed out: %w", ctx.Err())
 	}
 }
 

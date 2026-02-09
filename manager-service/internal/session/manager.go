@@ -27,6 +27,12 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Check if session already exists to prevent duplicates
+	// This prevents race conditions when Create() and GetOrCreate() are called concurrently
+	if existing, exists := m.sessions[req.AgentThreadID]; exists {
+		return existing, nil
+	}
+
 	now := time.Now()
 
 	sess := &Session{
