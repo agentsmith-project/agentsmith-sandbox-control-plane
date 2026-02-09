@@ -103,3 +103,22 @@ data:
       tar:
         bin: tar
         rejectSymlinks: true
+
+    storage:
+      endpoint: 192.168.80.1:9000
+      accessKey: minioadmin
+      secretKey: minioadmin
+      bucket: sandboxes
+      useSSL: false
+
+    websocket:
+      readBufferSize: 1024
+      writeBufferSize: 1024
+      allowedOrigins:
+        - "http://localhost:3000"
+        - "https://*.example.com"
+      allowNonBrowserRequests: true
+      handshakeTimeout: 10s
+
+    buffer:
+      capacity: 10000

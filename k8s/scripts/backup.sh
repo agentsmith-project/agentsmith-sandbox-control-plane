@@ -31,7 +31,7 @@ cat > "${BACKUP_DIR}/versions.txt" <<EOF
 
 Manager: $(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
 Runner: $(kubectl get configmap sandbox-config -n sandbox-system -o jsonpath='{.data.runner-image-default}' 2>/dev/null || echo "unknown")
-GC: $(kubectl get cronjob sandbox-gc -n sandbox-system -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
+Cleaner: $(kubectl get cronjob sandbox-cleaner -n sandbox-system -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
 EOF
 
 echo ""

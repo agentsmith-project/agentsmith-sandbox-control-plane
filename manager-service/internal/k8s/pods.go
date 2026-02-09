@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/sandbox/manager/internal/observability"
 )
 
 const (
@@ -34,6 +36,7 @@ type PodSpec struct {
 	ContainerName         string
 	Workdir               string
 	Command               string
+	ShellType             string // e.g., "bash", "zsh", "sh", "fish", "nu"
 	Env                   map[string]string
 	ResourceRequests      ResourceRequests
 	ResourceLimits        ResourceLimits
@@ -173,35 +176,33 @@ func IsPodReady(pod *v1.Pod) bool {
 
 // WaitForPodReady waits for a pod to become ready
 func (c *Client) WaitForPodReady(ctx context.Context, name string, waitTime time.Duration, pollInterval time.Duration) (bool, error) {
-	timeout := time.After(waitTime)
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
+	poller := observability.NewPoller(pollInterval, waitTime)
 
-	for {
-		select {
-		case <-timeout:
-			return false, fmt.Errorf("pod %s did not become ready within %v", name, waitTime)
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-ticker.C:
-			pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, name, metav1.GetOptions{})
-			if err != nil {
-				if errors.IsNotFound(err) {
-					return false, fmt.Errorf("pod %s not found", name)
-				}
-				return false, fmt.Errorf("failed to get pod: %w", err)
+	err := poller.Poll(ctx, func() (bool, error) {
+		pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, fmt.Errorf("pod %s not found", name)
 			}
-
-			if pod.Status.Phase == v1.PodFailed {
-				return false, fmt.Errorf("pod %s failed", name)
-			}
-
-			if IsPodReady(pod) {
-				log.Printf("K8s: pod %s is ready", name)
-				return true, nil
-			}
+			return false, fmt.Errorf("failed to get pod: %w", err)
 		}
+
+		if pod.Status.Phase == v1.PodFailed {
+			return false, fmt.Errorf("pod %s failed", name)
+		}
+
+		if IsPodReady(pod) {
+			log.Printf("K8s: pod %s is ready", name)
+			return true, nil
+		}
+
+		return false, nil
+	})
+
+	if err != nil {
+		return false, err
 	}
+	return true, nil
 }
 
 // EnsurePod gets or creates a pod, waiting for it to be ready
@@ -367,10 +368,25 @@ func buildContainer(spec *PodSpec) v1.Container {
 		Resources:       buildResources(spec.ResourceRequests, spec.ResourceLimits),
 	}
 
-	// Use tmux wrapper script if command is provided
-	if spec.Command != "" {
+	// Use shell-bridge if ShellType is specified
+	if spec.ShellType != "" {
+		shellType := spec.ShellType
+		workdir := spec.Workdir
+		if workdir == "" {
+			workdir = "/workspace"
+		}
+
+		container.Command = []string{"/shellb"}
+		container.Args = []string{
+			"--shell=" + shellType,
+			"--port=8080",
+			"--workdir=" + workdir,
+		}
+	} else if spec.Command != "" {
+		// Use tmux wrapper script if command is provided (backward compatibility)
 		container.Command = []string{"sh", "-c", buildTmuxWrapperScript(spec.Command)}
 	} else {
+		// Default: keep container alive
 		container.Command = []string{"sh", "-lc", "tail -f /dev/null"}
 	}
 
@@ -534,13 +550,16 @@ func GetSessionIDFromPod(pod *v1.Pod) string {
 }
 
 // GetExpiresAtFromPod extracts expires at from pod annotations
+// Checks sandbox/expiresAt first, then falls back to expires_at for backward compatibility
 func GetExpiresAtFromPod(pod *v1.Pod) string {
 	if pod.Annotations == nil {
 		return ""
 	}
-	if val := pod.Annotations["sandbox/expiresAt"]; val != "" {
-		return val
+	// Check sandbox/expiresAt first (canonical format)
+	if expiresAt, ok := pod.Annotations["sandbox/expiresAt"]; ok {
+		return expiresAt
 	}
+	// Fallback to expires_at for backward compatibility
 	return pod.Annotations["expires_at"]
 }
 

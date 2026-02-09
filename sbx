@@ -25,6 +25,8 @@ source "${ROOT_DIR}/scripts/lib/k8s.sh"
 source "${ROOT_DIR}/scripts/lib/kind.sh"
 # shellcheck source=scripts/lib/sandbox.sh
 source "${ROOT_DIR}/scripts/lib/sandbox.sh"
+# shellcheck source=scripts/lib/test.sh
+source "${ROOT_DIR}/scripts/lib/test.sh"
 
 sbx_usage() {
   cat <<'EOF'
@@ -40,6 +42,7 @@ Groups:
   dev         Kind-based dev cluster helpers
   k8s         Deploy/verify/update-images for kustomize
   sandbox     Sandbox namespace maintenance helpers
+  test        Run smoke/unit/coverage tests
 
 Run:
   ./sbx <group> --help
@@ -76,6 +79,9 @@ main() {
       ;;
     sandbox)
       sbx_sandbox "$@"
+      ;;
+    test)
+      sbx_test "$@"
       ;;
     *)
       log_error "Unknown group: $group"

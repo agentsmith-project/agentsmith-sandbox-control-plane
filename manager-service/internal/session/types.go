@@ -4,6 +4,12 @@ import (
 	"time"
 )
 
+const (
+	// DefaultMaxLifetime is the default maximum lifetime for a session.
+	// This is used when a session is created via GetOrCreate without a CreateRequest.
+	DefaultMaxLifetime = 24 * time.Hour
+)
+
 type State string
 
 const (

@@ -10,8 +10,9 @@ import (
 type ErrorCode string
 
 const (
-	ErrServiceKeyMissing ErrorCode = "SERVICE_KEY_MISSING"
-	ErrServiceKeyInvalid ErrorCode = "SERVICE_KEY_INVALID"
+	ErrServiceKeyMissing  ErrorCode = "SERVICE_KEY_MISSING"
+	ErrServiceKeyInvalid  ErrorCode = "SERVICE_KEY_INVALID"
+	ErrServiceNotConfigured ErrorCode = "SERVICE_NOT_CONFIGURED"
 )
 
 // ErrorResponse represents a standard error response
@@ -24,12 +25,20 @@ type ErrorResponse struct {
 }
 
 // ServiceKeyMiddleware creates an HTTP middleware for service key authentication
-func ServiceKeyMiddleware(validator *ServiceKeyValidator, headerName string, acceptAuthorization bool, authScheme string, failStatusCode int) func(http.Handler) http.Handler {
+func ServiceKeyMiddleware(validator *ServiceKeyValidator, headerName string, acceptAuthorization bool, authScheme string, failStatusCode int, allowUnauthenticated bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// If no keys are configured, allow all requests (for development/testing)
+			// Fail-closed: If no keys are configured, check allowUnauthenticated flag
 			if !validator.HasKeys() {
-				log.Printf("Auth: no service keys configured, allowing request")
+				if !allowUnauthenticated {
+					// Not configured and dev mode is OFF - return 500
+					requestID := getRequestID(r)
+					log.Printf("Auth: service not configured (requestId: %s, path: %s)", requestID, r.URL.Path)
+					writeAuthError(w, ErrServiceNotConfigured, "Service not configured: no service keys configured", requestID, http.StatusInternalServerError)
+					return
+				}
+				// Dev mode is ON - log and allow request
+				log.Printf("Auth: dev mode enabled - allowing unauthenticated request (path: %s)", r.URL.Path)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -79,7 +88,9 @@ func writeAuthError(w http.ResponseWriter, code ErrorCode, message string, reque
 	resp.Error.Message = message
 	resp.Error.RequestID = requestID
 
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("Failed to encode auth error response: %v", err)
+	}
 }
 
 // getRequestID extracts the request ID from the request
@@ -99,7 +110,7 @@ func getRequestID(r *http.Request) string {
 
 // OptionalAuthMiddleware creates an optional authentication middleware
 // It only enforces auth if keys are configured
-func OptionalAuthMiddleware(validator *ServiceKeyValidator, headerName string, acceptAuthorization bool, authScheme string, failStatusCode int) func(http.Handler) http.Handler {
+func OptionalAuthMiddleware(validator *ServiceKeyValidator, headerName string, acceptAuthorization bool, authScheme string, failStatusCode int, allowUnauthenticated bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// If no keys configured, skip auth
@@ -109,7 +120,7 @@ func OptionalAuthMiddleware(validator *ServiceKeyValidator, headerName string, a
 			}
 
 			// Use standard auth middleware
-			middleware := ServiceKeyMiddleware(validator, headerName, acceptAuthorization, authScheme, failStatusCode)
+			middleware := ServiceKeyMiddleware(validator, headerName, acceptAuthorization, authScheme, failStatusCode, allowUnauthenticated)
 			middleware(next).ServeHTTP(w, r)
 		})
 	}

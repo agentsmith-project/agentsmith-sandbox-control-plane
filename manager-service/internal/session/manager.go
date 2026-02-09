@@ -5,16 +5,21 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/sandbox/manager/internal/observability"
 )
 
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	wg       sync.WaitGroup    // WaitGroup for cleanup goroutine
+	logger   observability.Logger
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		sessions: make(map[string]*Session),
+		logger:   observability.GetLogger(),
 	}
 }
 
@@ -47,6 +52,62 @@ func (m *Manager) Get(agentThreadID string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[agentThreadID]
 	return s, ok
+}
+
+// GetOrCreate atomically gets an existing session or creates a new one.
+// Returns the session, a boolean indicating whether the session was created,
+// and an error if creation fails.
+// This method prevents race conditions where multiple goroutines might
+// simultaneously check for a session's existence and both create duplicates.
+//
+// IMPORTANT: When creating a new session, GetOrCreate creates a minimal placeholder
+// session with only the following fields initialized:
+//   - AgentThreadID: Set to the provided ID
+//   - State: Set to StateCreating
+//   - CreatedAt, LastActivityAt: Set to current time
+//   - ExpiresAt: Set to DefaultMaxLifetime (24 hours)
+//   - Config.MaxLifetime: Set to DefaultMaxLifetime
+//   - ClientConnected: Set to false
+//
+// The following fields are NOT initialized (placeholder/zombie session):
+//   - Image: Empty string
+//   - Command: nil
+//   - Env: nil
+//   - PodNamespace: Empty string
+//   - PodName: Empty string
+//   - Config.IdleTimeout: Zero value (no idle timeout)
+//   - Config.AllowNetworkAccess, ReadonlyFilesystem, etc.: All false/zero
+//
+// If you need a fully-initialized session, use Create() with a CreateRequest instead.
+// GetOrCreate is designed for scenarios where you need to prevent duplicate session
+// creation while the full initialization happens asynchronously (e.g., during WebSocket
+// connection establishment).
+func (m *Manager) GetOrCreate(agentThreadID string) (*Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if session already exists (while holding the lock)
+	if sess, exists := m.sessions[agentThreadID]; exists {
+		return sess, false, nil
+	}
+
+	// Create new session (still holding the lock - atomic operation)
+	now := time.Now()
+	sess := &Session{
+		AgentThreadID:   agentThreadID,
+		State:           StateCreating,
+		CreatedAt:       now,
+		LastActivityAt:  now,
+		ClientConnected: false,
+		// Note: Config must be set separately or pass in a CreateRequest
+		Config: SecurityConfig{
+			MaxLifetime: DefaultMaxLifetime,
+		},
+		ExpiresAt: now.Add(DefaultMaxLifetime),
+	}
+
+	m.sessions[agentThreadID] = sess
+	return sess, true, nil
 }
 
 func (m *Manager) UpdateState(agentThreadID string, state State) error {
@@ -97,7 +158,7 @@ func (m *Manager) MarkClientDisconnected(agentThreadID string) error {
 
 	s, ok := m.sessions[agentThreadID]
 	if !ok {
-		return fmt.Errorf("session not: %s", agentThreadID)
+		return fmt.Errorf("session not found: %s", agentThreadID)
 	}
 
 	s.ClientConnected = false
@@ -123,6 +184,60 @@ func (m *Manager) Delete(agentThreadID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, agentThreadID)
+}
+
+// StartCleanup starts a background goroutine that periodically cleans up expired sessions.
+// The cleanup runs on the given interval until the context is cancelled.
+func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				m.logger.Info("Cleanup goroutine stopped")
+				return
+			case <-ticker.C:
+				m.cleanupExpired()
+			}
+		}
+	}()
+}
+
+// cleanupExpired removes all expired sessions from the manager.
+func (m *Manager) cleanupExpired() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var deleted []string
+
+	for id, sess := range m.sessions {
+		// Check if session is expired
+		if sess.IsExpired() {
+			delete(m.sessions, id)
+			deleted = append(deleted, id)
+		}
+	}
+
+	if len(deleted) > 0 {
+		m.logger.Info("Cleaned up %d expired sessions: %v", len(deleted), deleted)
+	}
+}
+
+// Shutdown waits for the cleanup goroutine to finish.
+// The context passed to StartCleanup should be cancelled before calling this method.
+func (m *Manager) Shutdown() {
+	m.wg.Wait()
+}
+
+// GetSessionCount returns the current number of sessions (for testing/metrics)
+func (m *Manager) GetSessionCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
 }
 
 type CreateRequest struct {

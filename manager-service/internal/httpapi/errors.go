@@ -185,24 +185,36 @@ func NewAPIError(code ErrorCode, message string) *APIError {
 }
 
 // WithCause adds a cause to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithCause(cause error) *APIError {
-	e.Cause = cause
-	return e
+	copy := *e
+	copy.Cause = cause
+	return &copy
 }
 
 // WithRequestID adds a request ID to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithRequestID(requestID string) *APIError {
-	e.RequestID = requestID
-	return e
+	copy := *e
+	copy.RequestID = requestID
+	return &copy
 }
 
 // WithDetail adds a detail to the error
+// Returns a copy to avoid race conditions when used from multiple goroutines
 func (e *APIError) WithDetail(key string, value interface{}) *APIError {
-	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+	copy := *e
+	if copy.Details == nil {
+		copy.Details = make(map[string]interface{})
+	} else {
+		// Copy the existing map to avoid shared mutations
+		copy.Details = make(map[string]interface{}, len(e.Details))
+		for k, v := range e.Details {
+			copy.Details[k] = v
+		}
 	}
-	e.Details[key] = value
-	return e
+	copy.Details[key] = value
+	return &copy
 }
 
 // Write writes the error response to the HTTP response writer
@@ -210,20 +222,21 @@ func (e *APIError) Write(w http.ResponseWriter, r *http.Request) {
 	status := e.Code.HTTPStatus()
 
 	// Get request ID if not set
-	if e.RequestID == "" {
-		e.RequestID = GetRequestID(r)
+	requestID := e.RequestID
+	if requestID == "" {
+		requestID = GetRequestID(r)
 	}
 
 	// Build response
 	var resp ErrorResponse
 	resp.Error.Code = string(e.Code)
 	resp.Error.Message = e.Message
-	resp.Error.RequestID = e.RequestID
+	resp.Error.RequestID = requestID
 	resp.Error.Details = e.Details
 
 	// Log the error
 	log.Printf("API error: code=%s status=%d requestId=%s message=%s",
-		e.Code, status, e.RequestID, e.Message)
+		e.Code, status, requestID, e.Message)
 	if e.Cause != nil {
 		log.Printf("  cause: %v", e.Cause)
 	}
@@ -231,7 +244,10 @@ func (e *APIError) Write(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Log error but response already sent
+		log.Printf("[ERROR] Failed to encode JSON error response: %v", err)
+	}
 }
 
 // WriteError writes an API error to the response

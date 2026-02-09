@@ -46,6 +46,11 @@ func NewClient(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Cli
 	}, nil
 }
 
+// NewClientWithCreds creates a storage client using a Credentials struct
+func NewClientWithCreds(creds *Credentials) (*Client, error) {
+	return NewClient(creds.Endpoint, creds.AccessKey, creds.SecretKey, creds.Bucket, creds.UseSSL)
+}
+
 func (c *Client) GenerateSnapshotKey(workspaceID, projectID, agentThreadID string) string {
 	return fmt.Sprintf("snapshots/%s/%s/%s/workspace.tar.gz",
 		strings.TrimPrefix(workspaceID, "ws_"),
@@ -87,6 +92,9 @@ func (c *Client) SnapshotExists(ctx context.Context, key string) (bool, error) {
 	_, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		errResp := minio.ToErrorResponse(err)
+		// Check if this is a valid minio error response (Code is set)
+		// ToErrorResponse returns a zero-value ErrorResponse for non-minio errors,
+		// with Code == "" (empty string), so we check for "NoSuchKey" explicitly
 		if errResp.Code == "NoSuchKey" {
 			return false, nil
 		}

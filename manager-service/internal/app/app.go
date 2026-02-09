@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/session"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
@@ -37,6 +38,8 @@ type Manager struct {
 	healthChecker *observability.HealthChecker
 	metrics       *observability.MetricsRegistry
 	httpServer    *http.Server
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	// New components
 	sessionManager   *session.Manager
@@ -44,6 +47,7 @@ type Manager struct {
 	storageClient    *storage.Client
 	wsHandler        *websocket.Handler
 	finalizerHandler *finalizer.Handler
+	rateLimiter      *ratelimit.Limiter
 }
 
 // Main is the entry point for the sandbox manager.
@@ -100,7 +104,10 @@ func mainImpl() {
 	k8sExecutor := k8s.NewExecutor(k8sClient)
 
 	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
-	authValidator := auth.NewServiceKeyValidator(serviceKeys)
+	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
+	if err != nil {
+		log.Fatalf("Failed to initialize service key validator: %v", err)
+	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
 	cfgWatcher := config.NewWatcher(
@@ -122,15 +129,24 @@ func mainImpl() {
 	log.Printf("Initializing buffer manager...")
 	bufferManager := buffer.NewManager()
 
-	// Initialize storage client from environment variables
-	storageEndpoint := getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000")
-	storageAccessKey := getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin")
-	storageSecretKey := getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin")
-	storageBucket := getEnvOrDefault("STORAGE_BUCKET", "sandboxes")
-	storageUseSSL := os.Getenv("STORAGE_USE_SSL") == "true"
+	// Initialize storage client
+	// Try loading from credentials file first, fall back to environment variables
+	storageCreds, err := storage.LoadCredentials()
+	if err != nil {
+		log.Printf("Failed to load storage credentials, using defaults: %v", err)
+		// Use defaults for local development
+		storageCreds = &storage.Credentials{
+			Endpoint:  getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000"),
+			AccessKey: getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin"),
+			SecretKey: getEnvOrDefault("STORAGE_SECRET_KEY", "minioadmin"),
+			Bucket:    getEnvOrDefault("STORAGE_BUCKET", "sandboxes"),
+			UseSSL:    os.Getenv("STORAGE_USE_SSL") == "true",
+		}
+	}
 
-	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)", storageEndpoint, storageBucket, storageUseSSL)
-	storageClient, err := storage.NewClient(storageEndpoint, storageAccessKey, storageSecretKey, storageBucket, storageUseSSL)
+	log.Printf("Initializing storage client (endpoint=%s, bucket=%s, ssl=%v)",
+		storageCreds.Endpoint, storageCreds.Bucket, storageCreds.UseSSL)
+	storageClient, err := storage.NewClientWithCreds(storageCreds)
 	if err != nil {
 		log.Fatalf("Failed to create storage client: %v", err)
 	}
@@ -144,7 +160,22 @@ func mainImpl() {
 		k8sClient,
 		storageClient,
 		cfg.Sandbox.Defaults.Namespace,
+		cfg,
 	)
+
+	// Initialize rate limiter
+	log.Printf("Initializing rate limiter...")
+	rateLimiterConfig := &ratelimit.Config{
+		GlobalRPS:       100,
+		GlobalBurst:     200,
+		PerIPRPS:        10,
+		PerIPBurst:      20,
+		PerSessionRPS:   5,
+		PerSessionBurst: 10,
+		CleanupInterval: 5 * time.Minute,
+	}
+	rateLimiter := ratelimit.NewLimiter(rateLimiterConfig)
+	log.Printf("Rate limiter initialized")
 
 	// Initialize finalizer handler
 	log.Printf("Initializing finalizer handler...")
@@ -157,6 +188,9 @@ func mainImpl() {
 	if err != nil {
 		log.Fatalf("Failed to create finalizer handler: %v", err)
 	}
+
+	// Create manager lifecycle context
+	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
 	mgr := &Manager{
 		cfg:              cfg,
@@ -172,14 +206,21 @@ func mainImpl() {
 		storageClient:    storageClient,
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
+		rateLimiter:      rateLimiter,
+		ctx:              mgrCtx,
+		cancel:           mgrCancel,
 	}
 
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
 
-	// Start finalizer handler in background goroutine
-	go mgr.finalizerHandler.Start(context.Background())
+	// Start finalizer handler in background goroutine with manager lifecycle context
+	go mgr.finalizerHandler.Start(mgr.ctx)
 	log.Printf("Finalizer handler started")
+
+	// Start session cleanup goroutine with manager lifecycle context
+	go mgr.sessionManager.StartCleanup(mgr.ctx, 5*time.Minute)
+	log.Printf("Session cleanup started (interval=5m)")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -253,6 +294,7 @@ func (m *Manager) setupHTTPServer() {
 				m.cfg.Auth.AcceptAuthorization,
 				m.cfg.Auth.AuthorizationScheme,
 				m.cfg.Auth.FailStatusCode,
+				m.cfg.Auth.AllowUnauthenticated,
 			)
 			mux.Handle(m.cfg.Server.Metrics.Path, authMiddleware(http.HandlerFunc(metricsHandler)))
 		} else {
@@ -262,8 +304,42 @@ func (m *Manager) setupHTTPServer() {
 
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
-	// Add WebSocket route - no auth required for WebSocket
-	mux.Handle("/ws", m.wsHandler)
+	// Add WebSocket route with service key authentication via query parameter
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		// Fail-closed: If no keys are configured, check allowUnauthenticated flag
+		if !m.authValidator.HasKeys() {
+			if !m.cfg.Auth.AllowUnauthenticated {
+				// Not configured and dev mode is OFF - return 500
+				// Extract request ID from common headers
+				requestID := r.Header.Get("X-Request-Id")
+				if requestID == "" {
+					requestID = r.Header.Get("X-Request-ID")
+				}
+				if requestID == "" {
+					requestID = r.Header.Get("Request-Id")
+				}
+				log.Printf("Auth: service not configured (requestId: %s, path: %s)", requestID, r.URL.Path)
+				http.Error(w, "Service not configured: no service keys configured", http.StatusInternalServerError)
+				return
+			}
+			// Dev mode is ON - log and allow request
+			log.Printf("Auth: dev mode enabled - allowing unauthenticated WebSocket request (path: %s)", r.URL.Path)
+			m.wsHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// Get service key from URL parameter
+		serviceKey := r.URL.Query().Get("service_key")
+
+		// Validate service key
+		if !m.authValidator.Validate(serviceKey) {
+			http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
+			return
+		}
+
+		// Authentication successful, forward to WebSocket handler
+		m.wsHandler.ServeHTTP(w, r)
+	})
 
 	v1Handler := m.buildV1Handler()
 	if m.cfg.Auth.Enabled {
@@ -273,6 +349,7 @@ func (m *Manager) setupHTTPServer() {
 			m.cfg.Auth.AcceptAuthorization,
 			m.cfg.Auth.AuthorizationScheme,
 			m.cfg.Auth.FailStatusCode,
+			m.cfg.Auth.AllowUnauthenticated,
 		)
 		v1Handler = authMiddleware(v1Handler)
 	}
@@ -280,6 +357,7 @@ func (m *Manager) setupHTTPServer() {
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
 	v1Handler = reqIDMiddleware(v1Handler)
 	v1Handler = m.observabilityMiddleware(v1Handler)
+	v1Handler = m.rateLimiter.Middleware(v1Handler)
 
 	mux.Handle("/v1/", v1Handler)
 
@@ -502,6 +580,12 @@ func (m *Manager) waitForShutdown() {
 
 	log.Printf("Shutdown signal received, gracefully shutting down...")
 
+	// Cancel manager lifecycle context to stop all background goroutines
+	// This includes the finalizer handler which was started with m.ctx
+	if m.cancel != nil {
+		m.cancel()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -542,6 +626,9 @@ func convertConfigError(err *config.ConfigError) *httpapi.ConfigError {
 	}
 }
 
+// sanitizeConfig creates a safe subset of configuration for debug output.
+// NOTE: Storage configuration (AccessKey, SecretKey) is intentionally excluded
+// to prevent credential exposure via debug endpoint.
 func sanitizeConfig(cfg *config.Config) httpapi.DebugConfigConfig {
 	return httpapi.DebugConfigConfig{
 		Version: cfg.Version,
