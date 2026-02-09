@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/session"
+	"github.com/sandbox/manager/internal/shellbridge"
 	"github.com/sandbox/manager/internal/storage"
 )
 
@@ -285,6 +287,18 @@ func (h *Handler) handleCreate(ctx context.Context, payload CreatePayload, conn 
 		return nil, true, fmt.Errorf("pod %s did not become ready within timeout", result.PodName)
 	}
 
+	// Get pod IP for shell-bridge connection
+	pod, err := h.k8sClient.GetPod(ctx, result.PodName)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to get pod info for %s: %w", result.PodName, err)
+	}
+	if pod.Status.PodIP == "" {
+		return nil, true, fmt.Errorf("pod %s has no IP address yet", result.PodName)
+	}
+	sess.PodIP = pod.Status.PodIP
+	h.sessionManager.SetPodIP(payload.AgentThreadID, pod.Status.PodIP)
+	h.logger.Info("Pod %s has IP %s", result.PodName, pod.Status.PodIP)
+
 	// Check for snapshot
 	h.sendStatus(conn, StatusPayload{
 		State:    "restoring",
@@ -368,6 +382,20 @@ func (h *Handler) attachSession(ctx context.Context, agentThreadID string, conn 
 
 // forwardIO handles bidirectional I/O between WebSocket and shell-bridge session
 func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *websocket.Conn) error {
+	// Validate PodIP is available
+	if sess.PodIP == "" {
+		return fmt.Errorf("session %s has no PodIP, cannot connect to shell-bridge", sess.AgentThreadID)
+	}
+
+	// Connect to shell-bridge
+	client := shellbridge.NewClient(sess.PodIP, shellbridge.DefaultPort)
+	if err := client.Connect(ctx); err != nil {
+		h.logger.Error("Failed to connect to shell-bridge for session %s: %v", sess.AgentThreadID, err)
+		return fmt.Errorf("failed to connect to shell-bridge: %w", err)
+	}
+	defer client.Close()
+	h.logger.Info("Connected to shell-bridge for session %s at %s", sess.AgentThreadID, sess.PodIP)
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -382,62 +410,54 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 	outputChan := make(chan outputMessage, 100)
 	errorChan := make(chan error, 1)
 
-	// WebSocket → shell-bridge (stdin)
+	// shell-bridge output reader goroutine
 	go func() {
 		defer wg.Done()
 		defer cancel()
 
 		for {
+			output, err := client.ReceiveOutput(ctx)
+			if err != nil {
+				if err == io.EOF {
+					h.logger.Debug("Shell-bridge closed for session %s", sess.AgentThreadID)
+					// Send exit message
+					select {
+					case outputChan <- outputMessage{msgType: "exit", exitCode: 0}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if !isContextCanceled(err) {
+					h.logger.Error("ReceiveOutput error for session %s: %v", sess.AgentThreadID, err)
+					select {
+					case errorChan <- err:
+					case <-ctx.Done():
+					}
+				}
+				return
+			}
+
+			// Route output based on type
+			var msgType string
+			switch shellbridge.BinaryDataType(output.Type) {
+			case shellbridge.DataTypeStdout:
+				msgType = "stdout"
+			case shellbridge.DataTypeStderr:
+				msgType = "stderr"
+			default:
+				h.logger.Debug("Unknown binary data type: %d", output.Type)
+				continue
+			}
+
 			select {
+			case outputChan <- outputMessage{msgType: msgType, data: output.Data}:
 			case <-ctx.Done():
-				h.logger.Debug("Stdin goroutine exiting: context done")
 				return
-			default:
-			}
-
-			var msg Message
-			if err := conn.ReadJSON(&msg); err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					h.logger.Debug("WebSocket closed normally during stdin read")
-				} else if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					h.logger.Warn("WebSocket closed unexpectedly during stdin read: %w", err)
-				} else {
-					h.logger.Warn("Failed to read stdin message from WebSocket: %w", err)
-				}
-				return
-			}
-
-			// Update activity on any message
-			h.sessionManager.UpdateActivity(sess.AgentThreadID)
-
-			switch msg.Type {
-			case TypeStdin:
-				payload, err := h.parseStdin(msg.Data)
-				if err != nil {
-					h.logger.Error("Failed to parse stdin: %v", err)
-					continue
-				}
-				data, err := base64.StdEncoding.DecodeString(payload.Data)
-				if err != nil {
-					h.logger.Error("Failed to decode stdin data: %v", err)
-					continue
-				}
-				// Write stdin to the shell-bridge session
-				// For now, we'll buffer this - in a full implementation,
-				// we'd have a persistent stdin stream
-				h.logger.Debug("Received stdin data: %d bytes", len(data))
-
-			case TypeCreate:
-				// Reconnect attempt - handle accordingly
-				h.logger.Debug("Received create message during active session")
-
-			default:
-				h.logger.Debug("Received message type: %s", msg.Type)
 			}
 		}
 	}()
 
-	// shell-bridge → WebSocket (stdout/stderr)
+	// WebSocket → shell-bridge (stdin)
 	go func() {
 		defer wg.Done()
 		defer cancel()
@@ -451,7 +471,7 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 		for {
 			select {
 			case <-ctx.Done():
-				h.logger.Debug("Output goroutine exiting: context done")
+				h.logger.Debug("Stdin goroutine exiting: context done")
 				return
 
 			case outMsg := <-outputChan:
@@ -484,13 +504,58 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 					h.logger.Debug("Failed to send ping to %s: %w", sess.AgentThreadID, err)
 					return
 				}
+
+			default:
+				// Non-blocking read from WebSocket
+				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				var msg Message
+				if err := conn.ReadJSON(&msg); err != nil {
+					if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+						continue
+					}
+					if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+						h.logger.Debug("WebSocket closed normally during stdin read")
+					} else if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+						h.logger.Warn("WebSocket closed unexpectedly during stdin read: %w", err)
+					} else {
+						h.logger.Warn("Failed to read stdin message from WebSocket: %w", err)
+					}
+					return
+				}
+				conn.SetReadDeadline(time.Time{})
+
+				// Update activity on any message
+				h.sessionManager.UpdateActivity(sess.AgentThreadID)
+
+				switch msg.Type {
+				case TypeStdin:
+					payload, err := h.parseStdin(msg.Data)
+					if err != nil {
+						h.logger.Error("Failed to parse stdin: %v", err)
+						continue
+					}
+					data, err := base64.StdEncoding.DecodeString(payload.Data)
+					if err != nil {
+						h.logger.Error("Failed to decode stdin data: %v", err)
+						continue
+					}
+					// Forward stdin to shell-bridge as a command
+					// Convert bytes to string for command execution
+					command := string(data)
+					if err := client.ExecCommand(ctx, "bash", command, nil); err != nil {
+						h.logger.Error("Failed to send stdin to shell-bridge: %v", err)
+					}
+
+				case TypeCreate:
+					// Reconnect attempt - handle accordingly
+					h.logger.Debug("Received create message during active session")
+
+				default:
+					h.logger.Debug("Received message type: %s", msg.Type)
+				}
 			}
 		}
 	}()
-
-	// Start exec for stdout/stderr streaming
-	// In a full implementation, this would be a separate streaming exec
-	// For now, we'll keep the session alive and handle I/O
 
 	wg.Wait()
 	h.logger.Info("Session %s connection closed", sess.AgentThreadID)

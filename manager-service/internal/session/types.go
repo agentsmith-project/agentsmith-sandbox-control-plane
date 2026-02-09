@@ -23,6 +23,7 @@ type Session struct {
 	AgentThreadID     string
 	PodName           string
 	PodNamespace      string
+	PodIP             string // IP of the pod for shell-bridge connection
 	State             State
 	Image             string
 	Command           []string

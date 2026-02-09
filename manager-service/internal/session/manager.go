@@ -136,6 +136,20 @@ func (m *Manager) SetPodInfo(agentThreadID, podName string) error {
 	return nil
 }
 
+// SetPodIP sets the pod IP for a session (used for shell-bridge connection)
+func (m *Manager) SetPodIP(agentThreadID, podIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[agentThreadID]
+	if !ok {
+		return fmt.Errorf("session not found: %s", agentThreadID)
+	}
+
+	s.PodIP = podIP
+	return nil
+}
+
 func (m *Manager) MarkClientConnected(agentThreadID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
