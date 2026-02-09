@@ -13,9 +13,36 @@ import (
 )
 
 const (
-	sandboxAppLabel    = "sandbox"
+	sandboxAppLabel     = "sandbox"
 	expiresAtAnnotation = "expires_at"
+
+	// defaultFallbackTTL is the fallback TTL for pods with invalid or missing expires_at annotations
+	// Pods with invalid TTL will be deleted after this duration (7 days)
+	defaultFallbackTTL = 7 * 24 * time.Hour
 )
+
+// allowedNamespaces is a whitelist of namespaces that the cleaner is allowed to clean
+// This prevents accidental cleanup of production or other critical namespaces
+var allowedNamespaces = map[string]bool{
+	"default": true,
+	"dev":     true,
+	"test":    true,
+	"staging": true,
+}
+
+// isNamespaceAllowed checks if a namespace is in the allowed whitelist
+func isNamespaceAllowed(ns string) bool {
+	return allowedNamespaces[ns]
+}
+
+// getAllowedNamespaceList returns a sorted list of allowed namespaces for error messages
+func getAllowedNamespaceList() []string {
+	namespaces := make([]string, 0, len(allowedNamespaces))
+	for ns := range allowedNamespaces {
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces
+}
 
 func main() {
 	// Parse command-line flags
@@ -48,6 +75,11 @@ func main() {
 }
 
 func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool) error {
+	// Validate namespace is in the allowed whitelist
+	if !isNamespaceAllowed(namespace) {
+		return fmt.Errorf("namespace %q is not in the allowed whitelist. This prevents accidental cleanup of critical namespaces. Allowed namespaces: %v", namespace, getAllowedNamespaceList())
+	}
+
 	// List all pods with the sandbox app label
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", sandboxAppLabel),
@@ -61,6 +93,7 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 	now := time.Now()
 	expiredCount := 0
 	skippedCount := 0
+	invalidTTLFallbackCount := 0
 
 	for _, pod := range pods.Items {
 		expiresAtStr, hasExpiry := pod.Annotations[expiresAtAnnotation]
@@ -72,9 +105,43 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 
 		expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
 		if err != nil {
-			klog.Warningf("Pod %s/%s has invalid %s annotation (%q): %v, skipping",
-				pod.Namespace, pod.Name, expiresAtAnnotation, expiresAtStr, err)
-			skippedCount++
+			// Invalid TTL - use fallback: check if pod is older than 7 days
+			klog.Warningf("Pod %s/%s has invalid %s annotation (%q): %v, using fallback TTL of %v",
+				pod.Namespace, pod.Name, expiresAtAnnotation, expiresAtStr, err, defaultFallbackTTL)
+
+			// Get pod creation timestamp
+			if pod.CreationTimestamp.IsZero() {
+				klog.Warningf("Pod %s/%s has zero creation timestamp, skipping", pod.Namespace, pod.Name)
+				skippedCount++
+				continue
+			}
+
+			// Calculate fallback expiry time (creation time + default fallback TTL)
+			fallbackExpiresAt := pod.CreationTimestamp.Add(defaultFallbackTTL)
+
+			// Check if pod has exceeded the fallback TTL
+			if now.After(fallbackExpiresAt) {
+				klog.Infof("Pod %s/%s exceeded fallback TTL (created: %s, fallback expiry: %s, now: %s)",
+					pod.Namespace, pod.Name, pod.CreationTimestamp.Format(time.RFC3339),
+					fallbackExpiresAt.Format(time.RFC3339), now.Format(time.RFC3339))
+
+				if dryRun {
+					klog.Infof("[DRY-RUN] Would delete pod %s/%s (invalid TTL exceeded fallback)", pod.Namespace, pod.Name)
+				} else {
+					klog.Infof("Deleting pod %s/%s (invalid TTL exceeded fallback)", pod.Namespace, pod.Name)
+					if err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+						klog.Errorf("Failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
+						continue
+					}
+					klog.Infof("Successfully deleted pod %s/%s", pod.Namespace, pod.Name)
+				}
+				invalidTTLFallbackCount++
+			} else {
+				klog.V(2).Infof("Pod %s/%s has invalid TTL but has not exceeded fallback TTL yet (created: %s, fallback expiry: %s)",
+					pod.Namespace, pod.Name, pod.CreationTimestamp.Format(time.RFC3339),
+					fallbackExpiresAt.Format(time.RFC3339))
+				skippedCount++
+			}
 			continue
 		}
 
@@ -99,8 +166,8 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 		}
 	}
 
-	klog.Infof("Scan complete: %d expired, %d skipped, %d total pods",
-		expiredCount, skippedCount, len(pods.Items))
+	klog.Infof("Scan complete: %d expired, %d invalid TTL (deleted via fallback), %d skipped, %d total pods",
+		expiredCount, invalidTTLFallbackCount, skippedCount, len(pods.Items))
 
 	return nil
 }

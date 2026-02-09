@@ -88,17 +88,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleConnection(ctx context.Context, conn *websocket.Conn) {
 	var agentThreadID string
 	var sess *session.Session
-	var isNewSession bool // Track if we created a new session
-	cleanupDone := false  // Flag to prevent double cleanup
+	var isNewSession bool    // Track if we created a new session
+	var cleanupMu sync.Mutex // Mutex to protect cleanupDone flag
+	cleanupDone := false     // Flag to prevent double cleanup
 
 	// Defer cleanup: only clean up new sessions on connection close
 	// Existing sessions are preserved for reconnection
 	defer func() {
-		if agentThreadID != "" && isNewSession && !cleanupDone {
+		cleanupMu.Lock()
+		alreadyCleaned := cleanupDone
+		cleanupDone = true
+		cleanupMu.Unlock()
+
+		if agentThreadID != "" && isNewSession && !alreadyCleaned {
 			h.logger.Debug("Cleaning up new session %s", agentThreadID)
 			h.sessionManager.Delete(agentThreadID)
 			h.bufferManager.Delete(agentThreadID)
-			cleanupDone = true
 		}
 	}()
 
@@ -652,8 +657,7 @@ func isContextCanceled(err error) bool {
 // contains checks if a string contains a substring (case-insensitive for error matching)
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
-		len(s) > len(substr) && (
-			s[:len(substr)] == substr ||
+		len(s) > len(substr) && (s[:len(substr)] == substr ||
 			s[len(s)-len(substr):] == substr ||
 			containsMiddle(s, substr)))
 }

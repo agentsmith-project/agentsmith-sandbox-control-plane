@@ -28,6 +28,12 @@ const (
 
 	// removeFinalizerBaseBackoff is the base backoff duration for finalizer removal retries
 	removeFinalizerBaseBackoff = 100 * time.Millisecond
+
+	// maxSnapshotRetries is the maximum number of retries for snapshot operations
+	maxSnapshotRetries = 3
+
+	// snapshotBaseBackoff is the base backoff duration for snapshot retries
+	snapshotBaseBackoff = 500 * time.Millisecond
 )
 
 // Handler handles finalizers for pods
@@ -169,14 +175,12 @@ func (h *Handler) processPod(ctx context.Context, pod *v1.Pod) error {
 	projectID := h.getProjectID(pod)
 	agentThreadID := h.getAgentThreadID(pod)
 
-	// Create a context with timeout for the snapshot operation
-	snapshotCtx, cancel := context.WithTimeout(ctx, h.snapshotTimeout)
-	defer cancel()
-
-	// Create and upload snapshot
-	if err := h.snapshotWorkspace(snapshotCtx, podName, workspaceID, projectID, agentThreadID); err != nil {
-		log.Printf("Finalizer: failed to snapshot workspace for pod %s: %v", podName, err)
-		// Continue with finalizer removal even if snapshot fails
+	// Create and upload snapshot with retry logic
+	if err := h.snapshotWorkspaceWithRetry(ctx, podName, workspaceID, projectID, agentThreadID); err != nil {
+		log.Printf("Finalizer: all snapshot attempts failed for pod %s: %v", podName, err)
+		// Do NOT remove the finalizer if snapshot fails after all retries
+		// This prevents data loss - the pod will remain until snapshot succeeds
+		return fmt.Errorf("snapshot failed after %d retries, finalizer not removed to prevent data loss: %w", maxSnapshotRetries, err)
 	}
 
 	// Remove the finalizer so the pod can be deleted
@@ -221,6 +225,46 @@ func (h *Handler) removeFinalizerWithRetry(ctx context.Context, podName string) 
 
 	// All retries failed
 	return fmt.Errorf("failed to remove finalizer after %d attempts: %w", maxRemoveFinalizerRetries, lastErr)
+}
+
+// snapshotWorkspaceWithRetry creates a snapshot with retry logic
+func (h *Handler) snapshotWorkspaceWithRetry(ctx context.Context, podName, workspaceID, projectID, agentThreadID string) error {
+	var lastErr error
+	backoff := snapshotBaseBackoff
+
+	for attempt := 1; attempt <= maxSnapshotRetries; attempt++ {
+		// Create a context with timeout for each snapshot attempt
+		snapshotCtx, cancel := context.WithTimeout(ctx, h.snapshotTimeout)
+
+		err := h.snapshotWorkspace(snapshotCtx, podName, workspaceID, projectID, agentThreadID)
+		cancel() // Always cancel the context
+
+		if err == nil {
+			// Success
+			if attempt > 1 {
+				log.Printf("Finalizer: successfully created snapshot for pod %s on attempt %d", podName, attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+
+		// Log retry attempt
+		if attempt < maxSnapshotRetries {
+			log.Printf("Finalizer: attempt %d failed to snapshot workspace for pod %s: %v, retrying in %v", attempt, podName, err, backoff)
+			// Wait with exponential backoff, checking for context cancellation
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during snapshot retry backoff: %w", ctx.Err())
+			case <-time.After(backoff):
+				// Continue to next retry
+			}
+			backoff *= 2
+		}
+	}
+
+	// All retries failed
+	return fmt.Errorf("failed to create snapshot after %d attempts: %w", maxSnapshotRetries, lastErr)
 }
 
 // snapshotWorkspace creates a snapshot of the workspace and uploads it to storage

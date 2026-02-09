@@ -1,7 +1,19 @@
 package buffer
 
 import (
+	"errors"
 	"sync"
+)
+
+const (
+	// MaxMessageSize is the maximum size (in bytes) allowed for a message
+	// This prevents potential denial-of-service attacks from oversized messages
+	MaxMessageSize = 1 * 1024 * 1024 // 1MB
+)
+
+var (
+	// ErrMessageTooLarge is returned when a message exceeds the maximum allowed size
+	ErrMessageTooLarge = errors.New("message size exceeds maximum allowed size")
 )
 
 type Message struct {
@@ -38,6 +50,22 @@ func (rb *RingBuffer) Write(msg *Message) {
 	} else {
 		rb.head = (rb.head + 1) % rb.size
 	}
+}
+
+// Add adds a message to the ring buffer with size validation.
+// Returns ErrMessageTooLarge if the message exceeds MaxMessageSize.
+func (rb *RingBuffer) Add(msg *Message) error {
+	if msg == nil {
+		return errors.New("cannot add nil message")
+	}
+
+	// Check message size
+	if len(msg.Data) > MaxMessageSize {
+		return ErrMessageTooLarge
+	}
+
+	rb.Write(msg)
+	return nil
 }
 
 func (rb *RingBuffer) ReadAll() []*Message {

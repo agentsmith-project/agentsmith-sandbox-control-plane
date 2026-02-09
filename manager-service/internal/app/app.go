@@ -305,7 +305,7 @@ func (m *Manager) setupHTTPServer() {
 
 	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
-	// Add WebSocket route with service key authentication via query parameter
+	// Add WebSocket route with service key authentication via X-Service-Key header
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		// Fail-closed: If no keys are configured, check allowUnauthenticated flag
 		if !m.authValidator.HasKeys() {
@@ -329,12 +329,13 @@ func (m *Manager) setupHTTPServer() {
 			return
 		}
 
-		// Get service key from URL parameter
-		serviceKey := r.URL.Query().Get("service_key")
+		// Get service key from X-Service-Key header (moved from query parameter)
+		serviceKey := r.Header.Get("X-Service-Key")
 
-		// Validate service key
+		// Validate service key using constant-time comparison to prevent timing attacks
+		// Note: authValidator.Validate() already uses crypto/subtle.ConstantTimeCompare internally
 		if !m.authValidator.Validate(serviceKey) {
-			http.Error(w, "Unauthorized: invalid or missing service_key", http.StatusUnauthorized)
+			http.Error(w, "Unauthorized: invalid or missing service key", http.StatusUnauthorized)
 			return
 		}
 
