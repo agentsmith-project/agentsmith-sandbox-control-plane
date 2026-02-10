@@ -17,13 +17,14 @@ import (
 
 // Client wraps the Kubernetes clientset with additional functionality
 type Client struct {
-	clientset *kubernetes.Clientset
-	config    *rest.Config
-	namespace string
-	qps       int
-	burst     int
-	timeout   time.Duration
-	retry     *RetryConfig
+	clientset        *kubernetes.Clientset
+	config           *rest.Config
+	namespace        string
+	qps              int
+	burst            int
+	timeout          time.Duration
+	retry            *RetryConfig
+	defaultContainer string
 }
 
 // RetryConfig contains retry configuration for K8s API calls
@@ -36,11 +37,12 @@ type RetryConfig struct {
 
 // ClientConfig contains configuration for creating a new K8s client
 type ClientConfig struct {
-	Namespace      string
-	QPS            int
-	Burst          int
-	RequestTimeout time.Duration
-	Retry          *RetryConfig
+	Namespace        string
+	DefaultContainer string
+	QPS              int
+	Burst            int
+	RequestTimeout   time.Duration
+	Retry            *RetryConfig
 }
 
 // NewClient creates a new Kubernetes client
@@ -111,13 +113,14 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	log.Printf("K8s: initialized (namespace=%s, qps=%d, burst=%d)", namespace, cfg.QPS, cfg.Burst)
 
 	return &Client{
-		clientset: clientset,
-		config:    config,
-		namespace: namespace,
-		qps:       cfg.QPS,
-		burst:     cfg.Burst,
-		timeout:   cfg.RequestTimeout,
-		retry:     cfg.Retry,
+		clientset:        clientset,
+		config:           config,
+		namespace:        namespace,
+		qps:              cfg.QPS,
+		burst:            cfg.Burst,
+		timeout:          cfg.RequestTimeout,
+		retry:            cfg.Retry,
+		defaultContainer: cfg.DefaultContainer,
 	}, nil
 }
 

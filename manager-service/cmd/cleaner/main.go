@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"sort"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	sandboxAppLabel     = "sandbox"
+	sandboxAppLabel     = "llm-sandbox"
 	expiresAtAnnotation = "expires_at"
 
 	// defaultFallbackTTL is the fallback TTL for pods with invalid or missing expires_at annotations
@@ -24,10 +25,8 @@ const (
 // allowedNamespaces is a whitelist of namespaces that the cleaner is allowed to clean
 // This prevents accidental cleanup of production or other critical namespaces
 var allowedNamespaces = map[string]bool{
-	"default": true,
-	"dev":     true,
-	"test":    true,
-	"staging": true,
+	"sandbox-system":     true,
+	"sandbox-workspaces": true,
 }
 
 // isNamespaceAllowed checks if a namespace is in the allowed whitelist
@@ -41,6 +40,7 @@ func getAllowedNamespaceList() []string {
 	for ns := range allowedNamespaces {
 		namespaces = append(namespaces, ns)
 	}
+	sort.Strings(namespaces)
 	return namespaces
 }
 

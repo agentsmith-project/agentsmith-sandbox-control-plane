@@ -399,7 +399,17 @@ func (w *Watcher) handleReloadError(event *ReloadEvent, err error) {
 // calculateBackoff calculates the backoff duration based on consecutive failures
 func (w *Watcher) calculateBackoff() time.Duration {
 	// Exponential backoff: 2^n seconds, capped at maxBackoff
-	backoff := time.Duration(1<<uint(w.consecutiveFailures-1)) * time.Second
+	// To avoid overflow when converting to Duration (nanoseconds),
+	// we cap the exponent at 30 before the shift operation.
+	// 2^30 seconds is about 34 years, which is more than enough.
+	exp := w.consecutiveFailures - 1
+	const maxExp = 30 // Prevent overflow (2^30 seconds >> any reasonable maxBackoff)
+	if exp > maxExp {
+		return w.maxBackoff
+	}
+	// Calculate backoff: 2^exp seconds
+	backoff := (1 << exp) * time.Second
+
 	if backoff > w.maxBackoff {
 		backoff = w.maxBackoff
 	}

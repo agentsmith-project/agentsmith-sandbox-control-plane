@@ -15,7 +15,8 @@ resources:
   - manager-deployment.yaml
   - manager-service.yaml
   - network-policy.yaml
-  - cleaner-cronjob.yaml
+  - cleaner-cronjob-sandbox-system.yaml
+  - cleaner-cronjob-sandbox-workspaces.yaml
 
 # 通用标签
 commonLabels:

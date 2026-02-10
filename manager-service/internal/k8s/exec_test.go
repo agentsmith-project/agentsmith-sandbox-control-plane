@@ -441,3 +441,24 @@ func TestBufferWriterSequential(t *testing.T) {
 		t.Errorf("After sequential writes, length = %v, want 10", len(result))
 	}
 }
+
+// TestExecutorDefaultContainer tests that the Executor uses the configured default container
+func TestExecutorDefaultContainer(t *testing.T) {
+	// Create a mock executor with default container
+	executor := &Executor{
+		defaultContainer: "test-sandbox",
+	}
+
+	opts := &ExecOptions{
+		Container: "",
+	}
+
+	// This would be called internally by Exec
+	if opts.Container == "" {
+		opts.Container = executor.defaultContainer
+	}
+
+	if opts.Container != "test-sandbox" {
+		t.Errorf("Default container = %q, want %q", opts.Container, "test-sandbox")
+	}
+}

@@ -218,3 +218,26 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Expected CleanupInterval 5m, got %v", cfg.CleanupInterval)
 	}
 }
+
+func TestLimiterCleanup(t *testing.T) {
+	cfg := &Config{
+		GlobalRPS:       100,
+		GlobalBurst:     200,
+		PerIPRPS:        10,
+		PerIPBurst:      20,
+		PerSessionRPS:   5,
+		PerSessionBurst: 10,
+		CleanupInterval: 100 * time.Millisecond,
+	}
+
+	limiter := NewLimiter(cfg)
+	defer limiter.Stop()
+
+	limiter.Allow(context.Background(), "ip1", "session1")
+	limiter.Allow(context.Background(), "ip2", "session2")
+
+	time.Sleep(500 * time.Millisecond)
+
+	limiter.Stop()
+	limiter.Stop() // Verify can be called multiple times
+}

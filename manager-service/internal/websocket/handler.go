@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	v1 "k8s.io/api/core/v1"
 	"github.com/sandbox/manager/internal/buffer"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
@@ -539,6 +541,12 @@ func (h *Handler) forwardIO(ctx context.Context, sess *session.Session, conn *we
 						h.logger.Error("Failed to parse stdin: %v", err)
 						continue
 					}
+					// Validate size before decoding (base64 expands to ~4/3x)
+					maxEncodedSize := (h.cfg.WebSocket.MaxMessageSize * 4) / 3
+					if int64(len(payload.Data)) > maxEncodedSize {
+						h.logger.Error("Stdin data too large: %d bytes (max %d)", len(payload.Data), maxEncodedSize)
+						continue
+					}
 					data, err := base64.StdEncoding.DecodeString(payload.Data)
 					if err != nil {
 						h.logger.Error("Failed to decode stdin data: %v", err)
@@ -621,6 +629,20 @@ func (h *Handler) marshalJSON(v interface{}) json.RawMessage {
 		return json.RawMessage(errorMsg)
 	}
 	return data
+}
+
+// validatePodIP checks that the pod has a valid IP address
+func (h *Handler) validatePodIP(pod *v1.Pod) error {
+	if pod.Status.PodIP == "" {
+		return fmt.Errorf("pod IP not ready")
+	}
+
+	ip := net.ParseIP(pod.Status.PodIP)
+	if ip == nil {
+		return fmt.Errorf("invalid pod IP format: %s", pod.Status.PodIP)
+	}
+
+	return nil
 }
 
 // outputMessage represents an output message from the exec

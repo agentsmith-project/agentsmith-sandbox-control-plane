@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: sandbox-cleaner
+  name: sandbox-cleaner-sandbox-system
   namespace: sandbox-system
   labels:
     app: sandbox-cleaner
@@ -10,7 +10,7 @@ spec:
   schedule: "*/5 * * * *"
   # Only one job at a time
   concurrencyPolicy: Forbid
-  # Keep successful jobs for 1 hour, failed jobs for 1 day
+  # Keep successful jobs for 1 hour (12 runs), failed jobs for 15 minutes (3 runs)
   successfulJobsHistoryLimit: 12
   failedJobsHistoryLimit: 3
   # Job deadline
@@ -43,7 +43,6 @@ spec:
             # Flags for namespace and other options
             args:
             - --namespace=sandbox-system
-            - --namespace=sandbox-workspaces
             - --log-level=info
             env:
             # Service keys from Secret (for authentication)

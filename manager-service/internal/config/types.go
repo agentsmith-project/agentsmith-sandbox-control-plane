@@ -203,6 +203,7 @@ type WebSocketConfig struct {
 	AllowedOrigins          []string `yaml:"allowedOrigins"`
 	AllowNonBrowserRequests bool     `yaml:"allowNonBrowserRequests"`
 	HandshakeTimeout        string   `yaml:"handshakeTimeout"`
+	MaxMessageSize          int64    `yaml:"maxMessageSize"`
 }
 
 // ConfigMeta contains metadata about loaded configuration
@@ -367,6 +368,7 @@ func DefaultConfig() *Config {
 			AllowedOrigins:          []string{"http://localhost:3000"},
 			AllowNonBrowserRequests: true,
 			HandshakeTimeout:        "10s",
+			MaxMessageSize:          10 << 20, // 10MB
 		},
 	}
 }

@@ -40,19 +40,21 @@ type ExecResult struct {
 
 // Executor handles command execution in pods
 type Executor struct {
-	config     *rest.Config
-	clientset  *kubernetes.Clientset
-	restClient rest.Interface
-	namespace  string
+	config           *rest.Config
+	clientset        *kubernetes.Clientset
+	restClient       rest.Interface
+	namespace        string
+	defaultContainer string
 }
 
 // NewExecutor creates a new executor
 func NewExecutor(client *Client) *Executor {
 	return &Executor{
-		config:     client.config,
-		clientset:  client.clientset,
-		restClient: client.clientset.CoreV1().RESTClient(),
-		namespace:  client.namespace,
+		config:           client.config,
+		clientset:        client.clientset,
+		restClient:       client.clientset.CoreV1().RESTClient(),
+		namespace:        client.namespace,
+		defaultContainer: client.defaultContainer,
 	}
 }
 
@@ -63,7 +65,7 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 	}
 
 	if opts.Container == "" {
-		opts.Container = "runner" // default container name
+		opts.Container = e.defaultContainer // default container name
 	}
 
 	startTime := time.Now()

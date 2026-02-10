@@ -81,10 +81,11 @@ func mainImpl() {
 	log.Printf("Configuration loaded (hash=%s, source=%s)", cfgMeta.CurrentHash, cfgMeta.SourcePath)
 
 	k8sClient, err := k8s.NewClient(&k8s.ClientConfig{
-		Namespace:      cfg.Sandbox.Defaults.Namespace,
-		QPS:            cfg.Kubernetes.QPS,
-		Burst:          cfg.Kubernetes.Burst,
-		RequestTimeout: cfg.Kubernetes.RequestTimeout,
+		Namespace:        cfg.Sandbox.Defaults.Namespace,
+		DefaultContainer: cfg.Sandbox.Defaults.ContainerName,
+		QPS:              cfg.Kubernetes.QPS,
+		Burst:            cfg.Kubernetes.Burst,
+		RequestTimeout:   cfg.Kubernetes.RequestTimeout,
 		Retry: &k8s.RetryConfig{
 			Enabled:     cfg.Kubernetes.Retry.Enabled,
 			MaxAttempts: cfg.Kubernetes.Retry.MaxAttempts,
@@ -594,6 +595,11 @@ func (m *Manager) waitForShutdown() {
 	<-sigint
 
 	log.Printf("Shutdown signal received, gracefully shutting down...")
+
+	// Stop rate limiter cleanup goroutine
+	if m.rateLimiter != nil {
+		m.rateLimiter.Stop()
+	}
 
 	// Cancel manager lifecycle context to stop all background goroutines
 	// This includes the finalizer handler which was started with m.ctx

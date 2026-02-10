@@ -514,3 +514,40 @@ func TestConfigCloneConcurrent(t *testing.T) {
 		<-done
 	}
 }
+
+// TestCalculateBackoffOverflow tests that large consecutive failure counts don't cause overflow
+func TestCalculateBackoffOverflow(t *testing.T) {
+	cfg := &Config{}
+	meta := &ConfigMeta{}
+	opts := &WatcherOptions{
+		MaxBackoff:  30 * time.Second,
+		MinInterval: time.Second,
+	}
+	watcher := NewWatcher("test.yaml", cfg, meta, opts)
+
+	watcher.consecutiveFailures = 100 // Would overflow in the current implementation
+
+	backoff := watcher.calculateBackoff()
+
+	// Should be capped at maxBackoff, not overflow to a small value
+	assert.Equal(t, 30*time.Second, backoff, "With 100 failures, backoff should be capped at maxBackoff")
+}
+
+// TestCalculateBackoffNormal tests normal backoff calculation
+func TestCalculateBackoffNormal(t *testing.T) {
+	cfg := &Config{}
+	meta := &ConfigMeta{}
+	opts := &WatcherOptions{
+		MaxBackoff:  30 * time.Second,
+		MinInterval: time.Second,
+	}
+	watcher := NewWatcher("test.yaml", cfg, meta, opts)
+
+	watcher.consecutiveFailures = 3
+
+	backoff := watcher.calculateBackoff()
+
+	// 2^(3-1) = 4 seconds
+	expected := 4 * time.Second
+	assert.Equal(t, expected, backoff, "With 3 failures, backoff should be 4 seconds")
+}
