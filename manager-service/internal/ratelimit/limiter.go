@@ -31,6 +31,7 @@ type Config struct {
 type limiterEntry struct {
 	limiter     *rate.Limiter
 	lastAccess  time.Time
+	mu          sync.Mutex // Protects lastAccess
 }
 
 // Limiter implements three-tier rate limiting (global + per-IP + per-session)
@@ -44,6 +45,7 @@ type Limiter struct {
 	stopCleanup chan struct{}
 	wg          sync.WaitGroup
 	stopped     sync.Mutex
+	stoppedFlag bool // tracks whether Stop() has been called
 }
 
 // NewLimiter creates a new rate limiter with the given configuration
@@ -88,7 +90,10 @@ func (l *Limiter) cleanupStaleEntries() {
 	// Cleanup per-IP limiters
 	l.perIP.Range(func(key, value interface{}) bool {
 		entry := value.(*limiterEntry)
-		if entry.lastAccess.Before(cutoff) {
+		entry.mu.Lock()
+		stale := entry.lastAccess.Before(cutoff)
+		entry.mu.Unlock()
+		if stale {
 			l.perIP.Delete(key)
 		}
 		return true
@@ -97,7 +102,10 @@ func (l *Limiter) cleanupStaleEntries() {
 	// Cleanup per-session limiters
 	l.perSession.Range(func(key, value interface{}) bool {
 		entry := value.(*limiterEntry)
-		if entry.lastAccess.Before(cutoff) {
+		entry.mu.Lock()
+		stale := entry.lastAccess.Before(cutoff)
+		entry.mu.Unlock()
+		if stale {
 			l.perSession.Delete(key)
 		}
 		return true
@@ -120,7 +128,9 @@ func (l *Limiter) Allow(ctx context.Context, ip, sessionID string) bool {
 		})
 
 		limiterEntry := entry.(*limiterEntry)
+		limiterEntry.mu.Lock()
 		limiterEntry.lastAccess = time.Now() // Update access time
+		limiterEntry.mu.Unlock()
 
 		if !limiterEntry.limiter.Allow() {
 			return false
@@ -135,7 +145,9 @@ func (l *Limiter) Allow(ctx context.Context, ip, sessionID string) bool {
 		})
 
 		limiterEntry := entry.(*limiterEntry)
+		limiterEntry.mu.Lock()
 		limiterEntry.lastAccess = time.Now() // Update access time
+		limiterEntry.mu.Unlock()
 
 		if !limiterEntry.limiter.Allow() {
 			return false
@@ -166,14 +178,14 @@ func (l *Limiter) Stop() {
 	l.stopped.Lock()
 	defer l.stopped.Unlock()
 
-	select {
-	case <-l.stopCleanup:
+	if l.stoppedFlag {
 		// Already stopped
 		return
-	default:
-		close(l.stopCleanup)
-		l.wg.Wait()
 	}
+
+	l.stoppedFlag = true
+	close(l.stopCleanup)
+	l.wg.Wait()
 }
 
 // DefaultConfig returns the default rate limiter configuration

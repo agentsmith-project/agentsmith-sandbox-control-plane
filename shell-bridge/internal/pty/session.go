@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -14,6 +15,8 @@ type Session struct {
 	pty     *os.File
 	shell   string
 	workdir string
+	closed  bool
+	mu      sync.Mutex
 }
 
 func NewSession(shell, workdir string) *Session {
@@ -40,20 +43,30 @@ func (s *Session) Start() error {
 }
 
 func (s *Session) Write(data []byte) (int, error) {
-	if s.pty == nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.pty == nil {
 		return 0, io.ErrClosedPipe
 	}
 	return s.pty.Write(data)
 }
 
 func (s *Session) Read(buf []byte) (int, error) {
-	if s.pty == nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.pty == nil {
 		return 0, io.ErrClosedPipe
 	}
 	return s.pty.Read(buf)
 }
 
 func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil // Already closed
+	}
+	s.closed = true
 	if s.pty != nil {
 		s.pty.Close()
 	}
@@ -65,7 +78,9 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) Resize(rows, cols uint16) error {
-	if s.pty == nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.pty == nil {
 		return io.ErrClosedPipe
 	}
 	return pty.Setsize(s.pty, &pty.Winsize{

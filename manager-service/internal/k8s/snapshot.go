@@ -28,7 +28,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 		defer cancel()
 
 		// Execute tar command using kubectl exec (for streaming support)
-		err := c.Exec(execCtx, namespace, podName, "runner", []string{
+		err := c.Exec(execCtx, namespace, podName, c.defaultContainer, []string{
 			"tar", "czf", "-", "-C", "/workspace", ".",
 		}, StreamOptions{
 			Stdout: writer,
@@ -45,7 +45,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 // RestoreWorkspace extracts tar.gz to /workspace
 // Uses kubectl exec for streaming (shell-bridge doesn't support stdin streaming yet)
 func (c *Client) RestoreWorkspace(ctx context.Context, namespace, podName string, tarData io.Reader) error {
-	return c.Exec(ctx, namespace, podName, "runner", []string{
+	return c.Exec(ctx, namespace, podName, c.defaultContainer, []string{
 		"tar", "xzf", "-", "-C", "/workspace",
 	}, StreamOptions{
 		Stdin: tarData,

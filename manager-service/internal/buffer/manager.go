@@ -37,8 +37,12 @@ func (m *Manager) GetOrCreate(agentThreadID string) *RingBuffer {
 	return buf
 }
 
-func (m *Manager) Delete(agentThreadID string) {
+// Delete removes the buffer for the given agent thread ID.
+// Returns true if the buffer was found and deleted, false if it didn't exist.
+func (m *Manager) Delete(agentThreadID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	_, existed := m.buffers[agentThreadID]
 	delete(m.buffers, agentThreadID)
+	return existed
 }

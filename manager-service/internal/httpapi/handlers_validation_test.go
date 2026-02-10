@@ -11,7 +11,6 @@ import (
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
-	"github.com/sandbox/manager/internal/shellbridge"
 )
 
 // TestExtractSessionId tests the extractSessionId helper function
@@ -473,7 +472,7 @@ func TestNewHandlers(t *testing.T) {
 type MockManager struct {
 	cfg         *config.Config
 	k8sClient   *k8s.Client
-	k8sExecutor *shellbridge.K8sAdapter
+	k8sExecutor *k8s.Executor
 	metrics     *observability.MetricsRegistry
 }
 
@@ -488,7 +487,7 @@ func (m *MockManager) GetK8sClient() *k8s.Client {
 	return m.k8sClient
 }
 
-func (m *MockManager) GetK8sExecutor() *shellbridge.K8sAdapter {
+func (m *MockManager) GetK8sExecutor() *k8s.Executor {
 	return m.k8sExecutor
 }
 

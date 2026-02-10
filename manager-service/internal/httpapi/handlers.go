@@ -15,14 +15,13 @@ import (
 	"github.com/sandbox/manager/internal/files"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
-	"github.com/sandbox/manager/internal/shellbridge"
 )
 
 // Manager is the interface for handlers to interact with the service
 type Manager interface {
 	GetConfig() *config.Config
 	GetK8sClient() *k8s.Client
-	GetK8sExecutor() *shellbridge.K8sAdapter
+	GetK8sExecutor() *k8s.Executor
 	GetMetrics() *observability.MetricsRegistry
 }
 
@@ -31,7 +30,7 @@ type Handlers struct {
 	mgr         Manager
 	cfg         *config.Config
 	k8sClient   *k8s.Client
-	k8sExecutor *shellbridge.K8sAdapter
+	k8sExecutor *k8s.Executor
 	metrics     *observability.MetricsRegistry
 }
 

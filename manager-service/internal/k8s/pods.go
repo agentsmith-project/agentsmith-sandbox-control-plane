@@ -380,7 +380,7 @@ func buildContainer(spec *PodSpec) v1.Container {
 		workdir = "/workspace"
 	}
 
-	container.Command = []string{"/shellb"}
+	container.Command = []string{"/usr/local/bin/shellb"}
 	container.Args = []string{
 		"--shell=" + shellType,
 		"--port=8080",
