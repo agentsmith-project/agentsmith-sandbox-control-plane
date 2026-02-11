@@ -16,11 +16,11 @@ type SecurityConfig struct {
 
 // CreateSessionRequest represents a request to create a new session.
 type CreateSessionRequest struct {
-	AgentThreadID string            `json:"agent_thread_id"`
-	Image         string            `json:"image"`
-	Command       []string          `json:"command,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	Config        SecurityConfig    `json:"config"`
+	SandboxID string            `json:"sandbox_id"`
+	Image     string            `json:"image"`
+	Command   []string          `json:"command,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Config    SecurityConfig    `json:"config"`
 }
 
 // CreateSessionResponse represents the response from creating a session.

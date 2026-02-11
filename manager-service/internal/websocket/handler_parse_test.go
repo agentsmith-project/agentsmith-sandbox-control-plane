@@ -13,10 +13,10 @@ func TestParseCreate_ValidPayload_ReturnsPayload(t *testing.T) {
 	handler := &Handler{}
 
 	payload := CreatePayload{
-		AgentThreadID: "test-agent-123",
-		Image:         "ubuntu:latest",
-		Command:       []string{"bash", "-c", "echo hello"},
-		Env:           map[string]string{"PATH": "/usr/bin"},
+		SandboxID: "test-agent-123",
+		Image:     "ubuntu:latest",
+		Command:   []string{"bash", "-c", "echo hello"},
+		Env:       map[string]string{"PATH": "/usr/bin"},
 		Config: SecurityConfig{
 			AllowNetworkAccess: true,
 			CPULimit:           "500m",
@@ -28,7 +28,7 @@ func TestParseCreate_ValidPayload_ReturnsPayload(t *testing.T) {
 
 	result, err := handler.parseCreate(data)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-agent-123", result.AgentThreadID)
+	assert.Equal(t, "test-agent-123", result.SandboxID)
 	assert.Equal(t, "ubuntu:latest", result.Image)
 	assert.Equal(t, []string{"bash", "-c", "echo hello"}, result.Command)
 	assert.Equal(t, map[string]string{"PATH": "/usr/bin"}, result.Env)
@@ -36,8 +36,8 @@ func TestParseCreate_ValidPayload_ReturnsPayload(t *testing.T) {
 	assert.Equal(t, "500m", result.Config.CPULimit)
 }
 
-// TestParseCreate_MissingAgentThreadID_ReturnsError tests parsing with missing agent_thread_id
-func TestParseCreate_MissingAgentThreadID_ReturnsError(t *testing.T) {
+// TestParseCreate_MissingSandboxID_ReturnsError tests parsing with missing sandbox_id
+func TestParseCreate_MissingSandboxID_ReturnsError(t *testing.T) {
 	handler := &Handler{}
 
 	payload := map[string]interface{}{
@@ -49,17 +49,17 @@ func TestParseCreate_MissingAgentThreadID_ReturnsError(t *testing.T) {
 
 	result, err := handler.parseCreate(data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "agent_thread_id is required")
+	assert.Contains(t, err.Error(), "sandbox_id is required")
 	assert.Equal(t, CreatePayload{}, result)
 }
 
-// TestParseCreate_EmptyAgentThreadID_ReturnsError tests parsing with empty agent_thread_id
-func TestParseCreate_EmptyAgentThreadID_ReturnsError(t *testing.T) {
+// TestParseCreate_EmptySandboxID_ReturnsError tests parsing with empty sandbox_id
+func TestParseCreate_EmptySandboxID_ReturnsError(t *testing.T) {
 	handler := &Handler{}
 
 	payload := CreatePayload{
-		AgentThreadID: "",
-		Image:         "ubuntu:latest",
+		SandboxID: "",
+		Image:     "ubuntu:latest",
 	}
 
 	data, err := json.Marshal(payload)
@@ -67,7 +67,7 @@ func TestParseCreate_EmptyAgentThreadID_ReturnsError(t *testing.T) {
 
 	result, err := handler.parseCreate(data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "agent_thread_id is required")
+	assert.Contains(t, err.Error(), "sandbox_id is required")
 	assert.Equal(t, CreatePayload{}, result)
 }
 
@@ -88,7 +88,7 @@ func TestParseCreate_MinimalValidPayload_ReturnsPayload(t *testing.T) {
 	handler := &Handler{}
 
 	payload := map[string]interface{}{
-		"agent_thread_id": "test-123",
+		"sandbox_id": "test-123",
 	}
 
 	data, err := json.Marshal(payload)
@@ -96,7 +96,7 @@ func TestParseCreate_MinimalValidPayload_ReturnsPayload(t *testing.T) {
 
 	result, err := handler.parseCreate(data)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-123", result.AgentThreadID)
+	assert.Equal(t, "test-123", result.SandboxID)
 }
 
 // TestParseCreate_WithAllFields_ReturnsPayload tests parsing with all fields populated
@@ -104,9 +104,9 @@ func TestParseCreate_WithAllFields_ReturnsPayload(t *testing.T) {
 	handler := &Handler{}
 
 	payload := CreatePayload{
-		AgentThreadID: "test-agent-456",
-		Image:         "python:3.11",
-		Command:       []string{"python", "-u", "app.py"},
+		SandboxID: "test-agent-456",
+		Image:     "python:3.11",
+		Command:   []string{"python", "-u", "app.py"},
 		Env: map[string]string{
 			"PYTHONPATH": "/app",
 			"DEBUG":      "false",
@@ -128,7 +128,7 @@ func TestParseCreate_WithAllFields_ReturnsPayload(t *testing.T) {
 
 	result, err := handler.parseCreate(data)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-agent-456", result.AgentThreadID)
+	assert.Equal(t, "test-agent-456", result.SandboxID)
 	assert.Equal(t, "python:3.11", result.Image)
 	assert.Equal(t, []string{"python", "-u", "app.py"}, result.Command)
 	assert.Equal(t, map[string]string{"PYTHONPATH": "/app", "DEBUG": "false"}, result.Env)

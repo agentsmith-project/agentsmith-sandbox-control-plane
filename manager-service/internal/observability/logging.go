@@ -86,3 +86,9 @@ func InitLogging() {
 		globalLogger = NewDefaultLogger(true)
 	}
 }
+
+// InitLoggerForTest initializes the logger for testing.
+// It enables debug mode to help with troubleshooting.
+func InitLoggerForTest() {
+	globalLogger = NewDefaultLogger(true)
+}

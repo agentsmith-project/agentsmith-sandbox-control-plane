@@ -168,9 +168,9 @@ func TestSandboxClient_CreateSession(t *testing.T) {
 		defer client.Disconnect()
 
 		req := &CreateSessionRequest{
-			AgentThreadID: "at_123",
-			Image:         "test-image",
-			Command:       []string{"/bin/bash"},
+			SandboxID: "at_123",
+			Image:     "test-image",
+			Command:   []string{"/bin/bash"},
 			Config: SecurityConfig{
 				IdleTimeout: "300s",
 			},
@@ -193,8 +193,8 @@ func TestSandboxClient_CreateSession(t *testing.T) {
 		ctx := context.Background()
 
 		req := &CreateSessionRequest{
-			AgentThreadID: "at_123",
-			Image:         "test-image",
+			SandboxID: "at_123",
+			Image:     "test-image",
 		}
 
 		resp, err := client.CreateSession(ctx, req)

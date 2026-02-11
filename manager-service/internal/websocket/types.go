@@ -10,6 +10,7 @@ const (
 	TypeStdout = "stdout"
 	TypeStderr = "stderr"
 	TypeExit   = "exit"
+	TypeSignal = "signal" // for sending signals to shell process
 	TypeError  = "error"
 )
 
@@ -21,11 +22,11 @@ type Message struct {
 
 // CreatePayload is the payload for create message
 type CreatePayload struct {
-	AgentThreadID string            `json:"agent_thread_id"`
-	Image         string            `json:"image"`
-	Command       []string          `json:"command,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	Config        SecurityConfig    `json:"config"`
+	SandboxID string            `json:"sandbox_id"`
+	Image     string            `json:"image"`
+	Command   []string          `json:"command,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Config    SecurityConfig    `json:"config"`
 }
 
 // StdinPayload is the payload for stdin message
@@ -48,6 +49,12 @@ type OutputPayload struct {
 // ExitPayload is the payload for exit message
 type ExitPayload struct {
 	Code int32 `json:"code"`
+}
+
+// SignalPayload is the payload for signal message
+type SignalPayload struct {
+	SandboxID string `json:"sandbox_id"` // The sandbox to send the signal to
+	Signal    string `json:"signal"`     // The signal to send (e.g., SIGINT, SIGTERM)
 }
 
 // ErrorPayload is the payload for error message

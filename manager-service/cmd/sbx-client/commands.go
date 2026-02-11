@@ -67,9 +67,9 @@ func handleAttach(ctx context.Context, baseURL, serviceKey string, args []string
 
 	// Attach is handled by creating with existing session ID
 	req := &client.CreateSessionRequest{
-		AgentThreadID: sessionID,
-		Image:         "sandbox-runner:latest",
-		Command:       []string{"/bin/bash"},
+		SandboxID: sessionID,
+		Image:     "sandbox-runner:latest",
+		Command:   []string{"/bin/bash"},
 	}
 
 	resp, err := c.CreateSession(ctx, req)

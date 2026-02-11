@@ -4,35 +4,35 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sandbox/manager/internal/session"
+	"github.com/sandbox/manager/internal/sandbox"
 )
 
-// SessionBuilder builds test Session instances.
+// SessionBuilder builds test Sandbox instances.
 type SessionBuilder struct {
-	s *session.Session
+	s *sandbox.Sandbox
 }
 
 // NewSessionBuilder creates a new SessionBuilder.
 func NewSessionBuilder() *SessionBuilder {
 	now := time.Now()
 	return &SessionBuilder{
-		s: &session.Session{
+		s: &sandbox.Sandbox{
 			CreatedAt:       now,
 			LastActivityAt:  now,
-			State:           session.StateReady,
+			State:           sandbox.StateReady,
 			ClientConnected: false,
-			Config: session.SecurityConfig{
-				MaxLifetime: session.DefaultMaxLifetime,
+			Config: sandbox.SecurityConfig{
+				MaxLifetime: sandbox.DefaultMaxLifetime,
 				IdleTimeout: 15 * time.Minute,
 			},
-			ExpiresAt: now.Add(session.DefaultMaxLifetime),
+			ExpiresAt: now.Add(sandbox.DefaultMaxLifetime),
 		},
 	}
 }
 
-// WithAgentThreadID sets the agent thread ID.
-func (b *SessionBuilder) WithAgentThreadID(agentThreadID string) *SessionBuilder {
-	b.s.AgentThreadID = agentThreadID
+// WithSandboxID sets the sandbox ID.
+func (b *SessionBuilder) WithSandboxID(sandboxID string) *SessionBuilder {
+	b.s.SandboxID = sandboxID
 	return b
 }
 
@@ -49,7 +49,7 @@ func (b *SessionBuilder) WithPodNamespace(podNamespace string) *SessionBuilder {
 }
 
 // WithState sets the session state.
-func (b *SessionBuilder) WithState(state session.State) *SessionBuilder {
+func (b *SessionBuilder) WithState(state sandbox.State) *SessionBuilder {
 	b.s.State = state
 	return b
 }
@@ -120,8 +120,8 @@ func (b *SessionBuilder) WithReadonlyFilesystem(readonly bool) *SessionBuilder {
 	return b
 }
 
-// Build returns the constructed Session.
-func (b *SessionBuilder) Build() *session.Session {
+// Build returns the constructed Sandbox.
+func (b *SessionBuilder) Build() *sandbox.Sandbox {
 	return b.s
 }
 

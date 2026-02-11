@@ -3,13 +3,20 @@ package shellbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+var (
+	// ErrNotConnected is returned when trying to use the client without an active connection
+	ErrNotConnected = errors.New("not connected to shell-bridge")
 )
 
 const (
@@ -19,13 +26,24 @@ const (
 	DefaultPort      = 8080
 )
 
+// FrameHandler handles shell output frames from shell-bridge
+type FrameHandler interface {
+	OnStdout(data []byte)
+	OnStderr(data []byte)
+	OnResize(data []byte)
+	OnClose() // Called when shell bridge sends EOF (0x04 frame)
+}
+
 // Client is a WebSocket client for shell-bridge
 type Client struct {
 	conn       *websocket.Conn
 	connMu     sync.RWMutex
 	connected  bool
+	closed     atomic.Bool
 	url        string
 	httpClient *http.Client
+	onClose    func()
+	onCloseMu  sync.RWMutex
 }
 
 // NewClient creates a new shell-bridge client for a pod
@@ -66,7 +84,7 @@ func (c *Client) ExecCommand(ctx context.Context, shell, command string, env []s
 	c.connMu.RLock()
 	if !c.connected || c.conn == nil {
 		c.connMu.RUnlock()
-		return fmt.Errorf("not connected to shell-bridge")
+		return ErrNotConnected
 	}
 	conn := c.conn
 	c.connMu.RUnlock()
@@ -92,7 +110,7 @@ func (c *Client) ReceiveOutput(ctx context.Context) (*Output, error) {
 	c.connMu.RLock()
 	if !c.connected || c.conn == nil {
 		c.connMu.RUnlock()
-		return nil, fmt.Errorf("not connected to shell-bridge")
+		return nil, ErrNotConnected
 	}
 	conn := c.conn
 	c.connMu.RUnlock()
@@ -140,15 +158,125 @@ func (c *Client) Close() error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
+	var err error
 	if c.conn != nil {
 		// Send close frame
 		c.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		err := c.conn.Close()
+		err = c.conn.Close()
 		c.conn = nil
-		c.connected = false
-		return err
 	}
 	c.connected = false
-	return nil
+	c.closed.Store(true)
+
+	// Call onClose callback if set (always call, even if conn was nil)
+	c.onCloseMu.RLock()
+	if c.onClose != nil {
+		c.onClose()
+	}
+	c.onCloseMu.RUnlock()
+
+	return err
+}
+
+// OnClose registers a callback function to be called when the connection is closed
+func (c *Client) OnClose(fn func()) {
+	c.onCloseMu.Lock()
+	defer c.onCloseMu.Unlock()
+	c.onClose = fn
+}
+
+// IsActive returns true if the connection is active (connected and not closed)
+func (c *Client) IsActive() bool {
+	c.connMu.RLock()
+	defer c.connMu.RUnlock()
+	return c.connected && !c.closed.Load()
+}
+
+// SendSignal sends a signal to the shell process
+// Signal should be a string like "SIGTERM", "SIGKILL", "SIGINT", etc.
+func (c *Client) SendSignal(ctx context.Context, signal string) error {
+	c.connMu.RLock()
+	if !c.connected || c.conn == nil {
+		c.connMu.RUnlock()
+		return ErrNotConnected
+	}
+	conn := c.conn
+	c.connMu.RUnlock()
+
+	signalMsg := struct {
+		Type   string `json:"type"`
+		Signal string `json:"signal"`
+	}{
+		Type:   "signal",
+		Signal: signal,
+	}
+
+	data, err := json.Marshal(signalMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal signal message: %w", err)
+	}
+
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// ReceiveLoop enters a loop receiving output from the shell and calling the handler
+// Returns when the shell closes or context is cancelled
+func (c *Client) ReceiveLoop(ctx context.Context, handler FrameHandler) error {
+	c.connMu.RLock()
+	if !c.connected || c.conn == nil {
+		c.connMu.RUnlock()
+		return ErrNotConnected
+	}
+	conn := c.conn
+	c.connMu.RUnlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Set a read deadline to allow context cancellation
+		err := conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+		if err != nil {
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+
+		msgType, data, err := conn.ReadMessage()
+		if err != nil {
+			// Check for timeout (net.Error with Timeout())
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				// On timeout, continue waiting (check context at loop start)
+				continue
+			}
+			if err == io.EOF || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				handler.OnClose()
+				return nil
+			}
+			return fmt.Errorf("read error: %w", err)
+		}
+
+		if msgType == websocket.BinaryMessage {
+			frame, err := ParseBinaryFrame(data)
+			if err != nil {
+				return fmt.Errorf("failed to parse binary frame: %w", err)
+			}
+
+			switch frame.Type {
+			case DataTypeStdout:
+				handler.OnStdout(frame.Data)
+			case DataTypeStderr:
+				handler.OnStderr(frame.Data)
+			case DataTypeResize:
+				handler.OnResize(frame.Data)
+			case DataTypeClose:
+				handler.OnClose()
+				return nil
+			}
+		}
+		// Ignore text messages (control messages like exit, ping)
+	}
 }

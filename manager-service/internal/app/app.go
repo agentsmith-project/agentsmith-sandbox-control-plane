@@ -15,12 +15,13 @@ import (
 	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/buffer"
 	"github.com/sandbox/manager/internal/config"
+	"github.com/sandbox/manager/internal/connection"
 	"github.com/sandbox/manager/internal/finalizer"
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
-	"github.com/sandbox/manager/internal/session"
+	"github.com/sandbox/manager/internal/sandbox"
 	"github.com/sandbox/manager/internal/storage"
 	"github.com/sandbox/manager/internal/websocket"
 )
@@ -42,12 +43,13 @@ type Manager struct {
 	cancel        context.CancelFunc
 
 	// New components
-	sessionManager   *session.Manager
-	bufferManager    *buffer.Manager
-	storageClient    *storage.Client
-	wsHandler        *websocket.Handler
-	finalizerHandler *finalizer.Handler
-	rateLimiter      *ratelimit.Limiter
+	sandboxManager     *sandbox.Manager
+	bufferManager      *buffer.Manager
+	storageClient      *storage.Client
+	connectionManager  *connection.Manager
+	wsHandler          *websocket.Handler
+	finalizerHandler   *finalizer.Handler
+	rateLimiter        *ratelimit.Limiter
 }
 
 // Main is the entry point for the sandbox manager.
@@ -124,11 +126,15 @@ func mainImpl() {
 	)
 
 	// Initialize new components
-	log.Printf("Initializing session manager...")
-	sessionManager := session.NewManager()
+	log.Printf("Initializing sandbox manager...")
+	sandboxManager := sandbox.NewManager()
 
 	log.Printf("Initializing buffer manager...")
 	bufferManager := buffer.NewManager()
+
+	// Initialize connection manager
+	log.Printf("Initializing connection manager...")
+	connectionManager := connection.NewManager(sandboxManager)
 
 	// Initialize storage client
 	// Try loading from credentials file first, fall back to environment variables
@@ -156,10 +162,11 @@ func mainImpl() {
 	// Initialize WebSocket handler with all dependencies
 	log.Printf("Initializing WebSocket handler...")
 	wsHandler := websocket.NewHandler(
-		sessionManager,
+		sandboxManager,
 		bufferManager,
 		k8sClient,
 		storageClient,
+		connectionManager,
 		cfg.Sandbox.Defaults.Namespace,
 		cfg,
 	)
@@ -202,9 +209,10 @@ func mainImpl() {
 		authValidator:    authValidator,
 		healthChecker:    observability.NewHealthChecker(),
 		metrics:          observability.GetMetrics(),
-		sessionManager:   sessionManager,
+		sandboxManager:   sandboxManager,
 		bufferManager:    bufferManager,
 		storageClient:    storageClient,
+		connectionManager: connectionManager,
 		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
 		rateLimiter:      rateLimiter,
@@ -219,9 +227,9 @@ func mainImpl() {
 	go mgr.finalizerHandler.Start(mgr.ctx)
 	log.Printf("Finalizer handler started")
 
-	// Start session cleanup goroutine with manager lifecycle context
-	go mgr.sessionManager.StartCleanup(mgr.ctx, 5*time.Minute)
-	log.Printf("Session cleanup started (interval=5m)")
+	// Start sandbox cleanup goroutine with manager lifecycle context
+	go mgr.sandboxManager.StartCleanup(mgr.ctx, 5*time.Minute)
+	log.Printf("Sandbox cleanup started (interval=5m)")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -409,8 +417,8 @@ func (m *Manager) GetMetrics() *observability.MetricsRegistry {
 	return m.metrics
 }
 
-func (m *Manager) GetSessionManager() *session.Manager {
-	return m.sessionManager
+func (m *Manager) GetSessionManager() *sandbox.Manager {
+	return m.sandboxManager
 }
 
 func (m *Manager) GetBufferManager() *buffer.Manager {
