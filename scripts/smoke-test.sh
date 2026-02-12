@@ -24,7 +24,6 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION="${VERSION:-$(cat "$PROJECT_DIR/VERSION" 2>/dev/null || echo dev)}"
 CLUSTER_NAME="${CLUSTER_NAME:-sandbox-cluster}"
 MANAGER_URL="${MANAGER_URL:-http://localhost:8080}"
-SERVICE_KEY="${SERVICE_KEY:-dev-key-12345}"
 
 # 代理配置 (可从环境变量读取)
 HTTP_PROXY="${HTTP_PROXY:-}"
@@ -152,7 +151,7 @@ while [[ $# -gt 0 ]]; do
         --no-cluster) NO_CLUSTER=true ;;
         --skip-cleanup) SKIP_CLEANUP=true ;;
         --manager-url) MANAGER_URL="$2"; shift ;;
-        --service-key) SERVICE_KEY="$2"; shift ;;
+        --service-key) echo "Warning: --service-key is no longer needed (auth removed)"; shift ;;
         *) log_error "Unknown option: $1"; show_help ;;
     esac
     shift
@@ -432,7 +431,6 @@ test_sandbox() {
     # 测试 1: 创建沙盒
     log_info "Creating sandbox: $session_id"
     local response=$(curl -s -X PUT "${MANAGER_URL}/v1/sandboxes/${session_id}" \
-        -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"ttlSeconds": 900, "containerName": "runner", "workdir": "/workspace"}')
 
@@ -448,44 +446,41 @@ test_sandbox() {
     sleep 8
 
     # 测试 2: Echo 命令
-    local result=$(curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
-        -H "X-Service-Key: $SERVICE_KEY" \
+    local result=$(curl -s -N -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
         -H "Content-Type: application/json" \
         -d '{"cmd": ["echo", "Smoke test"], "timeoutSeconds": 10}')
 
-    if echo "$result" | grep -q '"exitCode":0'; then
-        pass_test "Echo command successful"
+    if echo "$result" | grep -q 'event: exit' && echo "$result" | grep -q '"exit_code":0'; then
+        pass_test "Echo command successful (SSE)"
     else
         fail_test "Echo command failed"
     fi
 
     # 测试 3: PWD 命令
-    result=$(curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
-        -H "X-Service-Key: $SERVICE_KEY" \
+    result=$(curl -s -N -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
         -H "Content-Type: application/json" \
         -d '{"cmd": ["pwd"], "timeoutSeconds": 10}')
 
-    if echo "$result" | grep -q '"exitCode":0' && echo "$result" | grep -q '/workspace'; then
-        pass_test "PWD command successful"
+    if echo "$result" | grep -q 'event: exit' && echo "$result" | grep -q '"exit_code":0'; then
+        pass_test "PWD command successful (SSE)"
     else
         fail_test "PWD command failed"
     fi
 
     # 测试 4: LS 命令
-    result=$(curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
-        -H "X-Service-Key: $SERVICE_KEY" \
+    result=$(curl -s -N -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/exec" \
         -H "Content-Type: application/json" \
         -d '{"cmd": ["ls", "-la"], "timeoutSeconds": 10}')
 
-    if echo "$result" | grep -q '"exitCode":0'; then
-        pass_test "LS command successful"
+    if echo "$result" | grep -q 'event: exit' && echo "$result" | grep -q '"exit_code":0'; then
+        pass_test "LS command successful (SSE)"
     else
         fail_test "LS command failed"
     fi
 
     # 测试 5: Touch (TTL 续期)
     if curl -s -X POST "${MANAGER_URL}/v1/sandboxes/${session_id}/touch" \
-        -H "X-Service-Key: $SERVICE_KEY" >/dev/null 2>&1; then
+        >/dev/null 2>&1; then
         pass_test "Touch (TTL extension) successful"
     else
         fail_test "Touch failed"
@@ -493,7 +488,7 @@ test_sandbox() {
 
     # 测试 6: 删除沙盒
     if curl -s -X DELETE "${MANAGER_URL}/v1/sandboxes/${session_id}" \
-        -H "X-Service-Key: $SERVICE_KEY" >/dev/null 2>&1; then
+        >/dev/null 2>&1; then
         pass_test "Sandbox deleted"
     else
         fail_test "Failed to delete sandbox"

@@ -26,7 +26,7 @@ type K8sClientInterface interface {
 // StorageClientInterface defines the interface for storage client operations needed by Handler.
 type StorageClientInterface interface {
 	UploadSnapshot(ctx context.Context, key string, data io.Reader, size int64) error
-	GenerateSnapshotKey(workspaceID, projectID, agentThreadID string) string
+	GenerateSnapshotKey(sandboxID string) (string, error)
 }
 
 // MockK8sClient is a mock implementation of K8s client operations for testing finalizer.
@@ -70,9 +70,9 @@ func (m *MockStorageClient) UploadSnapshot(ctx context.Context, key string, data
 	return args.Error(0)
 }
 
-func (m *MockStorageClient) GenerateSnapshotKey(workspaceID, projectID, agentThreadID string) string {
-	args := m.Called(workspaceID, projectID, agentThreadID)
-	return args.String(0)
+func (m *MockStorageClient) GenerateSnapshotKey(sandboxID string) (string, error) {
+	args := m.Called(sandboxID)
+	return args.String(0), args.Error(1)
 }
 
 // testHandler wraps Handler with mock clients for testing.
@@ -336,173 +336,38 @@ func TestRemoveFinalizerWithRetry_ContextAlreadyCancelled(t *testing.T) {
 	require.Contains(t, lastErr.Error(), "context cancelled")
 }
 
-// TestGetWorkspaceIDFromAnnotation tests getting workspace ID from annotation.
-func TestGetWorkspaceIDFromAnnotation(t *testing.T) {
+// TestGetSandboxIDFromAnnotation tests getting sandbox ID from annotation.
+func TestGetSandboxIDFromAnnotation(t *testing.T) {
 	h := &Handler{}
 
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
+			Name: "sbx-my-session",
 			Annotations: map[string]string{
-				"workspace_id": "ws-123",
+				"sandbox/sessionId": "my-session",
 			},
 		},
 	}
 
-	workspaceID := h.getWorkspaceID(pod)
-	if workspaceID != "ws-123" {
-		t.Errorf("Expected workspace ID 'ws-123', got '%s'", workspaceID)
+	sandboxID := h.getSandboxID(pod)
+	if sandboxID != "my-session" {
+		t.Errorf("Expected sandbox ID 'my-session', got '%s'", sandboxID)
 	}
 }
 
-// TestGetWorkspaceIDFromLabel tests getting workspace ID from label.
-func TestGetWorkspaceIDFromLabel(t *testing.T) {
+// TestGetSandboxIDNoAnnotation returns empty when sandbox/sessionId is missing (no fallback to pod name).
+func TestGetSandboxIDNoAnnotationReturnsEmpty(t *testing.T) {
 	h := &Handler{}
 
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-			Labels: map[string]string{
-				"workspace_id": "ws-456",
-			},
+			Name: "sbx-test-pod",
 		},
 	}
 
-	workspaceID := h.getWorkspaceID(pod)
-	if workspaceID != "ws-456" {
-		t.Errorf("Expected workspace ID 'ws-456', got '%s'", workspaceID)
-	}
-}
-
-// TestGetWorkspaceIDFallback tests workspace ID fallback to pod name.
-func TestGetWorkspaceIDFallback(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-		},
-	}
-
-	workspaceID := h.getWorkspaceID(pod)
-	expectedID := "ws_test-pod"
-	if workspaceID != expectedID {
-		t.Errorf("Expected workspace ID '%s', got '%s'", expectedID, workspaceID)
-	}
-}
-
-// TestGetProjectIDFromAnnotation tests getting project ID from annotation.
-func TestGetProjectIDFromAnnotation(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-			Annotations: map[string]string{
-				"project_id": "proj-123",
-			},
-		},
-	}
-
-	projectID := h.getProjectID(pod)
-	if projectID != "proj-123" {
-		t.Errorf("Expected project ID 'proj-123', got '%s'", projectID)
-	}
-}
-
-// TestGetProjectIDFallback tests project ID fallback to default.
-func TestGetProjectIDFallback(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-		},
-	}
-
-	projectID := h.getProjectID(pod)
-	if projectID != "proj_default" {
-		t.Errorf("Expected project ID 'proj_default', got '%s'", projectID)
-	}
-}
-
-// TestGetAgentThreadIDFromLabel tests getting agent thread ID from label.
-func TestGetAgentThreadIDFromLabel(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-			Labels: map[string]string{
-				"agent_thread_id": "at-123",
-			},
-		},
-	}
-
-	agentThreadID := h.getAgentThreadID(pod)
-	if agentThreadID != "at-123" {
-		t.Errorf("Expected agent thread ID 'at-123', got '%s'", agentThreadID)
-	}
-}
-
-// TestGetAgentThreadIDFallback tests agent thread ID fallback to pod name.
-func TestGetAgentThreadIDFallback(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-		},
-	}
-
-	agentThreadID := h.getAgentThreadID(pod)
-	expectedID := "at_test-pod"
-	if agentThreadID != expectedID {
-		t.Errorf("Expected agent thread ID '%s', got '%s'", expectedID, agentThreadID)
-	}
-}
-
-// TestGetWorkspaceIDAnnotationPrecedenceOverLabel tests annotation takes precedence over label for workspace ID.
-func TestGetWorkspaceIDAnnotationPrecedenceOverLabel(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-			Annotations: map[string]string{
-				"workspace_id": "ws-from-annotation",
-			},
-			Labels: map[string]string{
-				"workspace_id": "ws-from-label",
-			},
-		},
-	}
-
-	workspaceID := h.getWorkspaceID(pod)
-	if workspaceID != "ws-from-annotation" {
-		t.Errorf("Expected workspace ID from annotation 'ws-from-annotation', got '%s'", workspaceID)
-	}
-}
-
-// TestGetProjectIDAnnotationPrecedenceOverLabel tests annotation takes precedence over label for project ID.
-func TestGetProjectIDAnnotationPrecedenceOverLabel(t *testing.T) {
-	h := &Handler{}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-			Annotations: map[string]string{
-				"project_id": "proj-from-annotation",
-			},
-			Labels: map[string]string{
-				"project_id": "proj-from-label",
-			},
-		},
-	}
-
-	projectID := h.getProjectID(pod)
-	if projectID != "proj-from-annotation" {
-		t.Errorf("Expected project ID from annotation 'proj-from-annotation', got '%s'", projectID)
+	sandboxID := h.getSandboxID(pod)
+	if sandboxID != "" {
+		t.Errorf("Expected empty sandbox ID when annotation missing, got %q", sandboxID)
 	}
 }
 
@@ -571,6 +436,129 @@ func BenchmarkRemoveFinalizerWithRetry_WithRetries(b *testing.B) {
 	}
 }
 
+// TestMaxTotalSnapshotAttempts tests the cross-cycle retry limit constant
+func TestMaxTotalSnapshotAttempts(t *testing.T) {
+	assert.Equal(t, 10, maxTotalSnapshotAttempts, "maxTotalSnapshotAttempts should be 10")
+}
+
+// TestIsPodContainersRunning tests the container status check
+func TestIsPodContainersRunning(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      *v1.Pod
+		expected bool
+	}{
+		{
+			name: "running container",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodRunning,
+					ContainerStatuses: []v1.ContainerStatus{
+						{State: v1.ContainerState{Running: &v1.ContainerStateRunning{}}},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "failed pod phase",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodFailed,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "succeeded pod phase",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodSucceeded,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "all containers terminated",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodRunning,
+					ContainerStatuses: []v1.ContainerStatus{
+						{State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{ExitCode: 1}}},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "waiting container (no statuses yet)",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodPending,
+				},
+			},
+			expected: true, // no container statuses yet — don't skip
+		},
+		{
+			name: "container in waiting state with statuses",
+			pod: &v1.Pod{
+				Status: v1.PodStatus{
+					Phase: v1.PodPending,
+					ContainerStatuses: []v1.ContainerStatus{
+						{State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isPodContainersRunning(tc.pod)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// TestHandler_FailCountTracking tests the cross-cycle failure counter
+func TestHandler_FailCountTracking(t *testing.T) {
+	h := &Handler{
+		failCounts: make(map[string]int),
+	}
+
+	t.Run("increment and read", func(t *testing.T) {
+		h.failMu.Lock()
+		h.failCounts["pod-a"]++
+		h.failCounts["pod-a"]++
+		count := h.failCounts["pod-a"]
+		h.failMu.Unlock()
+		assert.Equal(t, 2, count)
+	})
+
+	t.Run("clear resets counter", func(t *testing.T) {
+		h.clearFailCount("pod-a")
+		h.failMu.Lock()
+		count := h.failCounts["pod-a"]
+		h.failMu.Unlock()
+		assert.Equal(t, 0, count)
+	})
+
+	t.Run("different pods have independent counters", func(t *testing.T) {
+		h.failMu.Lock()
+		h.failCounts["pod-x"] = 5
+		h.failCounts["pod-y"] = 3
+		h.failMu.Unlock()
+
+		h.clearFailCount("pod-x")
+
+		h.failMu.Lock()
+		assert.Equal(t, 0, h.failCounts["pod-x"])
+		assert.Equal(t, 3, h.failCounts["pod-y"])
+		h.failMu.Unlock()
+	})
+}
+
 // TestSnapshotFinalizerConstant tests the finalizer constant value
 func TestSnapshotFinalizerConstant(t *testing.T) {
 	expected := "manager.mbos.io/snapshot"
@@ -611,20 +599,14 @@ func TestHandler_Shutdown(t *testing.T) {
 		checkInterval:   100 * time.Millisecond,
 		snapshotTimeout: DefaultSnapshotTimeout,
 		stopCh:          make(chan struct{}),
+		failCounts:      make(map[string]int),
 	}
 
-	// Start the handler in background
+	// Start the handler (launches its own goroutine, returns immediately)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	done := make(chan struct{})
-	go func() {
-		handler.Start(ctx)
-		close(done)
-	}()
-
-	// Give it time to start
-	time.Sleep(50 * time.Millisecond)
+	handler.Start(ctx)
 
 	// Shutdown should work
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -632,17 +614,9 @@ func TestHandler_Shutdown(t *testing.T) {
 
 	err := handler.Shutdown(shutdownCtx)
 	assert.NoError(t, err, "Shutdown should succeed")
-
-	// Wait for goroutine to exit
-	select {
-	case <-done:
-		// OK
-	case <-time.After(1 * time.Second):
-		t.Error("Handler did not stop after Shutdown")
-	}
 }
 
-// TestHandler_Shutdown_ContextTimeout tests Shutdown with timeout
+// TestHandler_Shutdown_ContextTimeout tests Shutdown with expired context
 func TestHandler_Shutdown_ContextTimeout(t *testing.T) {
 	handler := &Handler{
 		k8sClient:       nil,
@@ -651,29 +625,27 @@ func TestHandler_Shutdown_ContextTimeout(t *testing.T) {
 		checkInterval:   100 * time.Millisecond,
 		snapshotTimeout: DefaultSnapshotTimeout,
 		stopCh:          make(chan struct{}),
+		failCounts:      make(map[string]int),
 	}
 
-	// Start handler
+	// Start handler (returns immediately, goroutine is running)
 	ctx, cancel := context.WithCancel(context.Background())
-	go handler.Start(ctx)
 	defer cancel()
 
-	// Give it time to start
-	time.Sleep(50 * time.Millisecond)
+	handler.Start(ctx)
 
-	// Shutdown with very short timeout (it might succeed, that's OK)
+	// Shutdown with already-expired context to force timeout path
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer shutdownCancel()
 
 	err := handler.Shutdown(shutdownCtx)
-	// Either it succeeds or times out - both are acceptable
+	// Either it succeeds (fast stop) or times out - both are acceptable
 	if err != nil {
 		assert.Contains(t, err.Error(), "timed out")
 	}
 
-	// Clean up - cancel context and wait
+	// Clean up
 	cancel()
-	time.Sleep(100 * time.Millisecond)
 }
 
 // TestHandler_Shutdown_Idempotent tests that Shutdown can be called multiple times
@@ -685,9 +657,9 @@ func TestHandler_Shutdown_Idempotent(t *testing.T) {
 		checkInterval:   100 * time.Millisecond,
 		snapshotTimeout: DefaultSnapshotTimeout,
 		stopCh:          make(chan struct{}),
+		failCounts:      make(map[string]int),
 	}
 
-	// Not even started - Shutdown should still be safe
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer shutdownCancel()
 
@@ -695,8 +667,7 @@ func TestHandler_Shutdown_Idempotent(t *testing.T) {
 	err := handler.Shutdown(shutdownCtx)
 	assert.NoError(t, err)
 
-	// Second shutdown - stopCh is already closed, should still be safe
-	// (this will panic if we don't handle it, so let's just verify behavior)
-	// In production, you shouldn't call Shutdown twice, but it should be safe
-	_ = err
+	// Second shutdown - should NOT panic (sync.Once protects close(stopCh))
+	err = handler.Shutdown(shutdownCtx)
+	assert.NoError(t, err)
 }

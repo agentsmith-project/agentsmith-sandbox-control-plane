@@ -16,7 +16,7 @@ import (
 )
 
 // ExecOptions defines the interface for executing commands in pods
-// This abstracts the execution mechanism (kubectl exec vs shell-bridge)
+// This abstracts the execution mechanism (kubectl exec)
 type ExecOptions interface{}
 
 // K8sExecutor defines the interface for executing commands in pods

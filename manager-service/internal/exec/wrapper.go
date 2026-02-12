@@ -27,9 +27,21 @@ func NewWrapper(shellBin string, shellArgs []string, exitCodeMarker, markerStrea
 	}
 }
 
-// BuildCommand builds the wrapped command string
+// BuildCommand builds the wrapped command string.
+//
+// The user command is wrapped in a subshell so that the exit code marker
+// is ALWAYS written, regardless of whether the user command succeeds or fails.
+// The pattern is:
+//
+//	cd /workspace && ( user_cmd ; _ec=$? ; echo "MARKER=$_ec" >&2 ; exit $_ec )
+//
+// This ensures:
+//  1. cd must succeed (&&)
+//  2. user_cmd runs; its exit code is captured into _ec
+//  3. The marker echo always fires (uses ; not &&)
+//  4. exit $_ec propagates the original exit code to the caller
 func (w *Wrapper) BuildCommand(env map[string]string, workdir string, userCmd []string) string {
-	var parts []string
+	var preamble []string
 
 	// Set environment variables
 	if len(env) > 0 {
@@ -37,21 +49,23 @@ func (w *Wrapper) BuildCommand(env map[string]string, workdir string, userCmd []
 		for k, v := range env {
 			envExports = append(envExports, fmt.Sprintf("export %s=%s", k, shellEscape(v)))
 		}
-		parts = append(parts, strings.Join(envExports, " && "))
+		preamble = append(preamble, strings.Join(envExports, " && "))
 	}
 
 	// Change to workdir
-	parts = append(parts, fmt.Sprintf("cd %s", shellEscape(workdir)))
+	preamble = append(preamble, fmt.Sprintf("cd %s", shellEscape(workdir)))
 
-	// Add user command
-	parts = append(parts, w.buildUserCommand(userCmd))
-
-	// Add exit code marker (to stderr)
+	// Build the user command + marker subshell.
+	// Using ; ensures the marker fires even when the user command fails.
+	userCmdStr := w.buildUserCommand(userCmd)
 	markerCmd := w.buildMarkerCommand()
-	parts = append(parts, markerCmd)
+	subshell := fmt.Sprintf("( %s ; _ec=$? ; %s ; exit $_ec )", userCmdStr, markerCmd)
 
-	// Join all parts with &&
-	return strings.Join(parts, " && ")
+	preamble = append(preamble, subshell)
+
+	// Preamble parts (env, cd) use && so they abort on failure.
+	// The subshell is the last element and always emits the marker.
+	return strings.Join(preamble, " && ")
 }
 
 // buildUserCommand builds the user command part of the wrapper
@@ -73,13 +87,14 @@ func (w *Wrapper) buildUserCommand(cmd []string) string {
 	return strings.Join(escapedArgs, " ")
 }
 
-// buildMarkerCommand builds the command that outputs the exit code marker
+// buildMarkerCommand builds the command that outputs the exit code marker.
+// The marker uses $_ec which is set by the caller (BuildCommand subshell).
 func (w *Wrapper) buildMarkerCommand() string {
 	if w.MarkerStream == "stdout" {
-		return fmt.Sprintf("echo \"%s=$?\"", w.ExitCodeMarker)
+		return fmt.Sprintf("echo \"%s=$_ec\"", w.ExitCodeMarker)
 	}
 	// Default to stderr - use = separator for parsing
-	return fmt.Sprintf("echo \"%s=$?\" >&2", w.ExitCodeMarker)
+	return fmt.Sprintf("echo \"%s=$_ec\" >&2", w.ExitCodeMarker)
 }
 
 // GetCommandArgs returns the shell command with the wrapped command as argument

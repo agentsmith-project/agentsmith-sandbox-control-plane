@@ -19,17 +19,9 @@ data:
       metrics:
         enabled: true
         path: /metrics
-        requireServiceKey: false
       debug:
         configPath: /debug/config
         enablePprof: false
-
-    auth:
-      enabled: true
-      headerName: X-Service-Key
-      acceptAuthorization: true
-      authorizationScheme: ServiceKey
-      failStatusCode: 401
 
     kubernetes:
       qps: 50
@@ -104,3 +96,9 @@ data:
       tar:
         bin: tar
         rejectSymlinks: true
+
+    # Storage config (override per environment)
+    storage:
+      endpoint: "minio.sandbox-system.svc.cluster.local:9000"
+      bucket: sandboxes
+      useSSL: false

@@ -1,426 +1,262 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestLoad(t *testing.T) {
-	t.Run("valid config file", func(t *testing.T) {
-		// Create a temporary config file
-		tmpDir := t.TempDir()
-		configPath := filepath.Join(tmpDir, "config.yaml")
-		configContent := `
-version: 1
-server:
-  httpPort: 8080
-  requestIdHeader: "X-Request-Id"
-  timeouts:
-    readHeader: 5s
-    read: 30s
-    write: 60s
-    idle: 120s
-  maxHeaderBytes: 1048576
-  metrics:
-    path: "/metrics"
-  debug:
-    configPath: "/debug/config"
-auth:
-  headerName: "X-Service-Key"
-  authorizationScheme: "ServiceKey"
-  failStatusCode: 401
-  serviceKeys:
-    - "test-key-1"
-    - "test-key-2"
-kubernetes:
-  qps: 50
-  burst: 100
-  requestTimeout: 15s
-sandbox:
-  defaults:
-    namespace: "sandbox"
-    runnerImage: "runner:1.0.0"
-    imagePullPolicy: "IfNotPresent"
-    ttlSeconds: 900
-    podReadyWait: 30s
-    podPollInterval: 500ms
-    containerName: "runner"
-    workdir: "/workspace"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "256Mi"
-      limits:
-        cpu: "1"
-        memory: "1Gi"
-exec:
-  defaultTimeout: 30s
-  maxTimeout: 300s
-  stdoutMaxBytes: 1048576
-  stderrMaxBytes: 1048576
-  preserveTailBytes: 4096
-  exitCodeMarker:
-    key: "__EXIT__"
-    stream: "stderr"
-  shell:
-    bin: "sh"
-    args: ["-c"]
-  env:
-    allowRegex: "^[A-Z_][A-Z0-9_]*$"
-  workdir:
-    allowedPrefixes:
-      - "/workspace"
-files:
-  rootPrefix: "/workspace"
-  upload:
-    defaultDest: "/workspace"
-    maxBytes: 52428800
-    format: "tar.gz"
-  download:
-    defaultSrc: "/workspace"
-    format: "tar.gz"
-  tar:
-    bin: "tar"
-`
-		err := os.WriteFile(configPath, []byte(configContent), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
-
-		cfg, meta, err := Load(configPath)
-		if err != nil {
-			t.Fatalf("Load() error = %v", err)
-		}
-
-		if cfg == nil {
-			t.Fatal("Load() returned nil config")
-		}
-		if meta == nil {
-			t.Fatal("Load() returned nil meta")
-		}
-		if cfg.Version != 1 {
-			t.Errorf("Load() version = %v, want 1", cfg.Version)
-		}
-		if meta.SourcePath != configPath {
-			t.Errorf("Load() sourcePath = %v, want %v", meta.SourcePath, configPath)
-		}
-		if meta.CurrentHash == "" {
-			t.Error("Load() hash is empty")
-		}
-		if meta.SchemaVersion != 1 {
-			t.Errorf("Load() schemaVersion = %v, want 1", meta.SchemaVersion)
-		}
-	})
-
-	t.Run("file does not exist", func(t *testing.T) {
-		_, _, err := Load("/nonexistent/path/config.yaml")
-		if err == nil {
-			t.Error("Load() expected error for nonexistent file, got nil")
-		}
-		var cfgErr *ConfigError
-		if !strings.Contains(err.Error(), "CONFIG_READ_FAILED") {
-			t.Errorf("Load() error = %v, want CONFIG_READ_FAILED", err)
-		}
-		_ = cfgErr
-	})
-
-	t.Run("invalid YAML", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		configPath := filepath.Join(tmpDir, "config.yaml")
-		err := os.WriteFile(configPath, []byte("invalid: yaml: content: ["), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
-
-		_, _, err = Load(configPath)
-		if err == nil {
-			t.Error("Load() expected error for invalid YAML, got nil")
-		}
-		if !strings.Contains(err.Error(), "CONFIG_PARSE_FAILED") {
-			t.Errorf("Load() error = %v, want CONFIG_PARSE_FAILED", err)
-		}
-	})
-
-	t.Run("empty file uses defaults", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		configPath := filepath.Join(tmpDir, "config.yaml")
-		err := os.WriteFile(configPath, []byte("version: 1\n"), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
-
-		cfg, meta, err := Load(configPath)
-		if err != nil {
-			t.Fatalf("Load() error = %v", err)
-		}
-
-		if cfg.Version != 1 {
-			t.Errorf("Load() version = %v, want 1", cfg.Version)
-		}
-		if meta.CurrentHash == "" {
-			t.Error("Load() hash is empty")
-		}
-	})
+// writeTempYAML creates a temporary YAML file in dir and returns its path.
+func writeTempYAML(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	return path
 }
 
-func TestMustLoad(t *testing.T) {
-	t.Run("valid file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		configPath := filepath.Join(tmpDir, "config.yaml")
-		configContent := `version: 1
-server:
-  httpPort: 8080
-  requestIdHeader: "X-Request-Id"
-`
-		err := os.WriteFile(configPath, []byte(configContent), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
+// ---------- Load ----------
 
-		// MustLoad should not panic
-		cfg, meta := MustLoad(configPath)
-		if cfg == nil {
-			t.Error("MustLoad() returned nil config")
-		}
-		if meta == nil {
-			t.Error("MustLoad() returned nil meta")
-		}
-	})
-
-	t.Run("invalid file panics", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("MustLoad() expected to panic for invalid file")
-			}
-		}()
-		_, _ = MustLoad("/nonexistent/path/config.yaml")
-	})
-}
-
-func TestLoadWithDefaults(t *testing.T) {
-	t.Run("valid config with defaults", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		configPath := filepath.Join(tmpDir, "config.yaml")
-		configContent := `version: 1
+func TestLoad_ValidFile(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+version: 2
 server:
   httpPort: 9090
+  requestIdHeader: "X-Trace-Id"
+sandbox:
+  defaults:
+    namespace: "test-ns"
+    runnerImage: "runner:2.0.0"
+exec:
+  defaultTimeout: 60s
 `
-		err := os.WriteFile(configPath, []byte(configContent), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
+	path := writeTempYAML(t, dir, "valid.yaml", yaml)
 
-		cfg, meta, err := LoadWithDefaults(configPath)
-		if err != nil {
-			t.Fatalf("LoadWithDefaults() error = %v", err)
-		}
+	cfg, meta, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.NotNil(t, meta)
 
-		// Check that explicit value is preserved
-		if cfg.Server.HTTPPort != 9090 {
-			t.Errorf("LoadWithDefaults() httpPort = %v, want 9090", cfg.Server.HTTPPort)
-		}
+	// Verify parsed fields
+	assert.Equal(t, 2, cfg.Version)
+	assert.Equal(t, 9090, cfg.Server.HTTPPort)
+	assert.Equal(t, "X-Trace-Id", cfg.Server.RequestIDHeader)
+	assert.Equal(t, "test-ns", cfg.Sandbox.Defaults.Namespace)
+	assert.Equal(t, "runner:2.0.0", cfg.Sandbox.Defaults.RunnerImage)
+	assert.Equal(t, 60*time.Second, cfg.Exec.DefaultTimeout)
 
-		// Check that defaults are applied
-		if cfg.Server.RequestIDHeader == "" {
-			t.Error("LoadWithDefaults() requestIDHeader was not applied from defaults")
-		}
+	// Verify meta
+	assert.Equal(t, 2, meta.SchemaVersion)
+	assert.Equal(t, path, meta.SourcePath)
+	assert.NotEmpty(t, meta.CurrentHash)
+	assert.Equal(t, 0, meta.ReloadCount)
+	assert.Nil(t, meta.LastError)
 
-		if meta == nil {
-			t.Fatal("LoadWithDefaults() returned nil meta")
-		}
-	})
-
-	t.Run("nonexistent file returns error", func(t *testing.T) {
-		_, _, err := LoadWithDefaults("/nonexistent/path/config.yaml")
-		if err == nil {
-			t.Error("LoadWithDefaults() expected error, got nil")
-		}
-	})
+	// Verify hash matches manual computation
+	raw, _ := os.ReadFile(path)
+	expectedHash := ComputeHash(raw)
+	assert.Equal(t, expectedHash, meta.CurrentHash)
 }
 
-func TestApplyDefaults(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *Config
-		validate func(*Config) bool
-	}{
-		{
-			name:  "empty config gets all defaults",
-			input: &Config{},
-			validate: func(cfg *Config) bool {
-				return cfg.Server.HTTPPort != 0 &&
-					cfg.Server.RequestIDHeader != "" &&
-					cfg.Kubernetes.QPS != 0 &&
-					cfg.Sandbox.Defaults.Namespace != "" &&
-					cfg.Exec.DefaultTimeout != 0 &&
-					cfg.Files.RootPrefix != ""
-			},
-		},
-		{
-			name: "partial config preserves set values",
-			input: &Config{
-				Server: ServerConfig{
-					HTTPPort: 9999,
-				},
-			},
-			validate: func(cfg *Config) bool {
-				return cfg.Server.HTTPPort == 9999 &&
-					cfg.Server.RequestIDHeader != "" // default applied
-			},
-		},
-		{
-			name: "zero values get defaults",
-			input: &Config{
-				Server: ServerConfig{
-					HTTPPort:        8080,
-					RequestIDHeader: "X-Custom-Id",
-					Timeouts: ServerTimeouts{
-						ReadHeader: 10 * 1000000000,
-					},
-				},
-			},
-			validate: func(cfg *Config) bool {
-				return cfg.Server.HTTPPort == 8080 &&
-					cfg.Server.RequestIDHeader == "X-Custom-Id" &&
-					cfg.Server.Timeouts.ReadHeader == 10*1000000000 &&
-					cfg.Server.Timeouts.Read != 0 // default applied
-			},
-		},
-	}
+func TestLoad_MissingFile(t *testing.T) {
+	_, _, err := Load("/tmp/does_not_exist_config_test.yaml")
+	require.Error(t, err)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			applyDefaults(tt.input)
-			if !tt.validate(tt.input) {
-				t.Error("applyDefaults() validation failed")
-			}
-		})
-	}
+	var cfgErr *ConfigError
+	require.True(t, errors.As(err, &cfgErr), "error should be *ConfigError")
+	assert.Equal(t, "CONFIG_READ_FAILED", cfgErr.Code)
+	assert.NotEmpty(t, cfgErr.Message)
+	assert.NotEmpty(t, cfgErr.Timestamp)
 }
 
-func TestComputeHash(t *testing.T) {
-	tests := []struct {
-		name string
-		data string
-	}{
-		{"empty data", ""},
-		{"simple data", "version: 1\n"},
-		{"complex data", "version: 1\nserver:\n  httpPort: 8080\n"},
-	}
+func TestLoad_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	// Malformed YAML: tab indentation mixed with bad mapping
+	content := "version: 1\nserver:\n\t- bad: [unterminated"
+	path := writeTempYAML(t, dir, "bad.yaml", content)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			hash := ComputeHash([]byte(tt.data))
-			if hash == "" {
-				t.Error("ComputeHash() returned empty string")
-			}
-			if len(hash) != 64 { // SHA256 produces 64 hex characters
-				t.Errorf("ComputeHash() returned hash of length %v, want 64", len(hash))
-			}
-		})
-	}
+	_, _, err := Load(path)
+	require.Error(t, err)
 
-	t.Run("same data produces same hash", func(t *testing.T) {
-		data := []byte("test data")
-		hash1 := ComputeHash(data)
-		hash2 := ComputeHash(data)
-		if hash1 != hash2 {
-			t.Errorf("ComputeHash() inconsistent hashes: %v != %v", hash1, hash2)
-		}
-	})
-
-	t.Run("different data produces different hash", func(t *testing.T) {
-		hash1 := ComputeHash([]byte("data 1"))
-		hash2 := ComputeHash([]byte("data 2"))
-		if hash1 == hash2 {
-			t.Error("ComputeHash() produced same hash for different data")
-		}
-	})
+	var cfgErr *ConfigError
+	require.True(t, errors.As(err, &cfgErr), "error should be *ConfigError")
+	assert.Equal(t, "CONFIG_PARSE_FAILED", cfgErr.Code)
+	assert.NotEmpty(t, cfgErr.Message)
+	assert.NotEmpty(t, cfgErr.Timestamp)
 }
 
-func TestConfig_Clone(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *Config
-	}{
-		{
-			name: "default config",
-			cfg:  DefaultConfig(),
-		},
-		{
-			name: "custom config",
-			cfg: &Config{
-				Version: 1,
-				Server: ServerConfig{
-					HTTPPort:        9090,
-					RequestIDHeader: "X-Custom-Id",
-				},
-				Auth: AuthConfig{
-					HeaderName: "X-Auth-Key",
-					Enabled:     true,
-				},
-			},
-		},
-		{
-			name: "config with slices",
-			cfg: &Config{
-				Version: 1,
-				Auth: AuthConfig{
-					HeaderName: "X-Auth-Key",
-					Enabled:     true,
-				},
-				Exec: ExecConfig{
-					Workdir: WorkdirConfig{
-						AllowedPrefixes: []string{"/workspace", "/tmp"},
-					},
-				},
-			},
-		},
-	}
+// ---------- LoadWithDefaults ----------
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			clone, err := tt.cfg.Clone()
-			if err != nil {
-				t.Fatalf("Clone() error = %v", err)
-			}
+func TestLoadWithDefaults_AppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	// Minimal config — only version is set; everything else should get defaults.
+	path := writeTempYAML(t, dir, "minimal.yaml", "version: 1\n")
 
-			// Check that clone is not the same instance
-			if clone == tt.cfg {
-				t.Error("Clone() returned same instance")
-			}
+	cfg, meta, err := LoadWithDefaults(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.NotNil(t, meta)
 
-			// Check that values are equal
-			if clone.Version != tt.cfg.Version {
-				t.Errorf("Clone() version = %v, want %v", clone.Version, tt.cfg.Version)
-			}
-			if clone.Server.HTTPPort != tt.cfg.Server.HTTPPort {
-				t.Errorf("Clone() httpPort = %v, want %v", clone.Server.HTTPPort, tt.cfg.Server.HTTPPort)
-			}
+	defaults := DefaultConfig()
 
-			// Modify clone and ensure original is unchanged
-			clone.Server.HTTPPort = 9999
-			if tt.cfg.Server.HTTPPort == 9999 {
-				t.Error("Clone() modifying clone affected original")
-			}
-		})
-	}
+	// Server defaults
+	assert.Equal(t, defaults.Server.HTTPPort, cfg.Server.HTTPPort,
+		"HTTPPort should be defaulted to %d", defaults.Server.HTTPPort)
+	assert.Equal(t, defaults.Server.RequestIDHeader, cfg.Server.RequestIDHeader)
+	assert.Equal(t, defaults.Server.Timeouts.ReadHeader, cfg.Server.Timeouts.ReadHeader)
+	assert.Equal(t, defaults.Server.Timeouts.Read, cfg.Server.Timeouts.Read)
+	assert.Equal(t, defaults.Server.Timeouts.Write, cfg.Server.Timeouts.Write)
+	assert.Equal(t, defaults.Server.Timeouts.Idle, cfg.Server.Timeouts.Idle)
+	assert.Equal(t, defaults.Server.MaxHeaderBytes, cfg.Server.MaxHeaderBytes)
+	assert.Equal(t, defaults.Server.Metrics.Path, cfg.Server.Metrics.Path)
+	assert.Equal(t, defaults.Server.Debug.ConfigPath, cfg.Server.Debug.ConfigPath)
+
+	// Kubernetes defaults
+	assert.Equal(t, defaults.Kubernetes.QPS, cfg.Kubernetes.QPS)
+	assert.Equal(t, defaults.Kubernetes.Burst, cfg.Kubernetes.Burst)
+	assert.Equal(t, defaults.Kubernetes.RequestTimeout, cfg.Kubernetes.RequestTimeout)
+
+	// Sandbox defaults
+	assert.Equal(t, "sandbox", cfg.Sandbox.Defaults.Namespace)
+	assert.Equal(t, "sandbox-runner:1.0.0", cfg.Sandbox.Defaults.RunnerImage)
+	assert.Equal(t, defaults.Sandbox.Defaults.ImagePullPolicy, cfg.Sandbox.Defaults.ImagePullPolicy)
+	assert.Equal(t, defaults.Sandbox.Defaults.TTLSeconds, cfg.Sandbox.Defaults.TTLSeconds)
+	assert.Equal(t, defaults.Sandbox.Defaults.PodReadyWait, cfg.Sandbox.Defaults.PodReadyWait)
+	assert.Equal(t, defaults.Sandbox.Defaults.PodPollInterval, cfg.Sandbox.Defaults.PodPollInterval)
+	assert.Equal(t, defaults.Sandbox.Defaults.ContainerName, cfg.Sandbox.Defaults.ContainerName)
+	assert.Equal(t, defaults.Sandbox.Defaults.Workdir, cfg.Sandbox.Defaults.Workdir)
+
+	// Exec defaults
+	assert.Equal(t, 30*time.Second, cfg.Exec.DefaultTimeout)
+	assert.Equal(t, defaults.Exec.MaxTimeout, cfg.Exec.MaxTimeout)
+	assert.Equal(t, defaults.Exec.Shell.Bin, cfg.Exec.Shell.Bin)
+	assert.Equal(t, defaults.Exec.Shell.Args, cfg.Exec.Shell.Args)
+	assert.Equal(t, defaults.Exec.ExitCodeMarker.Key, cfg.Exec.ExitCodeMarker.Key)
+
+	// Files defaults
+	assert.Equal(t, defaults.Files.RootPrefix, cfg.Files.RootPrefix)
+	assert.Equal(t, defaults.Files.Upload.DefaultDest, cfg.Files.Upload.DefaultDest)
+	assert.Equal(t, defaults.Files.Upload.MaxBytes, cfg.Files.Upload.MaxBytes)
+	assert.Equal(t, defaults.Files.Tar.Bin, cfg.Files.Tar.Bin)
 }
 
-func TestConfigError_Error(t *testing.T) {
-	err := &ConfigError{
-		Code:      "TEST_CODE",
-		Message:   "Test message",
-		Timestamp: "2024-01-01T00:00:00Z",
-	}
+// ---------- ComputeHash ----------
 
-	errStr := err.Error()
-	if !strings.Contains(errStr, "TEST_CODE") {
-		t.Errorf("ConfigError.Error() = %v, want to contain TEST_CODE", errStr)
-	}
-	if !strings.Contains(errStr, "Test message") {
-		t.Errorf("ConfigError.Error() = %v, want to contain 'Test message'", errStr)
-	}
+func TestComputeHash_Deterministic(t *testing.T) {
+	data := []byte("hello sandbox config")
+	h1 := ComputeHash(data)
+	h2 := ComputeHash(data)
+	assert.Equal(t, h1, h2, "same input must produce same hash")
+
+	different := ComputeHash([]byte("different content"))
+	assert.NotEqual(t, h1, different, "different input must produce different hash")
+}
+
+func TestComputeHash_SHA256(t *testing.T) {
+	data := []byte("test")
+	got := ComputeHash(data)
+
+	// Manually compute expected SHA256
+	sum := sha256.Sum256(data)
+	expected := hex.EncodeToString(sum[:])
+
+	assert.Equal(t, expected, got)
+	// SHA256 hex string is always 64 characters
+	assert.Len(t, got, 64)
+}
+
+// ---------- Clone ----------
+
+func TestClone_DeepCopy(t *testing.T) {
+	original := DefaultConfig()
+
+	cloned, err := original.Clone()
+	require.NoError(t, err)
+	require.NotNil(t, cloned)
+
+	// Modify the clone's scalar and nested fields
+	cloned.Version = 99
+	cloned.Server.HTTPPort = 1234
+	cloned.Server.RequestIDHeader = "X-Changed"
+	cloned.Sandbox.Defaults.Namespace = "modified-ns"
+	cloned.Sandbox.Defaults.RunnerImage = "modified:latest"
+	cloned.Exec.DefaultTimeout = 999 * time.Second
+	cloned.Files.RootPrefix = "/changed"
+
+	// Modify clone's map to verify deep copy of maps
+	cloned.Sandbox.Defaults.Labels["newKey"] = "newVal"
+
+	// Verify original is NOT affected
+	assert.Equal(t, 1, original.Version)
+	assert.Equal(t, 8080, original.Server.HTTPPort)
+	assert.Equal(t, "X-Request-Id", original.Server.RequestIDHeader)
+	assert.Equal(t, "sandbox", original.Sandbox.Defaults.Namespace)
+	assert.Equal(t, "sandbox-runner:1.0.0", original.Sandbox.Defaults.RunnerImage)
+	assert.Equal(t, 30*time.Second, original.Exec.DefaultTimeout)
+	assert.Equal(t, "/workspace", original.Files.RootPrefix)
+	assert.NotContains(t, original.Sandbox.Defaults.Labels, "newKey",
+		"modifying clone's map should not affect original")
+}
+
+func TestClone_PreservesValues(t *testing.T) {
+	original := DefaultConfig()
+
+	cloned, err := original.Clone()
+	require.NoError(t, err)
+	require.NotNil(t, cloned)
+
+	// All scalar and nested values should match
+	assert.Equal(t, original.Version, cloned.Version)
+
+	// Server
+	assert.Equal(t, original.Server.HTTPPort, cloned.Server.HTTPPort)
+	assert.Equal(t, original.Server.RequestIDHeader, cloned.Server.RequestIDHeader)
+	assert.Equal(t, original.Server.Timeouts, cloned.Server.Timeouts)
+	assert.Equal(t, original.Server.MaxHeaderBytes, cloned.Server.MaxHeaderBytes)
+	assert.Equal(t, original.Server.Metrics, cloned.Server.Metrics)
+	assert.Equal(t, original.Server.Debug, cloned.Server.Debug)
+
+	// Kubernetes
+	assert.Equal(t, original.Kubernetes.QPS, cloned.Kubernetes.QPS)
+	assert.Equal(t, original.Kubernetes.Burst, cloned.Kubernetes.Burst)
+	assert.Equal(t, original.Kubernetes.RequestTimeout, cloned.Kubernetes.RequestTimeout)
+	assert.Equal(t, original.Kubernetes.Retry, cloned.Kubernetes.Retry)
+
+	// Sandbox
+	assert.Equal(t, original.Sandbox.Defaults.Namespace, cloned.Sandbox.Defaults.Namespace)
+	assert.Equal(t, original.Sandbox.Defaults.RunnerImage, cloned.Sandbox.Defaults.RunnerImage)
+	assert.Equal(t, original.Sandbox.Defaults.ImagePullPolicy, cloned.Sandbox.Defaults.ImagePullPolicy)
+	assert.Equal(t, original.Sandbox.Defaults.TTLSeconds, cloned.Sandbox.Defaults.TTLSeconds)
+	assert.Equal(t, original.Sandbox.Defaults.PodReadyWait, cloned.Sandbox.Defaults.PodReadyWait)
+	assert.Equal(t, original.Sandbox.Defaults.ContainerName, cloned.Sandbox.Defaults.ContainerName)
+	assert.Equal(t, original.Sandbox.Defaults.Workdir, cloned.Sandbox.Defaults.Workdir)
+	assert.Equal(t, original.Sandbox.Defaults.Resources, cloned.Sandbox.Defaults.Resources)
+	assert.Equal(t, original.Sandbox.Defaults.Labels, cloned.Sandbox.Defaults.Labels)
+	assert.Equal(t, original.Sandbox.Defaults.Volumes, cloned.Sandbox.Defaults.Volumes)
+
+	// Exec
+	assert.Equal(t, original.Exec.DefaultTimeout, cloned.Exec.DefaultTimeout)
+	assert.Equal(t, original.Exec.MaxTimeout, cloned.Exec.MaxTimeout)
+	assert.Equal(t, original.Exec.StdoutMaxBytes, cloned.Exec.StdoutMaxBytes)
+	assert.Equal(t, original.Exec.StderrMaxBytes, cloned.Exec.StderrMaxBytes)
+	assert.Equal(t, original.Exec.Shell, cloned.Exec.Shell)
+	assert.Equal(t, original.Exec.ExitCodeMarker, cloned.Exec.ExitCodeMarker)
+	assert.Equal(t, original.Exec.Env, cloned.Exec.Env)
+	assert.Equal(t, original.Exec.Workdir, cloned.Exec.Workdir)
+
+	// Files
+	assert.Equal(t, original.Files.RootPrefix, cloned.Files.RootPrefix)
+	assert.Equal(t, original.Files.Upload, cloned.Files.Upload)
+	assert.Equal(t, original.Files.Download, cloned.Files.Download)
+	assert.Equal(t, original.Files.Tar, cloned.Files.Tar)
+
+	// Storage
+	assert.Equal(t, original.Storage, cloned.Storage)
 }

@@ -5,18 +5,16 @@ import (
 	"time"
 )
 
-// Config is the main configuration structure
+// Config is the main configuration structure.
+// Sections: Server, Kubernetes, Sandbox, Exec, Files, Storage.
 type Config struct {
 	Version    int           `yaml:"version"`
 	Server     ServerConfig  `yaml:"server"`
-	Auth       AuthConfig    `yaml:"auth"`
 	Kubernetes K8sConfig     `yaml:"kubernetes"`
 	Sandbox    SandboxConfig `yaml:"sandbox"`
 	Exec       ExecConfig    `yaml:"exec"`
 	Files      FilesConfig   `yaml:"files"`
 	Storage    StorageConfig `yaml:"storage"`
-	Buffer     BufferConfig  `yaml:"buffer"`
-	WebSocket  WebSocketConfig `yaml:"websocket"`
 }
 
 // ServerConfig contains HTTP server configuration
@@ -26,7 +24,7 @@ type ServerConfig struct {
 	Timeouts        ServerTimeouts `yaml:"timeouts"`
 	MaxHeaderBytes  int            `yaml:"maxHeaderBytes"`
 	Metrics         MetricsConfig  `yaml:"metrics"`
-	Debug           DebugConfig    `yaml:"debug"`
+	Debug           DebugEndConfig `yaml:"debug"`
 }
 
 // ServerTimeouts contains server timeout settings
@@ -39,25 +37,14 @@ type ServerTimeouts struct {
 
 // MetricsConfig contains metrics endpoint configuration
 type MetricsConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	Path              string `yaml:"path"`
-	RequireServiceKey bool   `yaml:"requireServiceKey"`
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
-// DebugConfig contains debug endpoint configuration
-type DebugConfig struct {
+// DebugEndConfig contains debug endpoint configuration
+type DebugEndConfig struct {
 	ConfigPath  string `yaml:"configPath"`
 	EnablePprof bool   `yaml:"enablePprof"`
-}
-
-// AuthConfig contains authentication configuration
-type AuthConfig struct {
-	Enabled             bool   `yaml:"enabled"`
-	HeaderName          string `yaml:"headerName"`
-	AcceptAuthorization bool   `yaml:"acceptAuthorization"`
-	AuthorizationScheme string `yaml:"authorizationScheme"`
-	FailStatusCode      int    `yaml:"failStatusCode"`
-	AllowUnauthenticated bool   `yaml:"allowUnauthenticated"`
 }
 
 // K8sConfig contains Kubernetes client configuration
@@ -191,21 +178,6 @@ type StorageConfig struct {
 	UseSSL    bool   `yaml:"useSSL"`
 }
 
-// BufferConfig contains buffer capacity settings
-type BufferConfig struct {
-	Capacity int `yaml:"capacity"`
-}
-
-// WebSocketConfig contains WebSocket configuration
-type WebSocketConfig struct {
-	ReadBufferSize          int      `yaml:"readBufferSize"`
-	WriteBufferSize         int      `yaml:"writeBufferSize"`
-	AllowedOrigins          []string `yaml:"allowedOrigins"`
-	AllowNonBrowserRequests bool     `yaml:"allowNonBrowserRequests"`
-	HandshakeTimeout        string   `yaml:"handshakeTimeout"`
-	MaxMessageSize          int64    `yaml:"maxMessageSize"`
-}
-
 // ConfigMeta contains metadata about loaded configuration
 type ConfigMeta struct {
 	SchemaVersion int          `yaml:"schemaVersion"`
@@ -246,21 +218,13 @@ func DefaultConfig() *Config {
 			},
 			MaxHeaderBytes: 1 << 20, // 1MB
 			Metrics: MetricsConfig{
-				Enabled:           true,
-				Path:              "/metrics",
-				RequireServiceKey: false,
+				Enabled: true,
+				Path:    "/metrics",
 			},
-			Debug: DebugConfig{
+			Debug: DebugEndConfig{
 				ConfigPath:  "/debug/config",
 				EnablePprof: false,
 			},
-		},
-		Auth: AuthConfig{
-			Enabled:             true,
-			HeaderName:          "X-Service-Key",
-			AcceptAuthorization: true,
-			AuthorizationScheme: "ServiceKey",
-			FailStatusCode:      401,
 		},
 		Kubernetes: K8sConfig{
 			QPS:            50,
@@ -278,12 +242,10 @@ func DefaultConfig() *Config {
 				Namespace:               "sandbox",
 				RunnerImage:             "sandbox-runner:1.0.0",
 				ImagePullPolicy:         "IfNotPresent",
-				ImagePullSecrets:        nil,
 				TTLSeconds:              900,
 				PodReadyWait:            5 * time.Minute,
 				PodPollInterval:         500 * time.Millisecond,
 				TerminationGraceSeconds: 1,
-				ActiveDeadlineSeconds:   0,
 				ContainerName:           "runner",
 				Workdir:                 "/workspace",
 				Volumes: map[string]Volume{
@@ -354,21 +316,8 @@ func DefaultConfig() *Config {
 		},
 		Storage: StorageConfig{
 			Endpoint:  "s3.amazonaws.com",
-			AccessKey: "",
-			SecretKey: "",
 			Bucket:    "sandbox-storage",
 			UseSSL:    true,
-		},
-		Buffer: BufferConfig{
-			Capacity: 10000,
-		},
-		WebSocket: WebSocketConfig{
-			ReadBufferSize:          1024,
-			WriteBufferSize:         1024,
-			AllowedOrigins:          []string{"http://localhost:3000"},
-			AllowNonBrowserRequests: true,
-			HandshakeTimeout:        "10s",
-			MaxMessageSize:          10 << 20, // 10MB
 		},
 	}
 }

@@ -15,12 +15,17 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # shellcheck source=lib/kustomize-utils.sh
 source "${SCRIPT_DIR}/lib/kustomize-utils.sh"
 
+# Caller-provided REGISTRY (e.g. from sbx dev up) wins over config file
+REGISTRY_FROM_CALLER="${REGISTRY:-}"
+
 # Load configuration
 CONFIG_FILE="${CONFIG_FILE:-${K8S_DIR}/config/deploy.env}"
 if ! load_config "$CONFIG_FILE"; then
     log_warning "配置文件不存在，使用默认值: $CONFIG_FILE"
 fi
 
+# Restore caller REGISTRY so dev up with local build uses short names in dev overlay
+[ -n "$REGISTRY_FROM_CALLER" ] && REGISTRY="$REGISTRY_FROM_CALLER"
 REGISTRY="${REGISTRY:-localhost:5001}"
 HARBOR_PROJECT="${HARBOR_PROJECT:-agentsmith}"
 
@@ -95,6 +100,11 @@ EOF
     fi
 }
 
+# For dev overlay with local registry, use short image names so Kind uses locally loaded images
+use_short_names_for_dev() {
+    [[ "$REGISTRY" == "localhost:"* ]] || [[ "$REGISTRY" == "127.0.0.1:"* ]]
+}
+
 # Update all overlays
 SUCCESS_COUNT=0
 FAIL_COUNT=0
@@ -109,8 +119,15 @@ for overlay in dev staging production; do
     
     log_info "更新 overlay: $overlay"
     
+    manager_img="$MANAGER_IMAGE"
+    runner_img="$RUNNER_IMAGE"
+    if [ "$overlay" = "dev" ] && use_short_names_for_dev; then
+        manager_img="sandbox-manager:${MANAGER_VERSION}"
+        runner_img="sandbox-runner:${RUNNER_VERSION}"
+    fi
+    
     # Update kustomization.yaml images
-    if update_kustomization_images "$overlay_dir" "$MANAGER_IMAGE" "$RUNNER_IMAGE" "$GC_IMAGE"; then
+    if update_kustomization_images "$overlay_dir" "$manager_img" "$runner_img"; then
         log_success "Kustomization 镜像已更新"
     else
         log_error "Kustomization 镜像更新失败"
@@ -119,7 +136,7 @@ for overlay in dev staging production; do
     fi
     
     # Update ConfigMap patch for runner image
-    if update_configmap_runner_image "$overlay_dir" "$RUNNER_IMAGE"; then
+    if update_configmap_runner_image "$overlay_dir" "$runner_img"; then
         log_success "ConfigMap runner 镜像已更新"
         
         # Ensure patch is included in kustomization.yaml

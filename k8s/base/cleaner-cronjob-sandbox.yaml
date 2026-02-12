@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sandbox-cleaner-sandbox
+  namespace: sandbox-system
+  labels:
+    app: sandbox-cleaner
+spec:
+  # Run every 5 minutes
+  schedule: "*/5 * * * *"
+  # Only one job at a time
+  concurrencyPolicy: Forbid
+  # Keep successful jobs for 1 hour (12 runs), failed jobs for 15 minutes (3 runs)
+  successfulJobsHistoryLimit: 12
+  failedJobsHistoryLimit: 3
+  # Job deadline
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    metadata:
+      labels:
+        app: sandbox-cleaner
+    spec:
+      # Automatically clean up completed pods after 5 minutes
+      ttlSecondsAfterFinished: 300
+      # Restart policy for the pod
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app: sandbox-cleaner
+        spec:
+          serviceAccountName: sandbox-manager
+          restartPolicy: OnFailure
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: cleaner
+            image: sandbox-manager:2.0.0
+            imagePullPolicy: IfNotPresent
+            command:
+            - /cleaner
+            args:
+            - --namespace=sandbox
+            - --dry-run=false
+            - -v=2
+            env:
+            # Manager URL for snapshot-before-delete (cleaner calls Manager DELETE API)
+            - name: MANAGER_URL
+              value: "http://sandbox-manager.sandbox-system.svc.cluster.local"
+            # Boot configuration
+            - name: CONFIG_PATH
+              value: "/etc/sandbox-manager/manager-config.yaml"
+            - name: DEBUG
+              value: "false"
+            # Mount config file
+            volumeMounts:
+            - name: manager-config
+              mountPath: /etc/sandbox-manager/manager-config.yaml
+              subPath: manager-config.yaml
+              readOnly: true
+            # Resources - cleaner typically needs less resources
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "64Mi"
+              limits:
+                cpu: "200m"
+                memory: "256Mi"
+            # Security
+            securityContext:
+              runAsNonRoot: true
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: false
+              capabilities:
+                drop: ["ALL"]
+          # Volumes
+          volumes:
+          - name: manager-config
+            configMap:
+              name: sandbox-manager-config

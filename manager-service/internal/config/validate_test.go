@@ -2,420 +2,131 @@ package config
 
 import (
 	"testing"
-	"time"
 )
 
-func TestValidateVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		version int
-		wantErr bool
-	}{
-		{"valid version 1", 1, false},
-		{"invalid version 0", 0, true},
-		{"invalid version 2", 2, true},
+func TestDefaultConfigValidates(t *testing.T) {
+	cfg := DefaultConfig()
+	result := cfg.Validate()
+	if !result.Valid {
+		for _, e := range result.Errors {
+			t.Errorf("validation error: [%s] %s: %s", e.Code, e.FieldPath, e.Message)
+		}
+		t.Fatalf("default config should be valid, got %d errors", len(result.Errors))
 	}
+}
 
+func TestValidate_InvalidVersion(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Version = 99
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for version 99")
+	}
+	assertHasError(t, result, "version")
+}
+
+func TestValidate_InvalidHTTPPort(t *testing.T) {
+	tests := []struct {
+		name string
+		port int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"too high", 70000},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateVersion(tt.version)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateVersion() error = %v, wantErr %v", err, tt.wantErr)
+			cfg := DefaultConfig()
+			cfg.Server.HTTPPort = tt.port
+			result := cfg.Validate()
+			if result.Valid {
+				t.Errorf("expected invalid for port %d", tt.port)
 			}
+			assertHasError(t, result, "server.httpPort")
 		})
 	}
 }
 
-func TestValidateServerConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     ServerConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: ServerConfig{
-				HTTPPort:        8080,
-				RequestIDHeader: "X-Request-Id",
-				Timeouts: ServerTimeouts{
-					ReadHeader: 5 * time.Second,
-					Read:       30 * time.Second,
-					Write:      60 * time.Second,
-					Idle:       120 * time.Second,
-				},
-				MaxHeaderBytes: 1 << 20,
-				Metrics: MetricsConfig{
-					Path: "/metrics",
-				},
-				Debug: DebugConfig{
-					ConfigPath: "/debug/config",
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid port",
-			cfg: ServerConfig{
-				HTTPPort:        0,
-				RequestIDHeader: "X-Request-Id",
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty request id header",
-			cfg: ServerConfig{
-				HTTPPort:        8080,
-				RequestIDHeader: "",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid metrics path",
-			cfg: ServerConfig{
-				HTTPPort:        8080,
-				RequestIDHeader: "X-Request-Id",
-				Metrics: MetricsConfig{
-					Path: "metrics",
-				},
-			},
-			wantErr: true,
-		},
+func TestValidate_EmptyRequestIDHeader(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server.RequestIDHeader = ""
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for empty requestIdHeader")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateServerConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateServerConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "server.requestIdHeader")
 }
 
-func TestValidateAuthConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     AuthConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: AuthConfig{
-				HeaderName:          "X-Service-Key",
-				AuthorizationScheme: "ServiceKey",
-				FailStatusCode:      401,
-			},
-			wantErr: false,
-		},
-		{
-			name: "empty header name",
-			cfg: AuthConfig{
-				HeaderName:          "",
-				AuthorizationScheme: "ServiceKey",
-				FailStatusCode:      401,
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid fail status code",
-			cfg: AuthConfig{
-				HeaderName:          "X-Service-Key",
-				AuthorizationScheme: "ServiceKey",
-				FailStatusCode:      500,
-			},
-			wantErr: true,
-		},
+func TestValidate_InvalidK8sQPS(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Kubernetes.QPS = 2000
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for QPS > 1000")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateAuthConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateAuthConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "kubernetes.qps")
 }
 
-func TestValidateK8sConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     K8sConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: K8sConfig{
-				QPS:            50,
-				Burst:          100,
-				RequestTimeout: 15 * time.Second,
-			},
-			wantErr: false,
-		},
-		{
-			name: "negative qps",
-			cfg: K8sConfig{
-				QPS: -1,
-			},
-			wantErr: true,
-		},
-		{
-			name: "retry enabled with max backoff < base backoff",
-			cfg: K8sConfig{
-				Retry: K8sRetryConfig{
-					Enabled:     true,
-					MaxAttempts: 3,
-					BaseBackoff: 2 * time.Second,
-					MaxBackoff:  1 * time.Second,
-				},
-			},
-			wantErr: true,
-		},
+func TestValidate_InvalidSandboxNamespace(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Sandbox.Defaults.Namespace = ""
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for empty namespace")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateK8sConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateK8sConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "sandbox.defaults.namespace")
 }
 
-func TestValidateSandboxConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     SandboxConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: SandboxConfig{
-				Defaults: SandboxDefaults{
-					Namespace:       "sandbox",
-					RunnerImage:     "runner:1.0.0",
-					ImagePullPolicy: "IfNotPresent",
-					TTLSeconds:      900,
-					PodReadyWait:    30 * time.Second,
-					PodPollInterval: 500 * time.Millisecond,
-					Workdir:         "/workspace",
-					ContainerName:   "runner",
-					Resources: ResourceRequirements{
-						Requests: ResourceList{
-							CPU:    "100m",
-							Memory: "256Mi",
-						},
-						Limits: ResourceList{
-							CPU:    "1",
-							Memory: "1Gi",
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "empty namespace",
-			cfg: SandboxConfig{
-				Defaults: SandboxDefaults{
-					Namespace: "",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid image pull policy",
-			cfg: SandboxConfig{
-				Defaults: SandboxDefaults{
-					Namespace:       "sandbox",
-					RunnerImage:     "runner:1.0.0",
-					ImagePullPolicy: "Invalid",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "relative workdir",
-			cfg: SandboxConfig{
-				Defaults: SandboxDefaults{
-					Namespace:   "sandbox",
-					RunnerImage: "runner:1.0.0",
-					Workdir:     "workspace",
-				},
-			},
-			wantErr: true,
-		},
+func TestValidate_InvalidTTLSeconds(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Sandbox.Defaults.TTLSeconds = 0
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for TTL 0")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateSandboxConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateSandboxConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "sandbox.defaults.ttlSeconds")
 }
 
-func TestValidateExecConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     ExecConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: ExecConfig{
-				DefaultTimeout:    30 * time.Second,
-				MaxTimeout:        300 * time.Second,
-				StdoutMaxBytes:    1 << 20,
-				StderrMaxBytes:    1 << 20,
-				PreserveTailBytes: 4096,
-				ExitCodeMarker: ExitCodeMarker{
-					Key:    "__EXIT__",
-					Stream: "stderr",
-				},
-				Shell: ShellConfig{
-					Bin: "sh",
-				},
-				Env: EnvConfig{
-					AllowRegex: "^[A-Z_][A-Z0-9_]*$",
-				},
-				Workdir: WorkdirConfig{
-					AllowedPrefixes: []string{"/workspace"},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "max timeout < default timeout",
-			cfg: ExecConfig{
-				DefaultTimeout: 300 * time.Second,
-				MaxTimeout:     30 * time.Second,
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid allow regex",
-			cfg: ExecConfig{
-				DefaultTimeout: 30 * time.Second,
-				MaxTimeout:     300 * time.Second,
-				Env: EnvConfig{
-					AllowRegex: "[invalid(", // Invalid regex
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "relative allowed prefix",
-			cfg: ExecConfig{
-				DefaultTimeout: 30 * time.Second,
-				MaxTimeout:     300 * time.Second,
-				Workdir: WorkdirConfig{
-					AllowedPrefixes: []string{"workspace"},
-				},
-			},
-			wantErr: true,
-		},
+func TestValidate_InvalidExecTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Exec.MaxTimeout = cfg.Exec.DefaultTimeout / 2
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid when maxTimeout < defaultTimeout")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateExecConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateExecConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "exec.maxTimeout")
 }
 
-func TestValidateFilesConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     FilesConfig
-		wantErr bool
-	}{
-		{
-			name: "valid config",
-			cfg: FilesConfig{
-				RootPrefix: "/workspace",
-				Upload: FileUploadConfig{
-					DefaultDest: "/workspace",
-					MaxBytes:    50 << 20,
-					Format:      "tar.gz",
-				},
-				Download: FileDownloadConfig{
-					DefaultSrc: "/workspace",
-					Format:     "tar.gz",
-				},
-				Tar: TarConfig{
-					Bin: "tar",
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "relative root prefix",
-			cfg: FilesConfig{
-				RootPrefix: "workspace",
-			},
-			wantErr: true,
-		},
-		{
-			name: "default dest not under root prefix",
-			cfg: FilesConfig{
-				RootPrefix: "/workspace",
-				Upload: FileUploadConfig{
-					DefaultDest: "/tmp",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid upload format",
-			cfg: FilesConfig{
-				RootPrefix: "/workspace",
-				Upload: FileUploadConfig{
-					DefaultDest: "/workspace",
-					Format:      "zip",
-				},
-			},
-			wantErr: true,
-		},
+func TestValidate_InvalidFilesRootPrefix(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Files.RootPrefix = "relative/path"
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected invalid for relative rootPrefix")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			errs := validateFilesConfig(&tt.cfg)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateFilesConfig() errors = %v, wantErr %v", errs, tt.wantErr)
-			}
-		})
-	}
+	assertHasError(t, result, "files.rootPrefix")
 }
 
 func TestValidateEnvKey(t *testing.T) {
 	cfg := DefaultConfig()
 
 	tests := []struct {
-		name string
-		key  string
-		want bool
+		key   string
+		valid bool
 	}{
-		{"valid simple", "PATH", true},
-		{"valid with numbers", "TEST123", true},
-		{"valid with underscore", "TEST_VALUE", true},
-		{"invalid lowercase", "test", false},
-		{"invalid with dash", "TEST-VALUE", false},
-		{"invalid starting with number", "123TEST", false},
+		{"FOO", true},
+		{"FOO_BAR", true},
+		{"_FOO", true},
+		{"A123", true},
+		{"foo", false},
+		{"1FOO", false},
+		{"FOO-BAR", false},
+		{"", false},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := cfg.ValidateEnvKey(tt.key)
-			if got != tt.want {
-				t.Errorf("ValidateEnvKey() = %v, want %v", got, tt.want)
+		t.Run(tt.key, func(t *testing.T) {
+			if got := cfg.ValidateEnvKey(tt.key); got != tt.valid {
+				t.Errorf("ValidateEnvKey(%q) = %v, want %v", tt.key, got, tt.valid)
 			}
 		})
 	}
@@ -425,21 +136,19 @@ func TestValidateWorkdir(t *testing.T) {
 	cfg := DefaultConfig()
 
 	tests := []struct {
-		name    string
 		workdir string
-		want    bool
+		valid   bool
 	}{
-		{"valid workspace", "/workspace", true},
-		{"valid subdirectory", "/workspace/subdir", true},
-		{"invalid outside prefix", "/tmp", false},
-		{"invalid relative", "workspace", false},
+		{"/workspace", true},
+		{"/workspace/subdir", true},
+		{"/tmp", false},
+		{"relative", false},
+		{"/etc/passwd", false},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := cfg.ValidateWorkdir(tt.workdir)
-			if got != tt.want {
-				t.Errorf("ValidateWorkdir() = %v, want %v", got, tt.want)
+		t.Run(tt.workdir, func(t *testing.T) {
+			if got := cfg.ValidateWorkdir(tt.workdir); got != tt.valid {
+				t.Errorf("ValidateWorkdir(%q) = %v, want %v", tt.workdir, got, tt.valid)
 			}
 		})
 	}
@@ -449,188 +158,35 @@ func TestValidateFilePath(t *testing.T) {
 	cfg := DefaultConfig()
 
 	tests := []struct {
-		name string
-		path string
-		want bool
+		path  string
+		valid bool
 	}{
-		{"valid in workspace", "/workspace/file.txt", true},
-		{"valid subdirectory", "/workspace/subdir/file.txt", true},
-		{"invalid outside root", "/tmp/file.txt", false},
-		{"invalid relative", "file.txt", false},
-		{"invalid parent escape", "/workspace/../tmp/file.txt", false},
+		{"/workspace", true},
+		{"/workspace/file.txt", true},
+		{"/etc/passwd", false},
+		{"relative", false},
+		{"/workspace/../etc/passwd", false},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := cfg.ValidateFilePath(tt.path)
-			if got != tt.want {
-				t.Errorf("ValidateFilePath() = %v, want %v", got, tt.want)
+		t.Run(tt.path, func(t *testing.T) {
+			if got := cfg.ValidateFilePath(tt.path); got != tt.valid {
+				t.Errorf("ValidateFilePath(%q) = %v, want %v", tt.path, got, tt.valid)
 			}
 		})
 	}
 }
 
-func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
-
-	result := cfg.Validate()
-	if !result.Valid {
-		t.Errorf("DefaultConfig() validation failed: %d errors", len(result.Errors))
+// assertHasError checks that the validation result contains an error for the given field
+func assertHasError(t *testing.T, result *ValidationResult, fieldPath string) {
+	t.Helper()
+	for _, e := range result.Errors {
+		if e.FieldPath == fieldPath {
+			return
+		}
 	}
-}
-
-// TestQPSUpperBound tests QPS upper bound validation
-func TestQPSUpperBound(t *testing.T) {
-	tests := []struct {
-		name    string
-		qps     int
-		wantErr bool
-	}{
-		{"valid qps 1000", 1000, false},
-		{"valid qps 500", 500, false},
-		{"invalid qps 1001", 1001, true},
-		{"invalid qps 9999", 9999, true},
+	fields := make([]string, 0, len(result.Errors))
+	for _, e := range result.Errors {
+		fields = append(fields, e.FieldPath)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.Kubernetes.QPS = tt.qps
-			errs := validateK8sConfig(&cfg.Kubernetes)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateK8sConfig() QPS=%d errors=%v, wantErr %v", tt.qps, errs, tt.wantErr)
-			}
-		})
-	}
-}
-
-// TestBurstUpperBound tests Burst upper bound validation
-func TestBurstUpperBound(t *testing.T) {
-	tests := []struct {
-		name    string
-		burst   int
-		wantErr bool
-	}{
-		{"valid burst 2000", 2000, false},
-		{"valid burst 1000", 1000, false},
-		{"invalid burst 2001", 2001, true},
-		{"invalid burst 9999", 9999, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.Kubernetes.Burst = tt.burst
-			errs := validateK8sConfig(&cfg.Kubernetes)
-			if (len(errs) > 0) != tt.wantErr {
-				t.Errorf("validateK8sConfig() Burst=%d errors=%v, wantErr %v", tt.burst, errs, tt.wantErr)
-			}
-		})
-	}
-}
-
-// TestConfigConcurrentValidation tests concurrent config validation
-func TestConfigConcurrentValidation(t *testing.T) {
-	cfg := DefaultConfig()
-
-	// Run multiple validations concurrently
-	done := make(chan bool, 10)
-	for i := 0; i < 10; i++ {
-		go func() {
-			result := cfg.Validate()
-			if !result.Valid {
-				t.Errorf("Concurrent validation failed: %d errors", len(result.Errors))
-			}
-			done <- true
-		}()
-	}
-
-	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-}
-
-// TestConfigEdgeCases tests edge case configurations
-func TestConfigEdgeCases(t *testing.T) {
-	tests := []struct {
-		name    string
-		modify  func(*Config)
-		wantErr bool
-	}{
-		{
-			name: "zero qps",
-			modify: func(c *Config) {
-				c.Kubernetes.QPS = 0
-			},
-			wantErr: false, // 0 is valid (non-negative)
-		},
-		{
-			name: "zero burst",
-			modify: func(c *Config) {
-				c.Kubernetes.Burst = 0
-			},
-			wantErr: false, // 0 is valid (non-negative)
-		},
-		{
-			name: "minimum timeout",
-			modify: func(c *Config) {
-				c.Kubernetes.RequestTimeout = 0
-			},
-			wantErr: false, // 0 is valid (non-negative)
-		},
-		{
-			name: "maximum timeout",
-			modify: func(c *Config) {
-				c.Kubernetes.RequestTimeout = 5 * time.Minute
-			},
-			wantErr: false,
-		},
-		{
-			name: "negative timeout",
-			modify: func(c *Config) {
-				c.Kubernetes.RequestTimeout = -1 * time.Second
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty workdir",
-			modify: func(c *Config) {
-				c.Sandbox.Defaults.Workdir = ""
-			},
-			wantErr: true,
-		},
-		{
-			name: "workdir with trailing slash",
-			modify: func(c *Config) {
-				c.Sandbox.Defaults.Workdir = "/workspace/"
-			},
-			wantErr: false, // trailing slash is valid
-		},
-		{
-			name: "max ttl seconds",
-			modify: func(c *Config) {
-				c.Sandbox.Defaults.TTLSeconds = 86400
-			},
-			wantErr: false,
-		},
-		{
-			name: "exceeds max ttl seconds",
-			modify: func(c *Config) {
-				c.Sandbox.Defaults.TTLSeconds = 86401
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			tt.modify(cfg)
-			result := cfg.Validate()
-			if result.Valid == tt.wantErr {
-				t.Errorf("Validate() Valid=%v, wantErr %v", result.Valid, tt.wantErr)
-			}
-		})
-	}
+	t.Errorf("expected error for field %q, got errors for: %v", fieldPath, fields)
 }

@@ -8,19 +8,23 @@ set -e
 source "$(dirname "$0")/../lib/scenarios.sh"
 source "$(dirname "$0")/../lib/assertions.sh"
 
-# Read SANDBOX_ID from previous test
+# Read SANDBOX_ID and pod name from previous test
 if [ -f /tmp/smoke-test-sandbox-id.txt ]; then
     SANDBOX_ID=$(cat /tmp/smoke-test-sandbox-id.txt)
 else
     echo -e "${COLOR_YELLOW}⊘ SKIPPED: No sandbox ID found, run create-sandbox first${COLOR_NC}"
     exit 0
 fi
+if [ -f /tmp/smoke-test-pod-name.txt ]; then
+    SANDBOX_POD_NAME=$(cat /tmp/smoke-test-pod-name.txt)
+    export SANDBOX_POD_NAME
+fi
+pod_name="${SANDBOX_POD_NAME:-sandbox-${SANDBOX_ID}}"
 
-echo "Testing snapshot & restore for sandbox ${SANDBOX_ID}..."
+echo "Testing snapshot & restore for sandbox ${SANDBOX_ID} (pod: ${pod_name})..."
 
 # 1. Create a file in the sandbox
 echo "  Creating test file in sandbox..."
-pod_name="sandbox-${SANDBOX_ID}"
 
 kubectl exec "${pod_name}" -n "${SANDBOX_NAMESPACE}" -- \
     sh -c "echo 'smoke test' > /workspace/smoke-test.txt" &> /dev/null
@@ -42,8 +46,10 @@ echo -e "  ${COLOR_GREEN}Pod deleted${COLOR_NC}"
 
 # 3. Recreate the sandbox (will restore from snapshot)
 echo "  Recreating sandbox (should restore from snapshot)..."
-response=$(create_sandbox "${MANAGER_URL}" "${SERVICE_KEY}" "${SANDBOX_ID}")
+set +e
+response=$(create_sandbox "${MANAGER_URL}" "${SANDBOX_ID}")
 create_status=$?
+set -e
 
 if [ ${create_status} -ne 0 ]; then
     echo -e "${COLOR_RED}✗ Failed to recreate sandbox${COLOR_NC}"

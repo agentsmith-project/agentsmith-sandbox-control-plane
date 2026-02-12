@@ -2,7 +2,7 @@ version: 1
 
 server:
   httpPort: 8080
-  requestIdHeader: X-Request-Id
+  requestIdHeader: "X-Request-Id"
   timeouts:
     readHeader: 5s
     read: 30s
@@ -12,17 +12,9 @@ server:
   metrics:
     enabled: true
     path: /metrics
-    requireServiceKey: false
   debug:
     configPath: /debug/config
     enablePprof: false
-
-auth:
-  enabled: true
-  headerName: X-Service-Key
-  acceptAuthorization: true
-  authorizationScheme: ServiceKey
-  failStatusCode: 401
 
 kubernetes:
   qps: 50
@@ -37,13 +29,12 @@ kubernetes:
 sandbox:
   defaults:
     namespace: sandbox
-    runnerImage: sandbox-runner:1.0.0
+    runnerImage: "sandbox-runner:1.0.0"
     imagePullPolicy: IfNotPresent
     ttlSeconds: 900
-    podReadyWait: 30s
+    podReadyWait: 5m
     podPollInterval: 500ms
     terminationGraceSeconds: 1
-    activeDeadlineSeconds: 0
     containerName: runner
     workdir: /workspace
     volumes:
@@ -65,7 +56,6 @@ sandbox:
         ephemeralStorage: 2Gi
     labels:
       app: llm-sandbox
-    annotations: {}
 
 exec:
   defaultTimeout: 30s
@@ -75,14 +65,15 @@ exec:
   preserveTailBytes: 4096
   exitCodeMarker:
     key: "__SBX_EXIT_CODE__"
-    stream: "stderr"
+    stream: stderr
   shell:
     bin: sh
     args: ["-lc"]
   env:
     allowRegex: "^[A-Z_][A-Z0-9_]*$"
   workdir:
-    allowedPrefixes: ["/workspace"]
+    allowedPrefixes:
+      - /workspace
 
 files:
   rootPrefix: /workspace
@@ -98,11 +89,8 @@ files:
     rejectSymlinks: true
 
 storage:
-  endpoint: s3.amazonaws.com
-  accessKey: ""
-  secretKey: ""
-  bucket: sandbox-storage
-  useSSL: true
-
-buffer:
-  capacity: 10000
+  endpoint: "localhost:9000"
+  accessKey: minioadmin
+  secretKey: minioadmin
+  bucket: sandboxes
+  useSSL: false

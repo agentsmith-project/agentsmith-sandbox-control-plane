@@ -158,21 +158,26 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 }
 
 // ExecWithExitCode executes a command and tries to extract the exit code
-// from a marker in stderr (if configured)
+// from a marker in stderr (if configured).
+//
+// The marker is always attempted even when Exec returns an error, because
+// the SPDY protocol returns an error for non-zero exit codes but the marker
+// may still have been written to stderr before the stream closed.
 func (e *Executor) ExecWithExitCode(ctx context.Context, podName string, opts *ExecOptions, markerKey string) (*ExecResult, error) {
-	result, err := e.Exec(ctx, podName, opts)
-	if err != nil {
-		return result, err
-	}
+	result, execErr := e.Exec(ctx, podName, opts)
 
-	// Try to extract exit code from marker
-	if markerKey != "" {
-		result.ExitCode = ExtractExitCodeMarker(result.Stderr, markerKey)
+	// Try to extract exit code from marker even on exec error.
+	// The marker may have been written before the SPDY stream reported failure.
+	if markerKey != "" && result != nil && result.Stderr != "" {
+		markerCode := ExtractExitCodeMarker(result.Stderr, markerKey)
+		if markerCode >= 0 {
+			result.ExitCode = markerCode
+		}
 		// Remove the marker from stderr
 		result.Stderr = RemoveExitCodeMarker(result.Stderr, markerKey)
 	}
 
-	return result, nil
+	return result, execErr
 }
 
 // buildExecURL builds the exec URL for a pod

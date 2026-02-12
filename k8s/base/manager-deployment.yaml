@@ -30,12 +30,6 @@ spec:
         - name: http
           containerPort: 8080
         env:
-        # Service keys from Secret (for authentication)
-        - name: SERVICE_KEYS
-          valueFrom:
-            secretKeyRef:
-              name: sandbox-manager-keys
-              key: SERVICE_KEYS
         # Boot configuration (not hot-reloadable)
         - name: CONFIG_PATH
           value: "/etc/sandbox-manager/manager-config.yaml"
@@ -59,8 +53,9 @@ spec:
         - name: STORAGE_CREDENTIALS_PATH
           value: "/etc/secrets/minio"
         # Option 2: Use environment variables (fallback for local development)
+        # STORAGE_ENDPOINT: overridden per overlay (dev, staging, production)
         - name: STORAGE_ENDPOINT
-          value: "192.168.80.1:9000"
+          value: "minio.sandbox-system.svc.cluster.local:9000"
         - name: STORAGE_BUCKET
           value: "sandboxes"
         - name: STORAGE_USE_SSL

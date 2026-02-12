@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,87 +75,54 @@ func TestNewClientWithCreds_WithSSL_ReturnsClient(t *testing.T) {
 	assert.True(t, creds.UseSSL)
 }
 
-// TestGenerateSnapshotKey_MixedPrefixes tests GenerateSnapshotKey with mixed prefixes
-func TestGenerateSnapshotKey_MixedPrefixes(t *testing.T) {
+// TestGenerateSnapshotKey_Format tests the key format: snapshots/{sandboxID}/{timestamp}.tar.gz
+func TestGenerateSnapshotKey_Format(t *testing.T) {
 	c := &Client{}
 
 	tests := []struct {
-		name          string
-		workspaceID   string
-		projectID     string
-		agentThreadID string
-		expected      string
+		name      string
+		sandboxID string
+		prefix    string
 	}{
 		{
-			name:          "all with prefixes",
-			workspaceID:   "ws_default",
-			projectID:     "proj_default",
-			agentThreadID: "at_12345",
-			expected:      "snapshots/default/default/12345/workspace.tar.gz",
+			name:      "simple ID",
+			sandboxID: "abc123",
+			prefix:    "snapshots/abc123/",
 		},
 		{
-			name:          "all without prefixes",
-			workspaceID:   "custom",
-			projectID:     "project",
-			agentThreadID: "thread",
-			expected:      "snapshots/custom/project/thread/workspace.tar.gz",
+			name:      "UUID-like ID",
+			sandboxID: "550e8400-e29b-41d4-a716-446655440000",
+			prefix:    "snapshots/550e8400-e29b-41d4-a716-446655440000/",
 		},
 		{
-			name:          "mixed prefixes - workspace with prefix",
-			workspaceID:   "ws_abc",
-			projectID:     "xyz",
-			agentThreadID: "at_123",
-			expected:      "snapshots/abc/xyz/123/workspace.tar.gz",
-		},
-		{
-			name:          "mixed prefixes - only project with prefix",
-			workspaceID:   "myworkspace",
-			projectID:     "proj_myproject",
-			agentThreadID: "thread1",
-			expected:      "snapshots/myworkspace/myproject/thread1/workspace.tar.gz",
-		},
-		{
-			name:          "empty IDs",
-			workspaceID:   "",
-			projectID:     "",
-			agentThreadID: "",
-			expected:      "snapshots////workspace.tar.gz",
-		},
-		{
-			name:          "special characters in IDs",
-			workspaceID:   "ws_test-workspace",
-			projectID:     "proj_test-project",
-			agentThreadID: "at_test-thread",
-			expected:      "snapshots/test-workspace/test-project/test-thread/workspace.tar.gz",
-		},
-		{
-			name:          "numeric IDs",
-			workspaceID:   "ws_123",
-			projectID:     "proj_456",
-			agentThreadID: "at_789",
-			expected:      "snapshots/123/456/789/workspace.tar.gz",
+			name:      "hyphenated ID",
+			sandboxID: "my-sandbox-session",
+			prefix:    "snapshots/my-sandbox-session/",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := c.GenerateSnapshotKey(tt.workspaceID, tt.projectID, tt.agentThreadID)
-			assert.Equal(t, tt.expected, result)
+			result, err := c.GenerateSnapshotKey(tt.sandboxID)
+			assert.NoError(t, err)
+			assert.True(t, strings.HasPrefix(result, tt.prefix),
+				"key should start with %q, got: %s", tt.prefix, result)
+			assert.True(t, strings.HasSuffix(result, ".tar.gz"),
+				"key should end with .tar.gz, got: %s", result)
 		})
 	}
 }
 
-// TestGenerateSnapshotKey_NilClient_DoesNotPanic tests GenerateSnapshotKey with nil client
-func TestGenerateSnapshotKey_NilClient_DoesNotPanic(t *testing.T) {
+// TestGenerateSnapshotKey_DoesNotPanic tests GenerateSnapshotKey with edge cases
+func TestGenerateSnapshotKey_DoesNotPanic(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.Errorf("GenerateSnapshotKey panicked with: %v", r)
 		}
 	}()
 
-	var c *Client = nil
-	// This should not panic, just return empty string or panic depending on implementation
-	// The function uses a method receiver, so we need a valid instance
-	c = &Client{}
-	_ = c.GenerateSnapshotKey("ws_test", "proj_test", "at_test")
+	c := &Client{}
+	_, _ = c.GenerateSnapshotKey("test-sandbox")
+	_, err := c.GenerateSnapshotKey("")
+	assert.Error(t, err, "empty sandboxID should return error")
 }

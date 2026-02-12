@@ -4,4 +4,4 @@ metadata:
   name: sandbox-config
   namespace: sandbox-system
 data:
-  runner-image-default: harbor.pullot.com:28443/agentsmith/sandbox-runner:1.0.0
+  runner-image-default: localhost:5001/sandbox-runner:1.0.0

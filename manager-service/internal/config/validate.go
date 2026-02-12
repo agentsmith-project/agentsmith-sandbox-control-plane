@@ -32,11 +32,6 @@ func (c *Config) Validate() *ValidationResult {
 		errors = append(errors, errs...)
 	}
 
-	// Validate auth config
-	if errs := validateAuthConfig(&c.Auth); len(errs) > 0 {
-		errors = append(errors, errs...)
-	}
-
 	// Validate kubernetes config
 	if errs := validateK8sConfig(&c.Kubernetes); len(errs) > 0 {
 		errors = append(errors, errs...)
@@ -180,47 +175,6 @@ func validateServerConfig(cfg *ServerConfig) []*ConfigError {
 			RuleID:    "FORMAT",
 			Rule:      "debug.configPath must start with /",
 			Message:   fmt.Sprintf("Invalid debug.configPath: %s", cfg.Debug.ConfigPath),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-
-	return errors
-}
-
-func validateAuthConfig(cfg *AuthConfig) []*ConfigError {
-	errors := []*ConfigError{}
-
-	if cfg.HeaderName == "" {
-		errors = append(errors, &ConfigError{
-			Code:      "CONFIG_VALIDATION_FAILED",
-			FieldPath: "auth.headerName",
-			RuleID:    "REQUIRED",
-			Rule:      "headerName is required",
-			Message:   "headerName cannot be empty",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-
-	if cfg.AuthorizationScheme == "" {
-		errors = append(errors, &ConfigError{
-			Code:      "CONFIG_VALIDATION_FAILED",
-			FieldPath: "auth.authorizationScheme",
-			RuleID:    "REQUIRED",
-			Rule:      "authorizationScheme is required",
-			Message:   "authorizationScheme cannot be empty",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-
-	// Validate failStatusCode
-	validStatusCodes := map[int]bool{400: true, 401: true, 403: true}
-	if !validStatusCodes[cfg.FailStatusCode] {
-		errors = append(errors, &ConfigError{
-			Code:      "CONFIG_VALIDATION_FAILED",
-			FieldPath: "auth.failStatusCode",
-			RuleID:    "ENUM",
-			Rule:      "failStatusCode must be 400, 401, or 403",
-			Message:   fmt.Sprintf("Invalid failStatusCode: %d", cfg.FailStatusCode),
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 	}

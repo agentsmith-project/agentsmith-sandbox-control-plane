@@ -8,7 +8,7 @@ import (
 )
 
 // SnapshotWorkspace creates a tar.gz of /workspace
-// Uses kubectl exec for streaming (shell-bridge doesn't support stdout streaming yet)
+// Uses kubectl exec for streaming
 func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName string) (io.ReadCloser, error) {
 	reader, writer := io.Pipe()
 
@@ -43,7 +43,7 @@ func (c *Client) SnapshotWorkspace(ctx context.Context, namespace, podName strin
 }
 
 // RestoreWorkspace extracts tar.gz to /workspace
-// Uses kubectl exec for streaming (shell-bridge doesn't support stdin streaming yet)
+// Uses kubectl exec for streaming
 func (c *Client) RestoreWorkspace(ctx context.Context, namespace, podName string, tarData io.Reader) error {
 	return c.Exec(ctx, namespace, podName, c.defaultContainer, []string{
 		"tar", "xzf", "-", "-C", "/workspace",

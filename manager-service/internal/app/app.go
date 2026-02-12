@@ -8,48 +8,34 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/sandbox/manager/internal/auth"
-	"github.com/sandbox/manager/internal/buffer"
 	"github.com/sandbox/manager/internal/config"
-	"github.com/sandbox/manager/internal/connection"
 	"github.com/sandbox/manager/internal/finalizer"
 	"github.com/sandbox/manager/internal/httpapi"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
-	"github.com/sandbox/manager/internal/ratelimit"
-	"github.com/sandbox/manager/internal/sandbox"
 	"github.com/sandbox/manager/internal/storage"
-	"github.com/sandbox/manager/internal/websocket"
 )
 
 var version = "dev"
 
 // Manager is the main service manager.
 type Manager struct {
-	cfg           *config.Config
-	cfgMeta       *config.ConfigMeta
-	cfgWatcher    *config.Watcher
-	k8sClient     *k8s.Client
-	k8sExecutor   *k8s.Executor // Executor for running commands in pods
-	authValidator *auth.ServiceKeyValidator
-	healthChecker *observability.HealthChecker
-	metrics       *observability.MetricsRegistry
-	httpServer    *http.Server
-	ctx           context.Context
-	cancel        context.CancelFunc
-
-	// New components
-	sandboxManager     *sandbox.Manager
-	bufferManager      *buffer.Manager
-	storageClient      *storage.Client
-	connectionManager  *connection.Manager
-	wsHandler          *websocket.Handler
-	finalizerHandler   *finalizer.Handler
-	rateLimiter        *ratelimit.Limiter
+	cfg            *config.Config
+	cfgMeta        *config.ConfigMeta
+	cfgWatcher     *config.Watcher
+	k8sClient      *k8s.Client
+	k8sExecutor    *k8s.Executor
+	healthChecker  *observability.HealthChecker
+	metrics        *observability.MetricsRegistry
+	storageClient  *storage.Client
+	finalizerHandler *finalizer.Handler
+	httpServer     *http.Server
+	httpErrCh      chan error // receives fatal HTTP server errors
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 // Main is the entry point for the sandbox manager.
@@ -106,13 +92,6 @@ func mainImpl() {
 
 	k8sExecutor := k8s.NewExecutor(k8sClient)
 
-	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
-	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
-	if err != nil {
-		log.Fatalf("Failed to initialize service key validator: %v", err)
-	}
-	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
-
 	cfgWatcher := config.NewWatcher(
 		bootCfg.ConfigPath,
 		cfg,
@@ -125,23 +104,10 @@ func mainImpl() {
 		},
 	)
 
-	// Initialize new components
-	log.Printf("Initializing sandbox manager...")
-	sandboxManager := sandbox.NewManager()
-
-	log.Printf("Initializing buffer manager...")
-	bufferManager := buffer.NewManager()
-
-	// Initialize connection manager
-	log.Printf("Initializing connection manager...")
-	connectionManager := connection.NewManager(sandboxManager)
-
 	// Initialize storage client
-	// Try loading from credentials file first, fall back to environment variables
 	storageCreds, err := storage.LoadCredentials()
 	if err != nil {
 		log.Printf("Failed to load storage credentials, using defaults: %v", err)
-		// Use defaults for local development
 		storageCreds = &storage.Credentials{
 			Endpoint:  getEnvOrDefault("STORAGE_ENDPOINT", "localhost:9000"),
 			AccessKey: getEnvOrDefault("STORAGE_ACCESS_KEY", "minioadmin"),
@@ -158,32 +124,6 @@ func mainImpl() {
 		log.Fatalf("Failed to create storage client: %v", err)
 	}
 	log.Printf("Storage client initialized successfully")
-
-	// Initialize WebSocket handler with all dependencies
-	log.Printf("Initializing WebSocket handler...")
-	wsHandler := websocket.NewHandler(
-		sandboxManager,
-		bufferManager,
-		k8sClient,
-		storageClient,
-		connectionManager,
-		cfg.Sandbox.Defaults.Namespace,
-		cfg,
-	)
-
-	// Initialize rate limiter
-	log.Printf("Initializing rate limiter...")
-	rateLimiterConfig := &ratelimit.Config{
-		GlobalRPS:       100,
-		GlobalBurst:     200,
-		PerIPRPS:        10,
-		PerIPBurst:      20,
-		PerSessionRPS:   5,
-		PerSessionBurst: 10,
-		CleanupInterval: 5 * time.Minute,
-	}
-	rateLimiter := ratelimit.NewLimiter(rateLimiterConfig)
-	log.Printf("Rate limiter initialized")
 
 	// Initialize finalizer handler
 	log.Printf("Initializing finalizer handler...")
@@ -206,16 +146,10 @@ func mainImpl() {
 		cfgWatcher:       cfgWatcher,
 		k8sClient:        k8sClient,
 		k8sExecutor:      k8sExecutor,
-		authValidator:    authValidator,
 		healthChecker:    observability.NewHealthChecker(),
 		metrics:          observability.GetMetrics(),
-		sandboxManager:   sandboxManager,
-		bufferManager:    bufferManager,
 		storageClient:    storageClient,
-		connectionManager: connectionManager,
-		wsHandler:        wsHandler,
 		finalizerHandler: finalizerHandler,
-		rateLimiter:      rateLimiter,
 		ctx:              mgrCtx,
 		cancel:           mgrCancel,
 	}
@@ -223,13 +157,9 @@ func mainImpl() {
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
 
-	// Start finalizer handler in background goroutine with manager lifecycle context
-	go mgr.finalizerHandler.Start(mgr.ctx)
+	// Start finalizer handler (launches its own background goroutine)
+	mgr.finalizerHandler.Start(mgr.ctx)
 	log.Printf("Finalizer handler started")
-
-	// Start sandbox cleanup goroutine with manager lifecycle context
-	go mgr.sandboxManager.StartCleanup(mgr.ctx, 5*time.Minute)
-	log.Printf("Sandbox cleanup started (interval=5m)")
 
 	if err := cfgWatcher.Start(context.Background()); err != nil {
 		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
@@ -241,8 +171,7 @@ func mainImpl() {
 	log.Printf("  Health check: http://localhost:%d/healthz", cfg.Server.HTTPPort)
 	log.Printf("  Readiness:    http://localhost:%d/readyz", cfg.Server.HTTPPort)
 	log.Printf("  Metrics:      http://localhost:%d%s", cfg.Server.HTTPPort, cfg.Server.Metrics.Path)
-	log.Printf("  WebSocket:    ws://localhost:%d/ws", cfg.Server.HTTPPort)
-	log.Printf("  Debug config: http://localhost:%d%s", cfg.Server.HTTPPort, cfg.Server.Debug.ConfigPath)
+	log.Printf("  API:          http://localhost:%d/v1/sandboxes/", cfg.Server.HTTPPort)
 
 	mgr.waitForShutdown()
 
@@ -291,117 +220,60 @@ func (m *Manager) setupReadinessChecks() {
 func (m *Manager) setupHTTPServer() {
 	mux := http.NewServeMux()
 
+	// Health and readiness endpoints (no auth)
 	mux.HandleFunc("/healthz", m.healthChecker.HandleHealthz)
 	mux.HandleFunc("/readyz", m.healthChecker.HandleReadyz)
 
+	// Metrics endpoint
 	if m.cfg.Server.Metrics.Enabled {
 		metricsHandler := m.metrics.Handler()
-		if m.cfg.Server.Metrics.RequireServiceKey {
-			authMiddleware := auth.ServiceKeyMiddleware(
-				m.authValidator,
-				m.cfg.Auth.HeaderName,
-				m.cfg.Auth.AcceptAuthorization,
-				m.cfg.Auth.AuthorizationScheme,
-				m.cfg.Auth.FailStatusCode,
-				m.cfg.Auth.AllowUnauthenticated,
-			)
-			mux.Handle(m.cfg.Server.Metrics.Path, authMiddleware(http.HandlerFunc(metricsHandler)))
-		} else {
-			mux.HandleFunc(m.cfg.Server.Metrics.Path, metricsHandler)
-		}
+		mux.HandleFunc(m.cfg.Server.Metrics.Path, metricsHandler)
 	}
 
-	// Debug config endpoint with optional authentication
-	if m.cfg.Server.Metrics.RequireServiceKey {
-		authMiddleware := auth.ServiceKeyMiddleware(
-			m.authValidator,
-			m.cfg.Auth.HeaderName,
-			m.cfg.Auth.AcceptAuthorization,
-			m.cfg.Auth.AuthorizationScheme,
-			m.cfg.Auth.FailStatusCode,
-			m.cfg.Auth.AllowUnauthenticated,
-		)
-		mux.Handle(m.cfg.Server.Debug.ConfigPath, authMiddleware(http.HandlerFunc(m.handleDebugConfig)))
-	} else {
-		mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
-	}
+	// Debug config endpoint
+	mux.HandleFunc(m.cfg.Server.Debug.ConfigPath, m.handleDebugConfig)
 
-	// Add WebSocket route with service key authentication via X-Service-Key header
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// Fail-closed: If no keys are configured, check allowUnauthenticated flag
-		if !m.authValidator.HasKeys() {
-			if !m.cfg.Auth.AllowUnauthenticated {
-				// Not configured and dev mode is OFF - return 500
-				// Extract request ID from common headers
-				requestID := r.Header.Get("X-Request-Id")
-				if requestID == "" {
-					requestID = r.Header.Get("X-Request-ID")
-				}
-				if requestID == "" {
-					requestID = r.Header.Get("Request-Id")
-				}
-				log.Printf("Auth: service not configured (requestId: %s, path: %s)", requestID, r.URL.Path)
-				http.Error(w, "Service not configured: no service keys configured", http.StatusInternalServerError)
-				return
-			}
-			// Dev mode is ON - log and allow request
-			log.Printf("Auth: dev mode enabled - allowing unauthenticated WebSocket request (path: %s)", r.URL.Path)
-			m.wsHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// Get service key from X-Service-Key header (moved from query parameter)
-		serviceKey := r.Header.Get("X-Service-Key")
-
-		// Validate service key using constant-time comparison to prevent timing attacks
-		// Note: authValidator.Validate() already uses crypto/subtle.ConstantTimeCompare internally
-		if !m.authValidator.Validate(serviceKey) {
-			http.Error(w, "Unauthorized: invalid or missing service key", http.StatusUnauthorized)
-			return
-		}
-
-		// Authentication successful, forward to WebSocket handler
-		m.wsHandler.ServeHTTP(w, r)
-	})
-
+	// V1 API routes (no auth, no rate limiting)
 	v1Handler := m.buildV1Handler()
-	if m.cfg.Auth.Enabled {
-		authMiddleware := auth.ServiceKeyMiddleware(
-			m.authValidator,
-			m.cfg.Auth.HeaderName,
-			m.cfg.Auth.AcceptAuthorization,
-			m.cfg.Auth.AuthorizationScheme,
-			m.cfg.Auth.FailStatusCode,
-			m.cfg.Auth.AllowUnauthenticated,
-		)
-		v1Handler = authMiddleware(v1Handler)
-	}
-
 	reqIDMiddleware := observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)
 	v1Handler = reqIDMiddleware(v1Handler)
 	v1Handler = m.observabilityMiddleware(v1Handler)
-	v1Handler = m.rateLimiter.Middleware(v1Handler)
-
 	mux.Handle("/v1/", v1Handler)
 
+	// WriteTimeout is intentionally set to 0 (disabled) because SSE exec
+	// streaming can last up to exec.maxTimeout (default 300s). Go's
+	// http.Server.WriteTimeout covers the entire response lifecycle and
+	// would kill long-running SSE streams prematurely. Per-request
+	// timeouts are enforced at the handler level (exec timeout, context
+	// cancellation) which is the correct place for SSE.
 	m.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", m.cfg.Server.HTTPPort),
 		Handler:           mux,
 		ReadTimeout:       m.cfg.Server.Timeouts.Read,
-		WriteTimeout:      m.cfg.Server.Timeouts.Write,
+		WriteTimeout:      0,
 		IdleTimeout:       m.cfg.Server.Timeouts.Idle,
 		ReadHeaderTimeout: m.cfg.Server.Timeouts.ReadHeader,
 		MaxHeaderBytes:    m.cfg.Server.MaxHeaderBytes,
 	}
 
+	m.httpErrCh = make(chan error, 1)
 	go func() {
 		if err := m.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+			m.httpErrCh <- fmt.Errorf("HTTP server error: %w", err)
 		}
 	}()
 }
 
+// GetConfig returns the current (possibly hot-reloaded) configuration.
+// If the Watcher is running, this returns the latest validated config.
+// Otherwise it falls back to the initial config.
 func (m *Manager) GetConfig() *config.Config {
+	if m.cfgWatcher != nil {
+		cfg, _ := m.cfgWatcher.GetCurrent()
+		if cfg != nil {
+			return cfg
+		}
+	}
 	return m.cfg
 }
 
@@ -417,14 +289,6 @@ func (m *Manager) GetMetrics() *observability.MetricsRegistry {
 	return m.metrics
 }
 
-func (m *Manager) GetSessionManager() *sandbox.Manager {
-	return m.sandboxManager
-}
-
-func (m *Manager) GetBufferManager() *buffer.Manager {
-	return m.bufferManager
-}
-
 func (m *Manager) GetStorageClient() *storage.Client {
 	return m.storageClient
 }
@@ -433,12 +297,8 @@ func (m *Manager) buildV1Handler() http.Handler {
 	mux := http.NewServeMux()
 	handlers := httpapi.NewHandlers(m)
 
-	// Register explicit routes for /v1/sandboxes/{sessionId} endpoints
-	// Order matters: more specific routes must be registered first
 	mux.HandleFunc("/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-
-		// Parse the route to determine which handler to use
 		route, sessionId := parseSandboxRoute(path)
 		if sessionId == "" {
 			httpapi.WriteError(w, r, httpapi.ErrBadRequest, "sessionId required")
@@ -475,7 +335,6 @@ func (m *Manager) buildV1Handler() http.Handler {
 			handlers.HandleDownload(w, r)
 
 		case "sandbox":
-			// Direct /v1/sandboxes/{sessionId} endpoint
 			switch r.Method {
 			case http.MethodPut:
 				handlers.HandleCreateSandbox(w, r)
@@ -494,12 +353,8 @@ func (m *Manager) buildV1Handler() http.Handler {
 }
 
 // parseSandboxRoute parses the path and returns the route type and sessionId
-// Path format: /v1/sandboxes/{sessionId}[/{action}]
-// Returns route type and sessionId
 func parseSandboxRoute(path string) (route string, sessionId string) {
-	// Path format: /v1/sandboxes/{sessionId}/...
-	// Expected parts: ["", "v1", "sandboxes", "{sessionId}", "..."]
-	parts := strings.Split(path, "/")
+	parts := splitPath(path)
 	if len(parts) < 4 || parts[1] != "v1" || parts[2] != "sandboxes" {
 		return "", ""
 	}
@@ -509,12 +364,10 @@ func parseSandboxRoute(path string) (route string, sessionId string) {
 		return "", ""
 	}
 
-	// No additional parts - direct sandbox operation
 	if len(parts) == 4 {
 		return "sandbox", sessionId
 	}
 
-	// Check for action routes
 	if len(parts) >= 5 {
 		action := parts[4]
 		switch action {
@@ -541,6 +394,23 @@ func parseSandboxRoute(path string) (route string, sessionId string) {
 	return "", ""
 }
 
+func splitPath(path string) []string {
+	result := []string{}
+	current := ""
+	for _, c := range path {
+		if c == '/' {
+			result = append(result, current)
+			current = ""
+		} else {
+			current += string(c)
+		}
+	}
+	if current != "" {
+		result = append(result, current)
+	}
+	return result
+}
+
 func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -551,24 +421,24 @@ func (m *Manager) handleDebugConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg, meta := m.cfgWatcher.GetCurrent()
 
-	resp := httpapi.DebugConfigResponse{
-		Meta: httpapi.DebugConfigMeta{
-			SchemaVersion: meta.SchemaVersion,
-			SourcePath:    meta.SourcePath,
-			CurrentHash:   meta.CurrentHash,
-			LoadedAt:      meta.LoadedAt.Format(time.RFC3339),
-			ReloadCount:   meta.ReloadCount,
-			LastError:     convertConfigError(meta.LastError),
-		},
-		Config: sanitizeConfig(cfg),
-		Boot: httpapi.DebugConfigBoot{
-			ConfigPath:       os.Getenv("CONFIG_PATH"),
-			DebounceDuration: os.Getenv("CONFIG_RELOAD_DEBOUNCE"),
-			MinInterval:      os.Getenv("CONFIG_RELOAD_MIN_INTERVAL"),
-			MaxBackoff:       os.Getenv("CONFIG_RELOAD_BACKOFF_MAX"),
-			StrictMode:       os.Getenv("STRICT_CONFIG_RELOAD") == "true",
-		},
+	type debugResponse struct {
+		Meta struct {
+			SchemaVersion int    `json:"schemaVersion"`
+			SourcePath    string `json:"sourcePath"`
+			CurrentHash   string `json:"currentHash"`
+			LoadedAt      string `json:"loadedAt"`
+			ReloadCount   int    `json:"reloadCount"`
+		} `json:"meta"`
+		Config interface{} `json:"config"`
 	}
+
+	resp := debugResponse{}
+	resp.Meta.SchemaVersion = meta.SchemaVersion
+	resp.Meta.SourcePath = meta.SourcePath
+	resp.Meta.CurrentHash = meta.CurrentHash
+	resp.Meta.LoadedAt = meta.LoadedAt.Format(time.RFC3339)
+	resp.Meta.ReloadCount = meta.ReloadCount
+	resp.Config = cfg
 
 	json.NewEncoder(w).Encode(resp)
 }
@@ -577,48 +447,54 @@ func (m *Manager) observabilityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Wrap the response writer to capture status code
 		wrapped := &observability.ResponseWriterWrapper{
 			ResponseWriter: w,
-			StatusCode:     http.StatusOK, // Default to 200
+			StatusCode:     http.StatusOK,
 		}
 
 		next.ServeHTTP(wrapped, r)
 
 		duration := time.Since(start)
 		method := r.Method
-
-		// Use path patterns to avoid high cardinality
-		// Replace session IDs with placeholder
 		path := observability.PatternizePath(r.URL.Path)
-
 		m.metrics.RecordHTTPRequest(method, path, wrapped.StatusCode, duration)
 	})
 }
 
 func (m *Manager) waitForShutdown() {
-	sigint := make(chan os.Signal, 1)
-	signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
-	<-sigint
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	log.Printf("Shutdown signal received, gracefully shutting down...")
-
-	// Stop rate limiter cleanup goroutine
-	if m.rateLimiter != nil {
-		m.rateLimiter.Stop()
+	// Wait for either an OS signal or a fatal HTTP server error.
+	select {
+	case sig := <-sigCh:
+		log.Printf("Shutdown signal received (%v), gracefully shutting down...", sig)
+	case err := <-m.httpErrCh:
+		log.Printf("Fatal: %v — initiating shutdown...", err)
 	}
 
-	// Cancel manager lifecycle context to stop all background goroutines
-	// This includes the finalizer handler which was started with m.ctx
+	// Phase 1: Drain in-flight HTTP requests.
+	// This must happen BEFORE cancelling the app context, because in-flight
+	// request handlers may depend on the app context being active.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer drainCancel()
+
+	if err := m.httpServer.Shutdown(drainCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Phase 2: Stop background goroutines (finalizer, config watcher, etc.)
 	if m.cancel != nil {
 		m.cancel()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := m.httpServer.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+	// Phase 3: Wait for finalizer handler to finish its current work.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if m.finalizerHandler != nil {
+		if err := m.finalizerHandler.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Finalizer shutdown error: %v", err)
+		}
 	}
 
 	log.Printf("Shutdown complete")
@@ -638,102 +514,4 @@ func parseDuration(s string) time.Duration {
 		return 0
 	}
 	return d
-}
-
-func convertConfigError(err *config.ConfigError) *httpapi.ConfigError {
-	if err == nil {
-		return nil
-	}
-	return &httpapi.ConfigError{
-		Code:      err.Code,
-		Message:   err.Message,
-		FieldPath: err.FieldPath,
-		RuleID:    err.RuleID,
-		Rule:      err.Rule,
-		Timestamp: err.Timestamp,
-	}
-}
-
-// sanitizeConfig creates a safe subset of configuration for debug output.
-// NOTE: Storage configuration (AccessKey, SecretKey) is intentionally excluded
-// to prevent credential exposure via debug endpoint.
-func sanitizeConfig(cfg *config.Config) httpapi.DebugConfigConfig {
-	return httpapi.DebugConfigConfig{
-		Version: cfg.Version,
-		Server: httpapi.DebugServerConfig{
-			HTTPPort:        cfg.Server.HTTPPort,
-			RequestIDHeader: cfg.Server.RequestIDHeader,
-			Timeouts: map[string]string{
-				"readHeader": cfg.Server.Timeouts.ReadHeader.String(),
-				"read":       cfg.Server.Timeouts.Read.String(),
-				"write":      cfg.Server.Timeouts.Write.String(),
-				"idle":       cfg.Server.Timeouts.Idle.String(),
-			},
-			MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
-			Metrics: httpapi.DebugMetricsConfig{
-				Enabled:           cfg.Server.Metrics.Enabled,
-				Path:              cfg.Server.Metrics.Path,
-				RequireServiceKey: cfg.Server.Metrics.RequireServiceKey,
-			},
-			Debug: httpapi.DebugDebugConfig{
-				ConfigPath:  cfg.Server.Debug.ConfigPath,
-				EnablePprof: cfg.Server.Debug.EnablePprof,
-			},
-		},
-		Auth: httpapi.DebugAuthConfig{
-			Enabled:             cfg.Auth.Enabled,
-			HeaderName:          cfg.Auth.HeaderName,
-			AcceptAuthorization: cfg.Auth.AcceptAuthorization,
-			AuthorizationScheme: cfg.Auth.AuthorizationScheme,
-			FailStatusCode:      cfg.Auth.FailStatusCode,
-		},
-		Kubernetes: httpapi.DebugK8sConfig{
-			QPS:            cfg.Kubernetes.QPS,
-			Burst:          cfg.Kubernetes.Burst,
-			RequestTimeout: cfg.Kubernetes.RequestTimeout.String(),
-			Retry: httpapi.DebugK8sRetryConfig{
-				Enabled:     cfg.Kubernetes.Retry.Enabled,
-				MaxAttempts: cfg.Kubernetes.Retry.MaxAttempts,
-				BaseBackoff: cfg.Kubernetes.Retry.BaseBackoff.String(),
-				MaxBackoff:  cfg.Kubernetes.Retry.MaxBackoff.String(),
-			},
-		},
-		Exec: httpapi.DebugExecConfig{
-			DefaultTimeout:    cfg.Exec.DefaultTimeout.String(),
-			MaxTimeout:        cfg.Exec.MaxTimeout.String(),
-			StdoutMaxBytes:    cfg.Exec.StdoutMaxBytes,
-			StderrMaxBytes:    cfg.Exec.StderrMaxBytes,
-			PreserveTailBytes: cfg.Exec.PreserveTailBytes,
-			ExitCodeMarker: httpapi.DebugExitCodeMarker{
-				Key:    cfg.Exec.ExitCodeMarker.Key,
-				Stream: cfg.Exec.ExitCodeMarker.Stream,
-			},
-			Shell: httpapi.DebugShellConfig{
-				Bin:  cfg.Exec.Shell.Bin,
-				Args: cfg.Exec.Shell.Args,
-			},
-			Env: httpapi.DebugEnvConfig{
-				AllowRegex: cfg.Exec.Env.AllowRegex,
-			},
-			Workdir: httpapi.DebugWorkdirConfig{
-				AllowedPrefixes: cfg.Exec.Workdir.AllowedPrefixes,
-			},
-		},
-		Files: httpapi.DebugFilesConfig{
-			RootPrefix: cfg.Files.RootPrefix,
-			Upload: httpapi.DebugFileUploadConfig{
-				DefaultDest: cfg.Files.Upload.DefaultDest,
-				MaxBytes:    cfg.Files.Upload.MaxBytes,
-				Format:      cfg.Files.Upload.Format,
-			},
-			Download: httpapi.DebugFileDownloadConfig{
-				DefaultSrc: cfg.Files.Download.DefaultSrc,
-				Format:     cfg.Files.Download.Format,
-			},
-			Tar: httpapi.DebugTarConfig{
-				Bin:            cfg.Files.Tar.Bin,
-				RejectSymlinks: cfg.Files.Tar.RejectSymlinks,
-			},
-		},
-	}
 }

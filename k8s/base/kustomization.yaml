@@ -10,13 +10,12 @@ resources:
   - resource-quota.yaml
   - configmap.yaml
   - manager-configmap.yaml
-  - manager-secret.yaml
+  - minio-secret.yaml
   - rbac-manager.yaml
   - manager-deployment.yaml
   - manager-service.yaml
   - network-policy.yaml
-  - cleaner-cronjob-sandbox-system.yaml
-  - cleaner-cronjob-sandbox-workspaces.yaml
+  - cleaner-cronjob-sandbox.yaml
 
 # 通用标签
 commonLabels:

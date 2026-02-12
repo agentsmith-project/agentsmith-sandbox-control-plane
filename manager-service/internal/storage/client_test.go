@@ -202,37 +202,51 @@ func TestSnapshotExists_NoPanicOnNonMinioError(t *testing.T) {
 func TestGenerateSnapshotKey(t *testing.T) {
 	c := &Client{}
 
-	tests := []struct {
-		name           string
-		workspaceID    string
-		projectID      string
-		agentThreadID  string
-		wantPrefix     string
-	}{
-		{
-			name:          "with prefixes",
-			workspaceID:   "ws_123",
-			projectID:     "proj_456",
-			agentThreadID: "at_789",
-			wantPrefix:    "snapshots/123/456/789/workspace.tar.gz",
-		},
-		{
-			name:          "without prefixes",
-			workspaceID:   "123",
-			projectID:     "456",
-			agentThreadID: "789",
-			wantPrefix:    "snapshots/123/456/789/workspace.tar.gz",
-		},
-	}
+	t.Run("generates key with sandboxID and timestamp", func(t *testing.T) {
+		key, err := c.GenerateSnapshotKey("my-sandbox-abc123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Key format: snapshots/{sandboxID}/{timestamp}.tar.gz
+		if !strings.HasPrefix(key, "snapshots/my-sandbox-abc123/") {
+			t.Errorf("key should start with snapshots/my-sandbox-abc123/, got: %s", key)
+		}
+		if !strings.HasSuffix(key, ".tar.gz") {
+			t.Errorf("key should end with .tar.gz, got: %s", key)
+		}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := c.GenerateSnapshotKey(tt.workspaceID, tt.projectID, tt.agentThreadID)
-			if got != tt.wantPrefix {
-				t.Errorf("GenerateSnapshotKey() = %v, want %v", got, tt.wantPrefix)
-			}
-		})
-	}
+	t.Run("different calls produce unique keys over time", func(t *testing.T) {
+		key1, err := c.GenerateSnapshotKey("sandbox-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Keys generated in the same second may be identical, but format is correct
+		if !strings.HasPrefix(key1, "snapshots/sandbox-1/") {
+			t.Errorf("key should contain sandbox ID, got: %s", key1)
+		}
+	})
+
+	t.Run("rejects path traversal", func(t *testing.T) {
+		_, err := c.GenerateSnapshotKey("../evil")
+		if err == nil {
+			t.Error("expected error for path traversal")
+		}
+	})
+
+	t.Run("rejects slash in sandboxID", func(t *testing.T) {
+		_, err := c.GenerateSnapshotKey("foo/bar")
+		if err == nil {
+			t.Error("expected error for slash in sandboxID")
+		}
+	})
+
+	t.Run("rejects empty sandboxID", func(t *testing.T) {
+		_, err := c.GenerateSnapshotKey("")
+		if err == nil {
+			t.Error("expected error for empty sandboxID")
+		}
+	})
 }
 
 // TestToErrorResponseBehavior documents the actual behavior of minio.ToErrorResponse
@@ -307,7 +321,7 @@ func TestHTTPStatusCodeToErrorResponse(t *testing.T) {
 func BenchmarkGenerateSnapshotKey(b *testing.B) {
 	c := &Client{}
 	for i := 0; i < b.N; i++ {
-		c.GenerateSnapshotKey("ws_123", "proj_456", "at_789")
+		_, _ = c.GenerateSnapshotKey("sandbox-abc123")
 	}
 }
 

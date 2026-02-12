@@ -43,12 +43,12 @@ echo -e " ${COLOR_GREEN}OK${COLOR_NC}"
 
 # 5. Check Manager service
 echo -n "  Checking Manager service..."
-assert_service_ready "manager" "sandbox-system" "Manager service not ready"
+assert_service_ready "sandbox-manager" "sandbox-system" "Manager service not ready"
 echo -e " ${COLOR_GREEN}OK${COLOR_NC}"
 
 # 6. Check Manager pod is running
 echo -n "  Checking Manager pod..."
-assert_pod_running "manager" "Manager pod not running"
+assert_pod_running "sandbox-manager" "Manager pod not running"
 echo -e " ${COLOR_GREEN}OK${COLOR_NC}"
 
 # 7. Check Manager endpoint

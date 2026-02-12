@@ -35,7 +35,6 @@ type PodSpec struct {
 	EphemeralStorageLimit string
 	ContainerName         string
 	Workdir               string
-	ShellType             string // e.g., "bash", "zsh", "sh", "fish", "nu" (required)
 	Env                   map[string]string
 	ResourceRequests      ResourceRequests
 	ResourceLimits        ResourceLimits
@@ -43,7 +42,6 @@ type PodSpec struct {
 	Annotations           map[string]string
 	Volumes               []VolumeSpec
 	SecurityContext       *PodSecurityConfig
-	AgentThreadID         string
 }
 
 // ResourceRequests contains resource request values
@@ -89,15 +87,12 @@ func (c *Client) CreatePod(ctx context.Context, spec *PodSpec) (*PodResult, erro
 	now := time.Now().UTC()
 	expiresAt := now.Add(time.Duration(spec.TTLSeconds) * time.Second)
 
-	// Build labels with agent_thread_id
+	// Build labels
 	labels := make(map[string]string)
 	if spec.Labels != nil {
 		for k, v := range spec.Labels {
 			labels[k] = v
 		}
-	}
-	if spec.AgentThreadID != "" {
-		labels["agent_thread_id"] = spec.AgentThreadID
 	}
 
 	// Build annotations with expires_at and last_activity_at
@@ -110,6 +105,11 @@ func (c *Client) CreatePod(ctx context.Context, spec *PodSpec) (*PodResult, erro
 		"sandbox/expiresAt":    expiresAt.Format(time.RFC3339),
 	})
 
+	podSpec, err := buildPodSpec(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build pod spec: %w", err)
+	}
+
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        podName,
@@ -118,7 +118,7 @@ func (c *Client) CreatePod(ctx context.Context, spec *PodSpec) (*PodResult, erro
 			Annotations: annotations,
 			Finalizers:  []string{FinalizerSnapshot},
 		},
-		Spec: buildPodSpec(spec),
+		Spec: podSpec,
 	}
 
 	createdPod, err := c.clientset.CoreV1().Pods(c.namespace).Create(ctx, pod, metav1.CreateOptions{})
@@ -329,7 +329,12 @@ func PodName(sessionID string) string {
 }
 
 // buildPodSpec builds the pod spec from a PodSpec
-func buildPodSpec(spec *PodSpec) v1.PodSpec {
+func buildPodSpec(spec *PodSpec) (v1.PodSpec, error) {
+	container, err := buildContainer(spec)
+	if err != nil {
+		return v1.PodSpec{}, err
+	}
+
 	podSpec := v1.PodSpec{
 		AutomountServiceAccountToken:  func() *bool { b := false; return &b }(),
 		RestartPolicy:                 v1.RestartPolicyNever,
@@ -339,7 +344,7 @@ func buildPodSpec(spec *PodSpec) v1.PodSpec {
 				Type: v1.SeccompProfileTypeRuntimeDefault,
 			},
 		},
-		Containers: []v1.Container{buildContainer(spec)},
+		Containers: []v1.Container{container},
 		Volumes:    buildVolumes(spec.Volumes),
 	}
 
@@ -356,36 +361,27 @@ func buildPodSpec(spec *PodSpec) v1.PodSpec {
 		}
 	}
 
-	return podSpec
+	return podSpec, nil
 }
 
 // buildContainer builds the container spec from a PodSpec
-func buildContainer(spec *PodSpec) v1.Container {
+func buildContainer(spec *PodSpec) (v1.Container, error) {
+	res, err := buildResources(spec.ResourceRequests, spec.ResourceLimits)
+	if err != nil {
+		return v1.Container{}, fmt.Errorf("invalid resource spec: %w", err)
+	}
+
 	container := v1.Container{
 		Name:            spec.ContainerName,
 		Image:           spec.Image,
 		ImagePullPolicy: v1.PullPolicy(spec.ImagePullPolicy),
 		WorkingDir:      spec.Workdir,
 		VolumeMounts:    buildVolumeMounts(spec.Volumes),
-		Resources:       buildResources(spec.ResourceRequests, spec.ResourceLimits),
+		Resources:       res,
 	}
 
-	// Always use shell-bridge
-	shellType := spec.ShellType
-	if shellType == "" {
-		shellType = "bash" // Default
-	}
-	workdir := spec.Workdir
-	if workdir == "" {
-		workdir = "/workspace"
-	}
-
-	container.Command = []string{"/usr/local/bin/shellb"}
-	container.Args = []string{
-		"--shell=" + shellType,
-		"--port=8080",
-		"--workdir=" + workdir,
-	}
+	// Use sleep infinity as entrypoint -- commands are executed via kubectl exec
+	container.Command = []string{"sleep", "infinity"}
 
 	// Add environment variables
 	if len(spec.Env) > 0 {
@@ -403,7 +399,7 @@ func buildContainer(spec *PodSpec) v1.Container {
 		container.SecurityContext = buildSecurityContext(spec.SecurityContext)
 	}
 
-	return container
+	return container, nil
 }
 
 // buildSecurityContext builds the security context
@@ -430,30 +426,51 @@ func buildSecurityContext(cfg *PodSecurityConfig) *v1.SecurityContext {
 	return ctx
 }
 
-// buildResources builds resource requirements
-func buildResources(requests ResourceRequests, limits ResourceLimits) v1.ResourceRequirements {
+// buildResources builds resource requirements.
+// Returns an error if any quantity string is malformed.
+func buildResources(requests ResourceRequests, limits ResourceLimits) (v1.ResourceRequirements, error) {
 	resources := v1.ResourceRequirements{
 		Requests: v1.ResourceList{},
 		Limits:   v1.ResourceList{},
 	}
 
 	if requests.CPU != "" {
-		resources.Requests[v1.ResourceCPU] = resource.MustParse(requests.CPU)
+		qty, err := resource.ParseQuantity(requests.CPU)
+		if err != nil {
+			return resources, fmt.Errorf("invalid cpu request %q: %w", requests.CPU, err)
+		}
+		resources.Requests[v1.ResourceCPU] = qty
 	}
 	if requests.Memory != "" {
-		resources.Requests[v1.ResourceMemory] = resource.MustParse(requests.Memory)
+		qty, err := resource.ParseQuantity(requests.Memory)
+		if err != nil {
+			return resources, fmt.Errorf("invalid memory request %q: %w", requests.Memory, err)
+		}
+		resources.Requests[v1.ResourceMemory] = qty
 	}
 	if limits.CPU != "" {
-		resources.Limits[v1.ResourceCPU] = resource.MustParse(limits.CPU)
+		qty, err := resource.ParseQuantity(limits.CPU)
+		if err != nil {
+			return resources, fmt.Errorf("invalid cpu limit %q: %w", limits.CPU, err)
+		}
+		resources.Limits[v1.ResourceCPU] = qty
 	}
 	if limits.Memory != "" {
-		resources.Limits[v1.ResourceMemory] = resource.MustParse(limits.Memory)
+		qty, err := resource.ParseQuantity(limits.Memory)
+		if err != nil {
+			return resources, fmt.Errorf("invalid memory limit %q: %w", limits.Memory, err)
+		}
+		resources.Limits[v1.ResourceMemory] = qty
 	}
 	if limits.EphemeralStorage != "" {
-		resources.Limits[v1.ResourceEphemeralStorage] = resource.MustParse(limits.EphemeralStorage)
+		qty, err := resource.ParseQuantity(limits.EphemeralStorage)
+		if err != nil {
+			return resources, fmt.Errorf("invalid ephemeral-storage limit %q: %w", limits.EphemeralStorage, err)
+		}
+		resources.Limits[v1.ResourceEphemeralStorage] = qty
 	}
 
-	return resources
+	return resources, nil
 }
 
 // buildVolumes builds volume specs
@@ -527,10 +544,3 @@ func GetExpiresAtFromPod(pod *v1.Pod) string {
 	return pod.Annotations["sandbox/expiresAt"]
 }
 
-// GetAgentThreadIDFromPod extracts agent thread ID from pod labels
-func GetAgentThreadIDFromPod(pod *v1.Pod) string {
-	if pod.Labels == nil {
-		return ""
-	}
-	return pod.Labels["agent_thread_id"]
-}

@@ -101,17 +101,6 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.Debug.ConfigPath = defaultCfg.Server.Debug.ConfigPath
 	}
 
-	// Auth defaults
-	if cfg.Auth.HeaderName == "" {
-		cfg.Auth.HeaderName = defaultCfg.Auth.HeaderName
-	}
-	if cfg.Auth.AuthorizationScheme == "" {
-		cfg.Auth.AuthorizationScheme = defaultCfg.Auth.AuthorizationScheme
-	}
-	if cfg.Auth.FailStatusCode == 0 {
-		cfg.Auth.FailStatusCode = defaultCfg.Auth.FailStatusCode
-	}
-
 	// Kubernetes defaults
 	if cfg.Kubernetes.QPS == 0 {
 		cfg.Kubernetes.QPS = defaultCfg.Kubernetes.QPS

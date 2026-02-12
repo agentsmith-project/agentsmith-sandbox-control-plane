@@ -2,8 +2,8 @@
 # scripts/test/lib/assertions.sh
 # Assertion functions for smoke tests
 
-# Source the runner library
-source "$(dirname "$0")/runner.sh"
+# Source the runner library (BASH_SOURCE so path is correct when sourced from sbx)
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/runner.sh"
 
 # Environment assertions
 assert_cluster_accessible() {

@@ -1,421 +1,210 @@
-# mbos-sandbox-v1
+# MBOS Sandbox v1
 
-A Kubernetes-based sandbox system for running isolated, persistent shell sessions with a WebSocket API, automatic workspace snapshot/restore, and TTL-based lifecycle management.
-
-## Features
-
-- **Persistent Shell Sessions**: Long-lived tmux sessions that survive WebSocket reconnections
-- **WebSocket API**: Bidirectional communication with automatic message buffering
-- **Snapshot & Restore**: Automatic workspace persistence via MinIO/S3
-- **TTL Management**: Configurable idle timeout and max lifetime with automatic cleanup
-- **Security Controls**: Network policies, resource limits, readonly filesystem, and capabilities
-- **Flexible Runtime**: Support for custom container images with configurable commands
-- **Developer-Friendly**: Single entrypoint (`./sbx`) for all operations
+Kubernetes-based sandbox execution service. Provides a simple HTTP API for creating sandbox pods, executing commands (with SSE streaming), and managing files.
 
 ## Architecture
 
 ```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│     Client      │◄────────►│     Manager     │◄────────►│      Pod        │
-│  (WebSocket)    │         │  (Go Service)   │         │ (User Container)│
-└─────────────────┘         │                 │         │                 │
-                            │  - Session Mgmt  │         │  /workspace     │
-                            │  - Ring Buffer   │         │                 │
-                            │  - kubectl exec  │         │  tmux session   │
-                            └────────┬─────────┘         └─────────────────┘
-                                     │
-                                     ▼
-                            ┌─────────────────┐
-                            │      MinIO      │
-                            │  (Snapshots)    │
-                            └─────────────────┘
-
-Cleaner (CronJob):
-  - Scans every 5 minutes
-  - Reads Pod annotations for TTL
-  - Directly deletes expired Pods
-  - Manager Finalizer handles snapshot
+Client (HTTP) → Manager Service → kubectl exec → Pod Container (sleep infinity)
 ```
 
-## Quick Start
+- **Manager Service**: Go HTTP server that manages sandbox pod lifecycle and proxies command execution via Kubernetes API.
+- **Runner Pods**: Ubuntu-based containers with development tools. Entrypoint is `sleep infinity`; commands are executed on-demand via `kubectl exec`.
+- **No auth/rate-limiting**: The manager runs in a trusted internal network. Authentication and traffic control are the responsibility of the upstream client.
 
-### Prerequisites
+## API
 
-- Go 1.21+ (for local development)
-- kubectl or use vendored tools
-- Kubernetes cluster (kind for local, or any K8s cluster)
+All endpoints are under `/v1/sandboxes/{id}`:
 
-### Using Kind (Local Development)
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/v1/sandboxes/{id}` | Create sandbox (returns JSON) |
+| `DELETE` | `/v1/sandboxes/{id}` | Delete sandbox (triggers snapshot) |
+| `POST` | `/v1/sandboxes/{id}/exec` | Execute command (**SSE streaming**) |
+| `POST` | `/v1/sandboxes/{id}/touch` | Update activity / extend TTL |
+| `POST` | `/v1/sandboxes/{id}/files/upload` | Upload tar.gz archive |
+| `GET` | `/v1/sandboxes/{id}/files/download` | Download tar.gz archive |
+
+### SSE Exec Streaming
 
 ```bash
-# 1. Fetch vendored tools (recommended; avoids needing kubectl/kustomize installed)
-./sbx tools fetch --proxy auto
-
-# 2. Create kind cluster + build + deploy (end-to-end)
-./sbx dev up --force --proxy auto --harbor-ca auto
-
-# 3. Access manager
-tools/bin/linux-amd64/kubectl -n sandbox-system port-forward svc/sandbox-manager 8080:80
-
-# 4. Test the WebSocket API
-# Connect to ws://localhost:8080/ws and send:
-{"type":"create","agent_thread_id":"test-123","image":"python:3.11","command":["/bin/bash"]}
+curl -N -X POST http://localhost:8080/v1/sandboxes/my-session/exec \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": ["echo", "hello world"]}'
 ```
 
-### Make Targets (Convenience)
+Response (`text/event-stream`):
+```
+event: stdout
+data: {"data":"aGVsbG8gd29ybGQK"}
 
-```bash
-make test
-make test-integration
-make build-manager
-make build-runner
-make build-cleaner
-make kind-up
-make kind-status
-make smoke
+event: exit
+data: {"exit_code":0,"duration_ms":42}
 ```
 
-### WS Client (Interactive)
+Output data is base64-encoded.
 
-Build and run the CLI client:
+## Health Checks
 
-```bash
-cd manager-service
-go build -o ../bin/ws-client ./cmd/ws-client
-../bin/ws-client --url ws://localhost:8080/ws --agent-thread-id at_demo --image python:3.11 --command /bin/bash
-```
-
-Notes:
-- Raw TTY mode enabled by default; exit with `Ctrl-]` (or `--exit-key ctrl-c`).
-- Auto reconnect with backoff on disconnect.
-- Terminal resize is detected and sent automatically when running in a TTY.
-
-## Project Structure
-
-```
-mbos-sandbox-v1/
-├── manager-service/          # Go HTTP/WebSocket API service
-│   ├── cmd/                  # Main entrypoints (manager, cleaner)
-│   ├── internal/             # Internal packages
-│   │   ├── api/              # HTTP/WebSocket handlers
-│   │   ├── buffer/           # Ring buffer for messages
-│   │   ├── cleaner/          # TTL-based pod cleanup
-│   │   ├── config/           # Configuration loading
-│   │   ├── k8s/              # Kubernetes client utilities
-│   │   ├── sandbox/          # Pod creation and management
-│   │   ├── session/          # Session state management
-│   │   ├── snapshot/         # Workspace snapshot/restore
-│   │   └── websocket/        # WebSocket connection handling
-│   ├── integration/          # Integration tests
-│   ├── scripts/              # Build and test scripts
-│   └── manager-config.example.yaml
-├── images/
-│   ├── runner/               # Sandbox runner image
-│   └── gc/                   # Garbage collection image
-├── k8s/                      # Kubernetes manifests
-│   ├── base/                 # Kustomize base
-│   ├── overlays/
-│   │   ├── dev/              # Development (kind) overlay
-│   │   └── production/       # Production overlay
-│   └── scripts/              # Deployment utilities
-├── scripts/                  # Internal bash libraries
-├── tools/                    # Vendored binaries for offline
-├── sbx                       # Single workflow entrypoint
-└── docs/                     # Documentation
-    ├── plans/                # Design and implementation docs
-    ├── api-reference-v1.md   # Complete API reference
-    ├── API.md                # Quick API guide
-    ├── WORKFLOWS.md          # Common workflows
-    ├── CONFIGURATION_GUIDE.md
-    └── TROUBLESHOOTING.md
-```
-
-## WebSocket API
-
-### Connection
-
-```
-GET /ws
-```
-
-### Message Types
-
-#### Client → Manager
-
-**Create Session**
-```json
-{
-  "type": "create",
-  "agent_thread_id": "at_abc123",
-  "image": "python:3.11",
-  "command": ["/bin/bash"],
-  "env": {"MY_VAR": "value"},
-  "config": {
-    "allow_network_access": false,
-    "readonly_filesystem": false,
-    "cpu_limit": "2",
-    "memory_limit": "1Gi",
-    "idle_timeout": "30m",
-    "max_lifetime": "24h"
-  }
-}
-```
-
-**Send Input**
-```json
-{
-  "type": "stdin",
-  "data": "base64_encoded_string"
-}
-```
-
-#### Manager → Client
-
-**Status Update**
-```json
-{
-  "type": "status",
-  "state": "creating|restoring|ready|error",
-  "message": "string",
-  "progress": 0.0-1.0
-}
-```
-
-**Output**
-```json
-{
-  "type": "stdout",
-  "data": "base64_encoded_string"
-}
-```
-
-See [api-reference-v1.md](docs/api-reference-v1.md) for complete API documentation.
-
-## Configuration
-
-### Manager Configuration
-
-The manager is configured via YAML (see `manager-service/manager-config.example.yaml`):
-
-```yaml
-version: 1
-
-server:
-  httpPort: 8080
-  metrics:
-    enabled: true
-    path: /metrics
-
-kubernetes:
-  namespace: sandbox
-  qps: 50
-  burst: 100
-
-sandbox:
-  defaults:
-    namespace: sandbox
-    runnerImage: sandbox-runner:1.0.0
-    ttlSeconds: 900
-    resources:
-      limits:
-        cpu: "1"
-        memory: 1Gi
-
-storage:
-  endpoint: minio:9000
-  bucket: mbos-sandbox-snapshots
-  useSSL: false
-
-buffer:
-  capacity: 10000
-```
-
-### Environment Variables
-
-- `CONFIG_PATH`: Path to manager config YAML
-- `SERVICE_KEYS`: Comma-separated list of valid service keys
-- `MINIO_ACCESS_KEY`: MinIO/S3 access key
-- `MINIO_SECRET_KEY`: MinIO/S3 secret key
-
-## Security Controls
-
-| Control | Type | Description |
-|---------|------|-------------|
-| `allow_network_access` | bool | Allow external network access |
-| `readonly_filesystem` | bool | Mount root as read-only (except /workspace) |
-| `cpu_limit` | string | CPU limit (e.g., "2") |
-| `memory_limit` | string | Memory limit (e.g., "1Gi") |
-| `idle_timeout` | duration | Idle timeout before cleanup (e.g., "30m") |
-| `max_lifetime` | duration | Maximum lifetime (e.g., "24h") |
-| `drop_all_capabilities` | bool | Drop all Linux capabilities |
-| `allow_privileged` | bool | Allow privileged mode |
+- `GET /healthz` — Liveness
+- `GET /readyz` — Readiness (checks K8s connectivity + config)
+- `GET /metrics` — Prometheus metrics
 
 ## Development
 
-### Building Manager
-
 ```bash
-cd manager-service
-./scripts/build.sh
+# Build
+make build
+
+# Run tests
+make test
+
+# Run go vet
+make vet
 ```
 
-### Running Tests
+## Manual run and client testing
 
-```bash
-cd manager-service
-./scripts/test.sh
-```
-
-## Testing
-
-The project uses a comprehensive testing strategy with unit tests, integration tests, and E2E tests.
+To run the sandbox locally and drive it manually with a client (e.g. `curl`):
 
 ### Prerequisites
 
-- Go 1.21+
-- Docker and Docker Compose
-- kind (Kubernetes in Docker) for E2E tests
-- kubectl
+- **Docker** (for Kind and images)
+- **kind** on `PATH`
+- **kubectl** (or run `./sbx tools fetch` in this repo)
+- **curl**, **jq** (for manual API calls)
 
-### Running Tests
-
-#### Unit Tests
-
-Run unit tests only:
+### 1. Start the dev environment
 
 ```bash
-make test-unit
-```
-
-#### Integration Tests
-
-Integration tests require external services (MinIO). The Makefile automatically starts these services:
-
-```bash
-make test-integration
-```
-
-To manually start test dependencies:
-
-```bash
-make docker-compose-up
-./scripts/wait-for-minio.sh
-```
-
-#### E2E Tests
-
-E2E tests require a kind cluster with the sandbox manager deployed:
-
-```bash
-# Ensure kind cluster is running
 ./sbx dev up
-
-# Run E2E tests
-make test-e2e
 ```
 
-#### All Tests
+This creates a Kind cluster `sandbox-cluster`, builds manager + runner images, and deploys the stack (namespaces `sandbox-system`, `sandbox`, Manager, MinIO, etc.).
 
-Run unit and integration tests:
+### 2. Expose the Manager
+
+In another terminal, port-forward so you can reach the Manager from your machine:
 
 ```bash
-make test
+kubectl -n sandbox-system port-forward svc/sandbox-manager 8080:80
 ```
 
-#### Coverage Report
+Leave it running. The client talks to `http://localhost:8080`.
 
-Generate HTML coverage report:
+### 3. Use curl as the client
+
+**Create a sandbox**
 
 ```bash
-make test-coverage
+export SID="my-session-$(date +%s)"
+curl -s -X PUT "http://localhost:8080/v1/sandboxes/${SID}" \
+  -H "Content-Type: application/json" \
+  -d '{"ttlSeconds": 300}'
 ```
 
-The report is saved to `coverage.html`.
+Expect `200` and a JSON body.
 
-### Test Structure
-
-```
-manager-service/
-├── internal/           # Unit tests alongside source code
-├── integration/        # Integration tests with external services
-├── e2e/               # End-to-end tests with full stack
-└── testdata/          # Test fixtures and configurations
-```
-
-### Sandbox Client
-
-The `sbx-client` CLI tool can be used for manual testing:
+**Run a command (SSE)** — stdout is base64-encoded:
 
 ```bash
-make build-sbx-client
-/tmp/sbx-client create
-/tmp/sbx-client attach <session-id>
-/tmp/sbx-client exec "echo hello"
-/tmp/sbx-client close
+curl -N -X POST "http://localhost:8080/v1/sandboxes/${SID}/exec" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": ["echo", "hello world"]}'
 ```
+
+Decode one line of output (e.g. the `data` field from a `stdout` event):
+
+```bash
+echo 'aGVsbG8gd29ybGQK' | base64 -d
+```
+
+**More one-shot commands**
+
+```bash
+# list root
+curl -N -X POST "http://localhost:8080/v1/sandboxes/${SID}/exec" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": ["ls", "-la", "/"]}'
+
+# whoami
+curl -N -X POST "http://localhost:8080/v1/sandboxes/${SID}/exec" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": ["whoami"]}'
+```
+
+**Touch (refresh TTL)**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "http://localhost:8080/v1/sandboxes/${SID}/touch"
+```
+
+**Delete sandbox**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "http://localhost:8080/v1/sandboxes/${SID}"
+```
+
+`204` means success.
+
+### 4. Smoke tests (optional)
+
+With the port-forward running, run the full smoke suite (create → exec → snapshot/restore → cleanup):
+
+```bash
+./sbx test smoke
+```
+
+Environment variables: `MANAGER_URL` (default `http://localhost:8080`), `SANDBOX_NAMESPACE` (default `sandbox`).
+
+## Configuration
+
+Configuration is loaded from a YAML file (default: `/etc/sandbox-manager/manager-config.yaml`), with hot-reload support via file watching.
+
+See [`manager-service/manager-config.example.yaml`](manager-service/manager-config.example.yaml) for a complete example.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MINIO_ENDPOINT` | `http://localhost:9000` | MinIO endpoint for integration tests |
-| `SBX_MANAGER_URL` | `ws://localhost:8080` | Manager WebSocket URL |
-| `SBX_SERVICE_KEY` | `test-service-key` | Service key for authentication |
-
-### Code Quality
-
-```bash
-cd manager-service
-./scripts/lint.sh
-```
-
-### Making Changes
-
-1. Edit code in `manager-service/internal/`
-2. Run `./scripts/build.sh` to build
-3. Run `./scripts/test.sh` to verify
-4. Update documentation if needed
+| `CONFIG_PATH` | `/etc/sandbox-manager/manager-config.yaml` | Config file path |
+| `CONFIG_RELOAD_DEBOUNCE` | `300ms` | Hot-reload debounce |
+| `STORAGE_ENDPOINT` | `localhost:9000` | MinIO/S3 endpoint |
+| `STORAGE_ACCESS_KEY` | `minioadmin` | MinIO access key |
+| `STORAGE_SECRET_KEY` | `minioadmin` | MinIO secret key |
+| `STORAGE_BUCKET` | `sandboxes` | MinIO bucket |
+| `STORAGE_USE_SSL` | `false` | Use SSL for MinIO |
 
 ## Deployment
 
-### Development (Kind)
+Kubernetes manifests are in `k8s/` using Kustomize:
 
 ```bash
-./sbx dev up --force --proxy auto --harbor-ca auto
+# Deploy to kind cluster
+./sbx k8s deploy
+
+# Check status
+./sbx dev status
 ```
 
-### Production (Harbor)
+## Project Structure
 
-```bash
-# 1. Push images to Harbor
-./sbx images push harbor \
-  --registry "$HARBOR_REGISTRY" \
-  --project "$HARBOR_PROJECT" \
-  --username "$HARBOR_USERNAME" \
-  --password "$HARBOR_PASSWORD"
-
-# 2. Deploy
-./sbx k8s deploy production
-
-# 3. Verify
-./sbx k8s verify production
 ```
-
-See [WORKFLOWS.md](docs/WORKFLOWS.md) for more deployment workflows.
-
-## Documentation
-
-- [API Reference](docs/api-reference-v1.md) - Complete WebSocket API documentation
-- [Workflows](docs/WORKFLOWS.md) - Common development and deployment workflows
-- [Configuration Guide](docs/CONFIGURATION_GUIDE.md) - Detailed configuration options
-- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
-- [Offline Mode](docs/OFFLINE.md) - Air-gapped deployment guide
-- [Design Docs](docs/plans/) - Architecture and implementation plans
-
-## License
-
-[Add your license here]
-
-## Contributing
-
-[Add contributing guidelines here]
+mbos-sandbox-v1/
+├── manager-service/          # Go manager service
+│   ├── cmd/manager/          # Main entrypoint
+│   ├── cmd/cleaner/          # CronJob for pod cleanup
+│   └── internal/
+│       ├── app/              # Application initialization
+│       ├── config/           # Configuration (YAML, hot-reload)
+│       ├── exec/             # Command wrapper utilities
+│       ├── files/            # File upload/download (tar.gz)
+│       ├── finalizer/        # K8s finalizer (snapshot on delete)
+│       ├── httpapi/          # REST API handlers + SSE streaming
+│       ├── k8s/              # Kubernetes client (pods, exec)
+│       ├── observability/    # Logging, metrics, health
+│       └── storage/          # MinIO/S3 snapshot storage
+├── images/runner/            # Runner pod Docker image
+├── k8s/                      # Kubernetes manifests (Kustomize)
+└── sbx                       # CLI helper script
+```

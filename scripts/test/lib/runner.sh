@@ -2,6 +2,10 @@
 # scripts/test/lib/runner.sh
 # Test framework for smoke tests
 
+# Idempotent when sourced multiple times (e.g. from test.sh and assertions.sh)
+[[ -n "${_RUNNER_SH_LOADED:-}" ]] && return 0
+_RUNNER_SH_LOADED=1
+
 set -e
 
 # Color definitions

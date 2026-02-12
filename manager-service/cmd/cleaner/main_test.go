@@ -14,18 +14,16 @@ func TestSandboxAppLabel(t *testing.T) {
 }
 
 // TestAllowedNamespaces verifies that the allowedNamespaces whitelist
-// contains the required target namespaces for the cleaner.
+// contains only the sandbox namespace (the only namespace that runs sandbox pods).
 func TestAllowedNamespaces(t *testing.T) {
-	requiredNamespaces := []string{"sandbox-system", "sandbox-workspaces"}
+	requiredNamespaces := []string{"sandbox"}
 
-	// Verify all required namespaces are present
 	for _, ns := range requiredNamespaces {
 		if !allowedNamespaces[ns] {
 			t.Errorf("Namespace %q is not in allowedNamespaces whitelist", ns)
 		}
 	}
 
-	// Verify no extra namespaces are present
 	if len(allowedNamespaces) != len(requiredNamespaces) {
 		t.Errorf("allowedNamespaces has %d entries, want %d", len(allowedNamespaces), len(requiredNamespaces))
 	}

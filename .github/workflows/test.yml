@@ -7,7 +7,7 @@ on:
     branches: [ main, develop ]
 
 env:
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.24'
   KIND_VERSION: 'v0.20.0'
 
 jobs:
@@ -88,14 +88,13 @@ jobs:
       - name: Create kind cluster
         run: ./sbx dev up --force
 
-      - name: Build sbx-client
-        run: make build-sbx-client
+      - name: Build manager
+        run: make build
 
       - name: Run E2E tests
         run: make test-e2e
         env:
           SBX_MANAGER_HTTP_URL: http://localhost:8080
-          SBX_SERVICE_KEY: test-service-key
 
       - name: Collect logs on failure
         if: failure()

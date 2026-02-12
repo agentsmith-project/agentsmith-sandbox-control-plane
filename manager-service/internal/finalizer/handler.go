@@ -29,11 +29,17 @@ const (
 	// removeFinalizerBaseBackoff is the base backoff duration for finalizer removal retries
 	removeFinalizerBaseBackoff = 100 * time.Millisecond
 
-	// maxSnapshotRetries is the maximum number of retries for snapshot operations
+	// maxSnapshotRetries is the maximum number of retries for snapshot operations per cycle
 	maxSnapshotRetries = 3
 
 	// snapshotBaseBackoff is the base backoff duration for snapshot retries
 	snapshotBaseBackoff = 500 * time.Millisecond
+
+	// maxTotalSnapshotAttempts is the total number of snapshot attempts across all
+	// processing cycles before the finalizer is forcibly removed. This prevents
+	// pods from being stuck in Terminating state indefinitely when snapshots
+	// permanently fail (e.g., MinIO unreachable, pod containers terminated).
+	maxTotalSnapshotAttempts = 10
 )
 
 // Handler handles finalizers for pods
@@ -45,6 +51,12 @@ type Handler struct {
 	snapshotTimeout time.Duration
 	wg              sync.WaitGroup
 	stopCh          chan struct{}
+	stopOnce        sync.Once
+
+	// failCounts tracks the total number of failed snapshot attempts per pod
+	// across processing cycles. Protected by failMu.
+	failMu     sync.Mutex
+	failCounts map[string]int
 }
 
 // HandlerConfig contains configuration for creating a new Handler
@@ -88,10 +100,13 @@ func NewHandler(cfg *HandlerConfig) (*Handler, error) {
 		checkInterval:   checkInterval,
 		snapshotTimeout: snapshotTimeout,
 		stopCh:          make(chan struct{}),
+		failCounts:      make(map[string]int),
 	}, nil
 }
 
-// Start starts the finalizer handler in a background goroutine
+// Start starts the finalizer handler in a background goroutine.
+// Start returns immediately after launching the worker goroutine.
+// Callers should NOT wrap this in another goroutine.
 func (h *Handler) Start(ctx context.Context) {
 	log.Printf("Finalizer: starting handler (namespace=%s, interval=%v)", h.namespace, h.checkInterval)
 
@@ -119,10 +134,12 @@ func (h *Handler) Start(ctx context.Context) {
 }
 
 // Shutdown gracefully stops the finalizer handler with a timeout.
-// The context is used to control the shutdown timeout.
+// It is safe to call Shutdown multiple times.
 func (h *Handler) Shutdown(ctx context.Context) error {
-	// Signal the goroutine to stop
-	close(h.stopCh)
+	// Signal the goroutine to stop (idempotent via sync.Once)
+	h.stopOnce.Do(func() {
+		close(h.stopCh)
+	})
 
 	// Wait for the goroutine to finish with timeout
 	done := make(chan struct{})
@@ -165,31 +182,92 @@ func (h *Handler) processPods(ctx context.Context) error {
 	return nil
 }
 
-// processPod processes a single pod with the snapshot finalizer
+// processPod processes a single pod with the snapshot finalizer.
+//
+// If the snapshot succeeds, the finalizer is removed normally.
+// If the snapshot fails, a cross-cycle failure counter is incremented.
+// Once the counter exceeds maxTotalSnapshotAttempts, the finalizer is
+// forcibly removed to prevent pods from being stuck in Terminating state
+// indefinitely (which would otherwise cause CrashLoopBackOff of the Manager).
 func (h *Handler) processPod(ctx context.Context, pod *v1.Pod) error {
 	podName := pod.Name
 	log.Printf("Finalizer: processing pod %s", podName)
 
-	// Extract metadata for the snapshot
-	workspaceID := h.getWorkspaceID(pod)
-	projectID := h.getProjectID(pod)
-	agentThreadID := h.getAgentThreadID(pod)
-
-	// Create and upload snapshot with retry logic
-	if err := h.snapshotWorkspaceWithRetry(ctx, podName, workspaceID, projectID, agentThreadID); err != nil {
-		log.Printf("Finalizer: all snapshot attempts failed for pod %s: %v", podName, err)
-		// Do NOT remove the finalizer if snapshot fails after all retries
-		// This prevents data loss - the pod will remain until snapshot succeeds
-		return fmt.Errorf("snapshot failed after %d retries, finalizer not removed to prevent data loss: %w", maxSnapshotRetries, err)
+	// Check if pod containers are still running; skip snapshot if not.
+	if !isPodContainersRunning(pod) {
+		log.Printf("Finalizer: pod %s containers not running, skipping snapshot and removing finalizer", podName)
+		return h.forceRemoveFinalizer(ctx, podName, "containers not running")
 	}
 
-	// Remove the finalizer so the pod can be deleted
+	// Extract sandbox ID for snapshot storage; without it we do not store (no restorable key).
+	sandboxID := h.getSandboxID(pod)
+	if sandboxID == "" {
+		log.Printf("Finalizer: pod %s has no sandbox/sessionId annotation, skipping snapshot and removing finalizer", podName)
+		return h.forceRemoveFinalizer(ctx, podName, "no sessionId annotation")
+	}
+
+	// Create and upload snapshot with retry logic
+	if err := h.snapshotWorkspaceWithRetry(ctx, podName, sandboxID); err != nil {
+		log.Printf("Finalizer: snapshot failed for pod %s: %v", podName, err)
+
+		// Increment cross-cycle failure counter
+		h.failMu.Lock()
+		h.failCounts[podName]++
+		totalAttempts := h.failCounts[podName]
+		h.failMu.Unlock()
+
+		if totalAttempts >= maxTotalSnapshotAttempts {
+			log.Printf("Finalizer: WARNING: pod %s exceeded %d total snapshot attempts, FORCIBLY removing finalizer (DATA LOSS)", podName, maxTotalSnapshotAttempts)
+			return h.forceRemoveFinalizer(ctx, podName, "max attempts exceeded")
+		}
+
+		return fmt.Errorf("snapshot failed (attempt %d/%d total): %w", totalAttempts, maxTotalSnapshotAttempts, err)
+	}
+
+	// Snapshot succeeded — remove the finalizer normally
 	if err := h.removeFinalizerWithRetry(ctx, podName); err != nil {
 		return fmt.Errorf("failed to remove finalizer: %w", err)
 	}
 
+	// Clean up the failure counter on success
+	h.clearFailCount(podName)
+
 	log.Printf("Finalizer: completed processing pod %s", podName)
 	return nil
+}
+
+// forceRemoveFinalizer forcibly removes the finalizer from a pod,
+// accepting potential data loss. Used when snapshot permanently fails.
+func (h *Handler) forceRemoveFinalizer(ctx context.Context, podName, reason string) error {
+	if err := h.removeFinalizerWithRetry(ctx, podName); err != nil {
+		return fmt.Errorf("failed to force-remove finalizer for pod %s (%s): %w", podName, reason, err)
+	}
+	h.clearFailCount(podName)
+	log.Printf("Finalizer: forcibly removed finalizer for pod %s (reason: %s)", podName, reason)
+	return nil
+}
+
+// clearFailCount removes the failure counter for a pod.
+func (h *Handler) clearFailCount(podName string) {
+	h.failMu.Lock()
+	delete(h.failCounts, podName)
+	h.failMu.Unlock()
+}
+
+// isPodContainersRunning checks if at least one container in the pod is running.
+// If all containers have terminated, snapshot will fail, so we skip it.
+func isPodContainersRunning(pod *v1.Pod) bool {
+	if pod.Status.Phase == v1.PodFailed || pod.Status.Phase == v1.PodSucceeded {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Running != nil {
+			return true
+		}
+	}
+	// No running containers found — check if there are any container statuses at all
+	// (a pod may not have statuses yet if containers haven't started)
+	return len(pod.Status.ContainerStatuses) == 0
 }
 
 // removeFinalizerWithRetry removes the finalizer with retry logic
@@ -228,7 +306,7 @@ func (h *Handler) removeFinalizerWithRetry(ctx context.Context, podName string) 
 }
 
 // snapshotWorkspaceWithRetry creates a snapshot with retry logic
-func (h *Handler) snapshotWorkspaceWithRetry(ctx context.Context, podName, workspaceID, projectID, agentThreadID string) error {
+func (h *Handler) snapshotWorkspaceWithRetry(ctx context.Context, podName, sandboxID string) error {
 	var lastErr error
 	backoff := snapshotBaseBackoff
 
@@ -236,7 +314,7 @@ func (h *Handler) snapshotWorkspaceWithRetry(ctx context.Context, podName, works
 		// Create a context with timeout for each snapshot attempt
 		snapshotCtx, cancel := context.WithTimeout(ctx, h.snapshotTimeout)
 
-		err := h.snapshotWorkspace(snapshotCtx, podName, workspaceID, projectID, agentThreadID)
+		err := h.snapshotWorkspace(snapshotCtx, podName, sandboxID)
 		cancel() // Always cancel the context
 
 		if err == nil {
@@ -268,7 +346,7 @@ func (h *Handler) snapshotWorkspaceWithRetry(ctx context.Context, podName, works
 }
 
 // snapshotWorkspace creates a snapshot of the workspace and uploads it to storage
-func (h *Handler) snapshotWorkspace(ctx context.Context, podName, workspaceID, projectID, agentThreadID string) error {
+func (h *Handler) snapshotWorkspace(ctx context.Context, podName, sandboxID string) error {
 	// Create a snapshot of the workspace
 	snapshot, err := h.k8sClient.SnapshotWorkspace(ctx, h.namespace, podName)
 	if err != nil {
@@ -276,9 +354,12 @@ func (h *Handler) snapshotWorkspace(ctx context.Context, podName, workspaceID, p
 	}
 	defer snapshot.Close()
 
-	// Generate the storage key for the snapshot
-	key := h.storageClient.GenerateSnapshotKey(workspaceID, projectID, agentThreadID)
-	log.Printf("Finalizer: uploading snapshot for pod %s to %s", podName, key)
+	// Generate the storage key: snapshots/{sandboxID}/{timestamp}.tar.gz
+	key, err := h.storageClient.GenerateSnapshotKey(sandboxID)
+	if err != nil {
+		return fmt.Errorf("failed to generate snapshot key: %w", err)
+	}
+	log.Printf("Finalizer: uploading snapshot for pod %s (sandbox=%s) to %s", podName, sandboxID, key)
 
 	// Note: We don't know the size ahead of time, so we pass -1
 	// The storage client should handle this appropriately
@@ -290,55 +371,15 @@ func (h *Handler) snapshotWorkspace(ctx context.Context, podName, workspaceID, p
 	return nil
 }
 
-// getWorkspaceID extracts the workspace ID from a pod
-func (h *Handler) getWorkspaceID(pod *v1.Pod) string {
-	// Try to get workspace ID from annotations first
+// getSandboxID extracts the sandbox ID from a pod.
+// Reads from the sandbox/sessionId annotation set during pod creation.
+// Returns empty string if the annotation is missing; in that case we do not store a snapshot
+// (no fallback to pod name, since that key would not be restorable by session ID).
+func (h *Handler) getSandboxID(pod *v1.Pod) string {
 	if pod.Annotations != nil {
-		if wsID, ok := pod.Annotations["workspace_id"]; ok {
-			return wsID
+		if id, ok := pod.Annotations["sandbox/sessionId"]; ok && id != "" {
+			return id
 		}
 	}
-
-	// Try to get from labels
-	if pod.Labels != nil {
-		if wsID, ok := pod.Labels["workspace_id"]; ok {
-			return wsID
-		}
-	}
-
-	// Fall back to using the pod name
-	return fmt.Sprintf("ws_%s", pod.Name)
-}
-
-// getProjectID extracts the project ID from a pod
-func (h *Handler) getProjectID(pod *v1.Pod) string {
-	// Try to get project ID from annotations first
-	if pod.Annotations != nil {
-		if projID, ok := pod.Annotations["project_id"]; ok {
-			return projID
-		}
-	}
-
-	// Try to get from labels
-	if pod.Labels != nil {
-		if projID, ok := pod.Labels["project_id"]; ok {
-			return projID
-		}
-	}
-
-	// Fall back to a default value
-	return "proj_default"
-}
-
-// getAgentThreadID extracts the agent thread ID from a pod
-func (h *Handler) getAgentThreadID(pod *v1.Pod) string {
-	// Try to get from labels
-	if pod.Labels != nil {
-		if atID, ok := pod.Labels["agent_thread_id"]; ok {
-			return atID
-		}
-	}
-
-	// Fall back to using the pod name
-	return fmt.Sprintf("at_%s", pod.Name)
+	return ""
 }

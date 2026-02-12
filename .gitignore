@@ -55,6 +55,9 @@ tools/offline/config/registry.config
 *.swo
 .cursor/
 
+# Coverage files
+*.out
+
 # 测试文件
 test-*/
 *-test/

@@ -426,7 +426,10 @@ func TestBuildPodSpec(t *testing.T) {
 		},
 	}
 
-	podSpec := buildPodSpec(spec)
+	podSpec, err := buildPodSpec(spec)
+	if err != nil {
+		t.Fatalf("buildPodSpec() unexpected error: %v", err)
+	}
 
 	// Verify basic properties
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
@@ -489,9 +492,11 @@ func TestBuildResources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resources := buildResources(tt.requests, tt.limits)
+			resources, err := buildResources(tt.requests, tt.limits)
+			if err != nil {
+				t.Fatalf("buildResources() unexpected error: %v", err)
+			}
 
-			// Just verify it doesn't panic
 			if resources.Requests == nil {
 				t.Error("buildResources() Requests is nil")
 			}

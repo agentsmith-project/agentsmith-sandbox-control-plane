@@ -1,10 +1,3 @@
-# Build stage for shell-bridge
-FROM golang:1.21-alpine AS shellbridge
-WORKDIR /src
-COPY shell-bridge/ .
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -o /shellb ./cmd/shellb
-
 FROM ubuntu:22.04 AS base
 
 # 代理配置（可选，仅用于构建时，不会保留在最终镜像中）
@@ -98,27 +91,24 @@ RUN mkdir -p /root/.pip /etc/pip && \
 RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="${http_proxy}" https_proxy="${https_proxy}" NO_PROXY="${NO_PROXY}" no_proxy="${no_proxy}" && \
     pip3 install --no-cache-dir uv
 
-# 安装现代命令行工具（ripgrep, fd, bat）- 使用 ARG 变量
+# 安装现代命令行工具（ripgrep, fd, bat）- 下载到文件再解压，避免 curl|tar 管道截断导致损坏；带重试
 RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="${http_proxy}" https_proxy="${https_proxy}" NO_PROXY="${NO_PROXY}" no_proxy="${no_proxy}" && \
-    curl -L "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz" | \
-    tar -xz -C /tmp && \
-    cp /tmp/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg /usr/local/bin/ && \
-    chmod +x /usr/local/bin/rg && \
-    curl -L "https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/fd-v${FD_VERSION}-x86_64-unknown-linux-musl.tar.gz" | \
-    tar -xz -C /tmp && \
-    cp /tmp/fd-v${FD_VERSION}-x86_64-unknown-linux-musl/fd /usr/local/bin/ && \
-    chmod +x /usr/local/bin/fd && \
-    curl -L "https://github.com/sharkdp/bat/releases/download/v${BAT_VERSION}/bat-v${BAT_VERSION}-x86_64-unknown-linux-musl.tar.gz" | \
-    tar -xz -C /tmp && \
-    cp /tmp/bat-v${BAT_VERSION}-x86_64-unknown-linux-musl/bat /usr/local/bin/ && \
-    chmod +x /usr/local/bin/bat && \
-    rm -rf /tmp/ripgrep-* /tmp/fd-* /tmp/bat-*
+    CURL_OPTS="-fSL --retry 3 --retry-delay 2 --retry-max-time 300" && \
+    curl $CURL_OPTS -o /tmp/rg.tar.gz "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
+    tar -xz -C /tmp -f /tmp/rg.tar.gz && \
+    cp /tmp/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg /usr/local/bin/ && chmod +x /usr/local/bin/rg && \
+    curl $CURL_OPTS -o /tmp/fd.tar.gz "https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/fd-v${FD_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
+    tar -xz -C /tmp -f /tmp/fd.tar.gz && \
+    cp /tmp/fd-v${FD_VERSION}-x86_64-unknown-linux-musl/fd /usr/local/bin/ && chmod +x /usr/local/bin/fd && \
+    curl $CURL_OPTS -o /tmp/bat.tar.gz "https://github.com/sharkdp/bat/releases/download/v${BAT_VERSION}/bat-v${BAT_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
+    tar -xz -C /tmp -f /tmp/bat.tar.gz && \
+    cp /tmp/bat-v${BAT_VERSION}-x86_64-unknown-linux-musl/bat /usr/local/bin/ && chmod +x /usr/local/bin/bat && \
+    rm -rf /tmp/rg.tar.gz /tmp/fd.tar.gz /tmp/bat.tar.gz /tmp/ripgrep-* /tmp/fd-* /tmp/bat-*
 
-# 安装 Node.js LTS 版本（直接下载二进制文件，更快且不依赖 apt）
-# 注意：ENV 变量在 RUN 中可以直接使用
+# 安装 Node.js LTS 版本（直接下载到文件再解压，带重试）
 RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="${http_proxy}" https_proxy="${https_proxy}" NO_PROXY="${NO_PROXY}" no_proxy="${no_proxy}" && \
-    curl -fsSL "https://npmmirror.com/mirrors/node/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | \
-    tar -xJ -C /usr/local --strip-components=1 && \
+    curl -fSL --retry 3 --retry-delay 2 --retry-max-time 600 -o /tmp/node.tar.xz "https://npmmirror.com/mirrors/node/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" && \
+    tar -xJ -C /usr/local --strip-components=1 -f /tmp/node.tar.xz && rm -f /tmp/node.tar.xz && \
     # 配置 npm 使用清华源
     npm config set registry https://registry.npmmirror.com && \
     # 全局安装常用 Node.js 开发工具
@@ -206,9 +196,6 @@ RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="$
 
 FROM base AS final
 
-# Copy shell-bridge binary
-COPY --from=shellbridge /shellb /usr/local/bin/shellb
-
 # 创建用户和配置（合并操作以减少层数）
 RUN groupadd -g 10001 runner && \
     useradd -m -u 10001 -g 10001 runner && \
@@ -226,4 +213,4 @@ WORKDIR /workspace
 
 USER runner
 ENTRYPOINT ["/usr/bin/tini","--"]
-CMD ["/usr/local/bin/shellb","--shell=bash","--port=8080","--workdir=/workspace"]
+CMD ["sleep","infinity"]
