@@ -29,60 +29,12 @@ server:
     configPath: "/debug/config"
 auth:
   headerName: "X-Service-Key"
-  authorizationScheme: "ServiceKey"
-  failStatusCode: 401
-  serviceKeys:
-    - "test-key-1"
-    - "test-key-2"
 kubernetes:
   qps: 50
   burst: 100
   requestTimeout: 15s
-sandbox:
-  defaults:
-    namespace: "sandbox"
-    runnerImage: "runner:1.0.0"
-    imagePullPolicy: "IfNotPresent"
-    ttlSeconds: 900
-    podReadyWait: 30s
-    podPollInterval: 500ms
-    containerName: "runner"
-    workdir: "/workspace"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "256Mi"
-      limits:
-        cpu: "1"
-        memory: "1Gi"
-exec:
-  defaultTimeout: 30s
-  maxTimeout: 300s
-  stdoutMaxBytes: 1048576
-  stderrMaxBytes: 1048576
-  preserveTailBytes: 4096
-  exitCodeMarker:
-    key: "__EXIT__"
-    stream: "stderr"
-  shell:
-    bin: "sh"
-    args: ["-c"]
-  env:
-    allowRegex: "^[A-Z_][A-Z0-9_]*$"
-  workdir:
-    allowedPrefixes:
-      - "/workspace"
-files:
-  rootPrefix: "/workspace"
-  upload:
-    defaultDest: "/workspace"
-    maxBytes: 52428800
-    format: "tar.gz"
-  download:
-    defaultSrc: "/workspace"
-    format: "tar.gz"
-  tar:
-    bin: "tar"
+rateLimit:
+  requestsPerMinute: 60
 `
 		err := os.WriteFile(configPath, []byte(configContent), 0644)
 		if err != nil {
@@ -252,10 +204,7 @@ func TestApplyDefaults(t *testing.T) {
 			validate: func(cfg *Config) bool {
 				return cfg.Server.HTTPPort != 0 &&
 					cfg.Server.RequestIDHeader != "" &&
-					cfg.Kubernetes.QPS != 0 &&
-					cfg.Sandbox.Defaults.Namespace != "" &&
-					cfg.Exec.DefaultTimeout != 0 &&
-					cfg.Files.RootPrefix != ""
+					cfg.Kubernetes.QPS != 0
 			},
 		},
 		{
@@ -359,22 +308,20 @@ func TestConfig_Clone(t *testing.T) {
 				},
 				Auth: AuthConfig{
 					HeaderName: "X-Auth-Key",
-					Enabled:     true,
+					Enabled:    true,
 				},
 			},
 		},
 		{
-			name: "config with slices",
+			name: "config with all fields",
 			cfg: &Config{
 				Version: 1,
 				Auth: AuthConfig{
 					HeaderName: "X-Auth-Key",
-					Enabled:     true,
+					Enabled:    true,
 				},
-				Exec: ExecConfig{
-					Workdir: WorkdirConfig{
-						AllowedPrefixes: []string{"/workspace", "/tmp"},
-					},
+				RateLimit: RateLimitConfig{
+					RequestsPerMinute: 120,
 				},
 			},
 		},

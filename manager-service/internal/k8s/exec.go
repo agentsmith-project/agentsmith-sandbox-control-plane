@@ -63,7 +63,7 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 	}
 
 	if opts.Container == "" {
-		opts.Container = "runner" // default container name
+		opts.Container = "main"
 	}
 
 	startTime := time.Now()
@@ -305,24 +305,4 @@ func findLastMarkerStart(output, markerPrefix string) int {
 	}
 
 	return lastIdx
-}
-
-// indexOf finds the first occurrence of substr in s starting from idx
-func indexOf(s, substr string, idx int) int {
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(s) {
-		return -1
-	}
-	if substr == "" {
-		return idx
-	}
-
-	for i := idx; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

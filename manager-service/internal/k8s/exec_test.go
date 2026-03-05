@@ -3,7 +3,6 @@ package k8s
 import (
 	"io"
 	"net/url"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -344,48 +343,6 @@ func TestURLBuilding(t *testing.T) {
 
 	if baseURL.Query().Get("container") != "runner" {
 		t.Error("Failed to set container query parameter")
-	}
-}
-
-// TestPodNameGeneration verifies the PodName function
-func TestPodNameGeneration(t *testing.T) {
-	tests := []struct {
-		name      string
-		sessionID string
-		wantLen   int
-	}{
-		{
-			name:      "normal session ID",
-			sessionID: "test-session-123",
-			wantLen:   14, // "sbx-" + 10 chars
-		},
-		{
-			name:      "short session ID",
-			sessionID: "abc",
-			wantLen:   14,
-		},
-		{
-			name:      "long session ID",
-			sessionID: "very-long-session-id-with-lots-of-characters",
-			wantLen:   14,
-		},
-		{
-			name:      "session ID with special chars",
-			sessionID: "session_123!@#",
-			wantLen:   14,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := PodName(tt.sessionID)
-			if len(got) != tt.wantLen {
-				t.Errorf("PodName() length = %v, want %v", len(got), tt.wantLen)
-			}
-			if !reflect.DeepEqual(got[:4], "sbx-") {
-				t.Errorf("PodName() prefix = %v, want 'sbx-'", got[:4])
-			}
-		})
 	}
 }
 

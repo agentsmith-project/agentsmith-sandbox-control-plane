@@ -83,27 +83,3 @@ func ParseServiceKeys(keysStr string) []string {
 
 	return keys
 }
-
-// ExtractServiceKey extracts the service key from the Authorization header
-// if it matches the expected scheme
-func ExtractServiceKey(authHeader, scheme string) (string, error) {
-	if authHeader == "" {
-		return "", fmt.Errorf("empty authorization header")
-	}
-
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid authorization header format")
-	}
-
-	if parts[0] != scheme {
-		return "", fmt.Errorf("unexpected authorization scheme: %s", parts[0])
-	}
-
-	key := strings.TrimSpace(parts[1])
-	if key == "" {
-		return "", fmt.Errorf("empty key in authorization header")
-	}
-
-	return key, nil
-}

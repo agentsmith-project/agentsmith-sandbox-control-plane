@@ -504,15 +504,6 @@ func TestContextCancellation(t *testing.T) {
 	t.Skip("Skipping ContextCancellation test - requires real clientset")
 }
 
-// BenchmarkPodNameGeneration benchmarks the PodName function
-func BenchmarkPodNameGeneration(b *testing.B) {
-	sessionID := "test-session-123456"
-
-	for i := 0; i < b.N; i++ {
-		_ = PodName(sessionID)
-	}
-}
-
 // BenchmarkIsPodReady benchmarks the IsPodReady function
 func BenchmarkIsPodReady(b *testing.B) {
 	pod := &v1.Pod{

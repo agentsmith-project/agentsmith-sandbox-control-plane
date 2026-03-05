@@ -2,11 +2,10 @@
 
 ## 概述
 
-Manager Service 是 Sandbox 系统的核心服务，提供 HTTP API 用于：
-- 创建和管理沙箱 Pod
-- 在 Pod 中执行命令
-- 文件上传和下载
-- 会话管理（TTL、活动跟踪）
+Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HTTP API：
+- 创建和管理 workload Pod（JVS 工作区由 manager 分配）
+- 在 Pod 中执行命令（exec）
+- 客户端 keepalive 续期（超时未收到 keepalive 则由 cleaner 回收 Pod）
 
 ## 快速开始
 
@@ -61,7 +60,7 @@ export SERVICE_KEYS="test-key-123"
 
 ## API 文档
 
-详细 API 文档请参考 `../docs/API.md`。
+详细 API 文档请参考项目根目录 `docs/api-reference-v2.md`。
 
 ## 版本管理
 

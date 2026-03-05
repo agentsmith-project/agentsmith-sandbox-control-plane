@@ -13,21 +13,21 @@ import (
 )
 
 const (
-	sandboxAppLabel    = "sandbox"
+	sandboxAppLabel     = "sandbox"
+	workloadAppLabel    = "managed-workload"
 	expiresAtAnnotation = "expires_at"
 )
 
+// Cleaner deletes pods whose expires_at annotation is in the past. Activity is driven by
+// client keepalive; the manager does not perform snapshot or GC on cleanup—resource lifecycle is manager-controlled.
 func main() {
-	// Parse command-line flags
 	namespace := flag.String("namespace", "default", "Kubernetes namespace to scan for expired pods")
 	dryRun := flag.Bool("dry-run", true, "If true, only print what would be deleted without actually deleting")
 	flag.Parse()
 
 	klog.Infof("Starting sandbox pod cleaner")
-	klog.Infof("Namespace: %s", *namespace)
-	klog.Infof("Dry-run: %v", *dryRun)
+	klog.Infof("Namespace: %s, dry-run: %v", *namespace, *dryRun)
 
-	// Create Kubernetes client
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("Error creating in-cluster config: %v", err)
@@ -38,17 +38,20 @@ func main() {
 		klog.Fatalf("Error creating Kubernetes client: %v", err)
 	}
 
-	// Run the cleaner
 	ctx := context.Background()
+
 	if err := runCleaner(ctx, clientset, *namespace, *dryRun); err != nil {
-		klog.Fatalf("Cleaner failed: %v", err)
+		klog.Errorf("Sandbox cleaner failed: %v", err)
+	}
+
+	if err := runWorkloadCleaner(ctx, clientset, *namespace, *dryRun); err != nil {
+		klog.Errorf("Workload cleaner failed: %v", err)
 	}
 
 	klog.Infof("Cleaner completed successfully")
 }
 
 func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool) error {
-	// List all pods with the sandbox app label
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", sandboxAppLabel),
 	})
@@ -105,8 +108,57 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 	return nil
 }
 
+func runWorkloadCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool) error {
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", workloadAppLabel),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list workload pods: %w", err)
+	}
+
+	klog.Infof("Found %d workload pods (app=%s)", len(pods.Items), workloadAppLabel)
+
+	now := time.Now()
+	expiredCount := 0
+
+	for _, pod := range pods.Items {
+		expiresAtStr, hasExpiry := pod.Annotations[expiresAtAnnotation]
+		if !hasExpiry {
+			continue
+		}
+
+		expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+		if err != nil {
+			klog.Warningf("Workload pod %s: invalid expires_at %q: %v", pod.Name, expiresAtStr, err)
+			continue
+		}
+
+		if !now.After(expiresAt) {
+			continue
+		}
+
+		klog.Infof("Workload pod %s expired at %s (no keepalive)", pod.Name, expiresAt.Format(time.RFC3339))
+
+		if dryRun {
+			klog.Infof("[DRY-RUN] Would delete workload pod %s", pod.Name)
+			expiredCount++
+			continue
+		}
+
+		klog.Infof("Deleting workload pod %s", pod.Name)
+		if err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("Failed to delete workload pod %s: %v", pod.Name, err)
+			continue
+		}
+		klog.Infof("Successfully deleted workload pod %s", pod.Name)
+		expiredCount++
+	}
+
+	klog.Infof("Workload scan complete: %d expired out of %d total", expiredCount, len(pods.Items))
+	return nil
+}
+
 func init() {
-	// Configure klog to use stderr
 	flag.Set("logtostderr", "true")
 	flag.Set("alsologtostderr", "false")
 }

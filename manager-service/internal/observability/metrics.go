@@ -40,25 +40,23 @@ func (w *ResponseWriterWrapper) Unwrap() http.ResponseWriter {
 }
 
 // PatternizePath converts specific paths to patterns to avoid high cardinality
-// e.g., /v1/sandboxes/abc123touch -> /v1/sandboxes/{sessionId}/touch
+// e.g., /v1/workspaces/ws-1/projects/p-1/workloads/wl-1/exec -> /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/exec
 func PatternizePath(path string) string {
-	// Fast path for non-API routes
 	if !strings.HasPrefix(path, "/v1/") {
 		return path
 	}
 
-	// Parse the path
 	parts := strings.Split(path, "/")
 	if len(parts) < 4 {
 		return path
 	}
 
-	// Patternize /v1/sandboxes/{sessionId}/* routes
-	if parts[1] == "v1" && parts[2] == "sandboxes" && len(parts) >= 4 {
-		// Replace the session ID (parts[3]) with {sessionId}
-		result := "/v1/sandboxes/{sessionId}"
-		if len(parts) > 4 {
-			result += "/" + strings.Join(parts[4:], "/")
+	// Patternize /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}[/action]
+	if parts[1] == "v1" && parts[2] == "workspaces" && len(parts) >= 8 {
+		// parts: ["", "v1", "workspaces", wsId, "projects", projId, "workloads", wlId, ...]
+		result := "/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}"
+		if len(parts) > 8 {
+			result += "/" + strings.Join(parts[8:], "/")
 		}
 		return result
 	}
@@ -75,12 +73,10 @@ type MetricsRegistry struct {
 	httpRequestDuration map[string]*Histogram // method:path -> histogram
 
 	// Business metrics
-	sandboxCreateTotal   int64
-	sandboxTouchTotal    int64
-	sandboxExecTotal     int64
-	sandboxUploadTotal   int64
-	sandboxDownloadTotal int64
-	sandboxDeleteTotal   int64
+	workloadCreateTotal int64
+	workloadKeepaliveTotal int64
+	workloadExecTotal   int64
+	workloadDeleteTotal int64
 
 	// Config metrics
 	configReloadSuccess int64
@@ -151,46 +147,32 @@ func (m *MetricsRegistry) RecordHTTPRequest(method, path string, statusCode int,
 	m.httpRequestDuration[durationKey].Observe(duration.Seconds())
 }
 
-// RecordSandboxCreate records a sandbox creation
-func (m *MetricsRegistry) RecordSandboxCreate() {
+// RecordWorkloadCreate records a workload creation
+func (m *MetricsRegistry) RecordWorkloadCreate() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sandboxCreateTotal++
+	m.workloadCreateTotal++
 }
 
-// RecordSandboxTouch records a sandbox touch
-func (m *MetricsRegistry) RecordSandboxTouch() {
+// RecordWorkloadKeepalive records a workload keepalive (client heartbeat)
+func (m *MetricsRegistry) RecordWorkloadKeepalive() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sandboxTouchTotal++
+	m.workloadKeepaliveTotal++
 }
 
-// RecordSandboxExec records a sandbox exec
-func (m *MetricsRegistry) RecordSandboxExec() {
+// RecordWorkloadExec records a workload exec
+func (m *MetricsRegistry) RecordWorkloadExec() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sandboxExecTotal++
+	m.workloadExecTotal++
 }
 
-// RecordSandboxUpload records a file upload
-func (m *MetricsRegistry) RecordSandboxUpload() {
+// RecordWorkloadDelete records a workload deletion
+func (m *MetricsRegistry) RecordWorkloadDelete() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sandboxUploadTotal++
-}
-
-// RecordSandboxDownload records a file download
-func (m *MetricsRegistry) RecordSandboxDownload() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sandboxDownloadTotal++
-}
-
-// RecordSandboxDelete records a sandbox deletion
-func (m *MetricsRegistry) RecordSandboxDelete() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sandboxDeleteTotal++
+	m.workloadDeleteTotal++
 }
 
 // RecordConfigReloadSuccess records a successful config reload
@@ -293,40 +275,28 @@ func (m *MetricsRegistry) Handler() http.HandlerFunc {
 		}
 
 		// Business metrics
-		io.WriteString(w, "\n# HELP sandbox_create_total Total number of sandboxes created\n")
-		io.WriteString(w, "# TYPE sandbox_create_total counter\n")
-		io.WriteString(w, "sandbox_create_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxCreateTotal, 10))
+		io.WriteString(w, "\n# HELP workload_create_total Total number of workloads created\n")
+		io.WriteString(w, "# TYPE workload_create_total counter\n")
+		io.WriteString(w, "workload_create_total ")
+		io.WriteString(w, strconv.FormatInt(m.workloadCreateTotal, 10))
 		io.WriteString(w, "\n")
 
-		io.WriteString(w, "\n# HELP sandbox_touch_total Total number of sandbox touches\n")
-		io.WriteString(w, "# TYPE sandbox_touch_total counter\n")
-		io.WriteString(w, "sandbox_touch_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxTouchTotal, 10))
+		io.WriteString(w, "\n# HELP workload_keepalive_total Total number of workload keepalives\n")
+		io.WriteString(w, "# TYPE workload_keepalive_total counter\n")
+		io.WriteString(w, "workload_keepalive_total ")
+		io.WriteString(w, strconv.FormatInt(m.workloadKeepaliveTotal, 10))
 		io.WriteString(w, "\n")
 
-		io.WriteString(w, "\n# HELP sandbox_exec_total Total number of sandbox execs\n")
-		io.WriteString(w, "# TYPE sandbox_exec_total counter\n")
-		io.WriteString(w, "sandbox_exec_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxExecTotal, 10))
+		io.WriteString(w, "\n# HELP workload_exec_total Total number of workload execs\n")
+		io.WriteString(w, "# TYPE workload_exec_total counter\n")
+		io.WriteString(w, "workload_exec_total ")
+		io.WriteString(w, strconv.FormatInt(m.workloadExecTotal, 10))
 		io.WriteString(w, "\n")
 
-		io.WriteString(w, "\n# HELP sandbox_upload_total Total number of file uploads\n")
-		io.WriteString(w, "# TYPE sandbox_upload_total counter\n")
-		io.WriteString(w, "sandbox_upload_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxUploadTotal, 10))
-		io.WriteString(w, "\n")
-
-		io.WriteString(w, "\n# HELP sandbox_download_total Total number of file downloads\n")
-		io.WriteString(w, "# TYPE sandbox_download_total counter\n")
-		io.WriteString(w, "sandbox_download_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxDownloadTotal, 10))
-		io.WriteString(w, "\n")
-
-		io.WriteString(w, "\n# HELP sandbox_delete_total Total number of sandbox deletions\n")
-		io.WriteString(w, "# TYPE sandbox_delete_total counter\n")
-		io.WriteString(w, "sandbox_delete_total ")
-		io.WriteString(w, strconv.FormatInt(m.sandboxDeleteTotal, 10))
+		io.WriteString(w, "\n# HELP workload_delete_total Total number of workload deletions\n")
+		io.WriteString(w, "# TYPE workload_delete_total counter\n")
+		io.WriteString(w, "workload_delete_total ")
+		io.WriteString(w, strconv.FormatInt(m.workloadDeleteTotal, 10))
 		io.WriteString(w, "\n")
 
 		// Config metrics

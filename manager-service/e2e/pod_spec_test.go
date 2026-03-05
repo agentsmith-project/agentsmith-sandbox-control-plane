@@ -1,0 +1,419 @@
+//go:build e2e
+
+package e2e_test
+
+// pod_spec_test.go – Validates the Kubernetes Pod spec produced by the manager.
+//
+// Each test directly inspects the K8s Pod object via the API, verifying that:
+//   - Labels match the API contract (workload_id, workspace_id, project_id, app)
+//   - Annotations carry the lifecycle metadata (expires_at, last_activity_at, timeouts)
+//   - Pod-level SecurityContext enforces non-root execution with correct UID/GID
+//   - Container-level SecurityContext complies with K8s "restricted" PSS
+//   - PVC volume mount uses the correct subPath format {wsID}/{wlID}
+//   - Container working directory is /workspace
+//   - RestartPolicy=Never and AutomountServiceAccountToken=false are set
+//   - Environment variables include WORKSPACE_PATH + user-supplied vars
+//   - Resource requests/limits are applied exactly as requested
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+)
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// fetchPod retrieves the Pod object from Kubernetes.
+func fetchPod(t *testing.T, podName string) *v1.Pod {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pod, err := k8sCli.CoreV1().Pods(suite.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	require.NoError(t, err, "get pod %s: %v", podName, err)
+	return pod
+}
+
+// setupPod creates a workload and returns the Pod object for spec inspection.
+// mustCreateWorkload already waits for the pod to be Ready, so we only need
+// waitPodExists (the pod is guaranteed to be present and Running by this point).
+func setupPod(t *testing.T, prefix string, req CreateRequest) (wlID string, pod *v1.Pod) {
+	t.Helper()
+	wlID = uniqueID(prefix)
+	_ = mustCreateWorkload(t, testWS, testProj, wlID, req)
+	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
+	podName := "workload-" + wlID
+	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
+	return wlID, fetchPod(t, podName)
+}
+
+// ---------------------------------------------------------------------------
+// Labels
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_Labels verifies all four mandatory labels are set correctly.
+func TestPodSpec_Labels(t *testing.T) {
+	wlID, pod := setupPod(t, "spec-labels", CreateRequest{Image: suite.Image})
+
+	labels := pod.Labels
+	assert.Equal(t, "managed-workload", labels["app"], "app label must be 'managed-workload'")
+	assert.Equal(t, wlID, labels["workload_id"], "workload_id label must match the requested ID")
+	assert.Equal(t, testWS, labels["workspace_id"], "workspace_id label must match wsID in the URL")
+	assert.Equal(t, testProj, labels["project_id"], "project_id label must match projID in the URL")
+}
+
+// ---------------------------------------------------------------------------
+// Annotations
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_AnnotationsPresent verifies all lifecycle annotations are present
+// and parseable immediately after pod creation.
+func TestPodSpec_AnnotationsPresent(t *testing.T) {
+	_, pod := setupPod(t, "spec-ann", CreateRequest{
+		Image:          suite.Image,
+		IdleTimeoutSec: 600,
+		MaxLifetimeSec: 3600,
+	})
+
+	ann := pod.Annotations
+	requiredAnnotations := []string{
+		"expires_at",
+		"last_activity_at",
+		"workload/idleTimeoutSec",
+		"workload/maxLifetimeSec",
+		"workload/maxExpiresAt",
+	}
+	for _, key := range requiredAnnotations {
+		assert.NotEmpty(t, ann[key], "annotation %q must be present and non-empty", key)
+	}
+
+	// Validate RFC3339 format on time annotations.
+	for _, key := range []string{"expires_at", "last_activity_at", "workload/maxExpiresAt"} {
+		_, err := time.Parse(time.RFC3339, ann[key])
+		assert.NoError(t, err, "annotation %q must be valid RFC3339: %q", key, ann[key])
+	}
+
+	assert.Equal(t, "600", ann["workload/idleTimeoutSec"])
+	assert.Equal(t, "3600", ann["workload/maxLifetimeSec"])
+}
+
+// TestPodSpec_AnnotationsDefaultTimeouts verifies default idle/max-lifetime
+// annotations are set when the request does not specify custom values.
+func TestPodSpec_AnnotationsDefaultTimeouts(t *testing.T) {
+	_, pod := setupPod(t, "spec-ann-defaults", CreateRequest{Image: suite.Image})
+
+	ann := pod.Annotations
+	assert.Equal(t, fmt.Sprintf("%d", int(DefaultIdleTimeout.Seconds())),
+		ann["workload/idleTimeoutSec"], "default idle timeout must be 30 minutes")
+	assert.Equal(t, "86400", ann["workload/maxLifetimeSec"],
+		"default max lifetime must be 24 hours (86400s)")
+}
+
+// ---------------------------------------------------------------------------
+// Pod-level SecurityContext
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_PodSecurityContext verifies the pod-level security context enforces
+// non-root execution with UID/GID 1000 and the required fsGroup settings.
+func TestPodSpec_PodSecurityContext(t *testing.T) {
+	_, pod := setupPod(t, "spec-pod-sc", CreateRequest{Image: suite.Image})
+
+	sc := pod.Spec.SecurityContext
+	require.NotNil(t, sc, "pod SecurityContext must not be nil")
+
+	require.NotNil(t, sc.RunAsNonRoot, "RunAsNonRoot must be set")
+	assert.True(t, *sc.RunAsNonRoot, "RunAsNonRoot must be true")
+
+	require.NotNil(t, sc.RunAsUser, "RunAsUser must be set")
+	assert.Equal(t, int64(1000), *sc.RunAsUser, "RunAsUser must be 1000")
+
+	require.NotNil(t, sc.RunAsGroup, "RunAsGroup must be set")
+	assert.Equal(t, int64(1000), *sc.RunAsGroup, "RunAsGroup must be 1000")
+
+	require.NotNil(t, sc.FSGroup, "FSGroup must be set")
+	assert.Equal(t, int64(1000), *sc.FSGroup, "FSGroup must be 1000")
+
+	require.NotNil(t, sc.FSGroupChangePolicy, "FSGroupChangePolicy must be set")
+	assert.Equal(t, v1.FSGroupChangeOnRootMismatch, *sc.FSGroupChangePolicy,
+		"FSGroupChangePolicy must be OnRootMismatch")
+}
+
+// ---------------------------------------------------------------------------
+// Container-level SecurityContext (K8s "restricted" PSS compliance)
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_ContainerSecurityContext verifies the container's security context
+// satisfies the Kubernetes "restricted" Pod Security Standard:
+//   - allowPrivilegeEscalation: false
+//   - capabilities.drop: ["ALL"]
+//   - seccompProfile.type: RuntimeDefault
+func TestPodSpec_ContainerSecurityContext(t *testing.T) {
+	_, pod := setupPod(t, "spec-ctn-sc", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.Containers, 1, "must have exactly one container")
+	csc := pod.Spec.Containers[0].SecurityContext
+	require.NotNil(t, csc, "container SecurityContext must not be nil")
+
+	require.NotNil(t, csc.AllowPrivilegeEscalation, "AllowPrivilegeEscalation must be set")
+	assert.False(t, *csc.AllowPrivilegeEscalation,
+		"AllowPrivilegeEscalation must be false (PSS restricted)")
+
+	require.NotNil(t, csc.Capabilities, "Capabilities must be set")
+	require.NotEmpty(t, csc.Capabilities.Drop, "Capabilities.Drop must not be empty")
+	assert.Contains(t, csc.Capabilities.Drop, v1.Capability("ALL"),
+		"Capabilities.Drop must include ALL (PSS restricted)")
+
+	require.NotNil(t, csc.SeccompProfile, "SeccompProfile must be set")
+	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, csc.SeccompProfile.Type,
+		"SeccompProfile.Type must be RuntimeDefault (PSS restricted)")
+}
+
+// ---------------------------------------------------------------------------
+// Volume and workspace mount
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_WorkspaceVolumeMount verifies the workspace PVC is mounted correctly:
+//   - volume name "workspace" backed by suite.PVCName
+//   - mount path /workspace
+//   - subPath = {wsID}/{wlID}  (not flattened)
+func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
+	const wsID = "ws-spec-vol"
+	wlID := uniqueID("spec-vol")
+	_ = mustCreateWorkload(t, wsID, testProj, wlID, CreateRequest{Image: suite.Image})
+	t.Cleanup(func() { newClient().DeleteWorkload(t, wsID, testProj, wlID) })
+
+	podName := "workload-" + wlID
+	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
+	pod := fetchPod(t, podName)
+
+	// Volume definition.
+	require.Len(t, pod.Spec.Volumes, 1, "must have exactly one volume")
+	vol := pod.Spec.Volumes[0]
+	assert.Equal(t, "workspace", vol.Name)
+	require.NotNil(t, vol.PersistentVolumeClaim, "volume must be backed by a PVC")
+	assert.Equal(t, suite.PVCName, vol.PersistentVolumeClaim.ClaimName,
+		"PVC claim name must match E2E_PVC_NAME configuration")
+
+	// Volume mount.
+	require.Len(t, pod.Spec.Containers, 1)
+	vms := pod.Spec.Containers[0].VolumeMounts
+	require.Len(t, vms, 1, "must have exactly one volume mount")
+	vm := vms[0]
+	assert.Equal(t, "workspace", vm.Name)
+	assert.Equal(t, "/workspace", vm.MountPath, "workspace must be mounted at /workspace")
+	assert.Equal(t, fmt.Sprintf("%s/%s", wsID, wlID), vm.SubPath,
+		"subPath must be {wsID}/{wlID}")
+}
+
+// ---------------------------------------------------------------------------
+// Container configuration
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_WorkingDirIsWorkspace verifies the container's workingDir is /workspace.
+func TestPodSpec_WorkingDirIsWorkspace(t *testing.T) {
+	_, pod := setupPod(t, "spec-cwd", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	assert.Equal(t, "/workspace", pod.Spec.Containers[0].WorkingDir,
+		"container workingDir must be /workspace")
+}
+
+// TestPodSpec_WorkspacePathEnvVarInjected verifies WORKSPACE_PATH=/workspace is always
+// present in the container's environment, even when the caller sends no env block.
+func TestPodSpec_WorkspacePathEnvVarInjected(t *testing.T) {
+	_, pod := setupPod(t, "spec-env-ws", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	envMap := make(map[string]string)
+	for _, e := range pod.Spec.Containers[0].Env {
+		envMap[e.Name] = e.Value
+	}
+	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"],
+		"WORKSPACE_PATH must always be injected into the container environment")
+}
+
+// TestPodSpec_UserEnvVarsInjected verifies caller-supplied env vars are forwarded
+// to the container alongside the mandatory WORKSPACE_PATH.
+func TestPodSpec_UserEnvVarsInjected(t *testing.T) {
+	_, pod := setupPod(t, "spec-env-user", CreateRequest{
+		Image: suite.Image,
+		Env: map[string]string{
+			"MY_SECRET":   "abc123",
+			"MY_ENDPOINT": "https://example.com",
+		},
+	})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	envMap := make(map[string]string)
+	for _, e := range pod.Spec.Containers[0].Env {
+		envMap[e.Name] = e.Value
+	}
+	assert.Equal(t, "abc123", envMap["MY_SECRET"], "MY_SECRET must be forwarded to container")
+	assert.Equal(t, "https://example.com", envMap["MY_ENDPOINT"], "MY_ENDPOINT must be forwarded")
+	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must still be present")
+}
+
+// TestPodSpec_DefaultCommandIsKeepAlive verifies that when no command is specified
+// the container uses the default keep-alive command [tail, -f, /dev/null].
+func TestPodSpec_DefaultCommandIsKeepAlive(t *testing.T) {
+	_, pod := setupPod(t, "spec-cmd-default", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	assert.Equal(t, []string{"tail", "-f", "/dev/null"},
+		pod.Spec.Containers[0].Command,
+		"default command must be [tail -f /dev/null]")
+}
+
+// TestPodSpec_CustomCommandApplied verifies that a caller-specified command is
+// forwarded verbatim to the container spec.
+func TestPodSpec_CustomCommandApplied(t *testing.T) {
+	customCmd := []string{"python3", "-m", "http.server", "8080"}
+	_, pod := setupPod(t, "spec-cmd-custom", CreateRequest{
+		Image:   suite.Image,
+		Command: customCmd,
+	})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	assert.Equal(t, customCmd, pod.Spec.Containers[0].Command,
+		"custom command must be forwarded to the container")
+}
+
+// ---------------------------------------------------------------------------
+// Restart policy and service account
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_RestartPolicyNever verifies RestartPolicy=Never so that the workload
+// Pod never restarts automatically after an agent process exits.
+func TestPodSpec_RestartPolicyNever(t *testing.T) {
+	_, pod := setupPod(t, "spec-restart", CreateRequest{Image: suite.Image})
+
+	assert.Equal(t, v1.RestartPolicyNever, pod.Spec.RestartPolicy,
+		"RestartPolicy must be Never (agents must not auto-restart)")
+}
+
+// TestPodSpec_AutomountSATokenFalse verifies the pod does not automatically
+// mount the Kubernetes service account token (reduces attack surface).
+func TestPodSpec_AutomountSATokenFalse(t *testing.T) {
+	_, pod := setupPod(t, "spec-sa", CreateRequest{Image: suite.Image})
+
+	require.NotNil(t, pod.Spec.AutomountServiceAccountToken,
+		"AutomountServiceAccountToken must be explicitly set (not left at default)")
+	assert.False(t, *pod.Spec.AutomountServiceAccountToken,
+		"AutomountServiceAccountToken must be false (least privilege)")
+}
+
+// TestPodSpec_TerminationGracePeriod verifies the termination grace period
+// is set to 30 seconds.
+func TestPodSpec_TerminationGracePeriod(t *testing.T) {
+	_, pod := setupPod(t, "spec-term", CreateRequest{Image: suite.Image})
+
+	require.NotNil(t, pod.Spec.TerminationGracePeriodSeconds,
+		"TerminationGracePeriodSeconds must be explicitly set")
+	assert.Equal(t, int64(30), *pod.Spec.TerminationGracePeriodSeconds,
+		"TerminationGracePeriodSeconds must be 30")
+}
+
+// ---------------------------------------------------------------------------
+// Resource requests and limits
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_ResourceRequestsApplied verifies CPU and memory requests from the
+// CreateRequest are reflected in the pod container spec.
+func TestPodSpec_ResourceRequestsApplied(t *testing.T) {
+	_, pod := setupPod(t, "spec-req", CreateRequest{
+		Image:         suite.Image,
+		CPURequest:    "100m",
+		MemoryRequest: "128Mi",
+	})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	res := pod.Spec.Containers[0].Resources
+
+	require.NotNil(t, res.Requests, "requests must be set")
+	cpu := res.Requests[v1.ResourceCPU]
+	mem := res.Requests[v1.ResourceMemory]
+	assert.True(t, cpu.Equal(resource.MustParse("100m")),
+		"cpu_request 100m must appear in pod spec, got %s", cpu.String())
+	assert.True(t, mem.Equal(resource.MustParse("128Mi")),
+		"memory_request 128Mi must appear in pod spec, got %s", mem.String())
+}
+
+// TestPodSpec_ResourceLimitsApplied verifies CPU and memory limits are reflected
+// in the pod container spec.
+func TestPodSpec_ResourceLimitsApplied(t *testing.T) {
+	_, pod := setupPod(t, "spec-lim", CreateRequest{
+		Image:       suite.Image,
+		CPULimit:    "500m",
+		MemoryLimit: "512Mi",
+	})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	res := pod.Spec.Containers[0].Resources
+
+	require.NotNil(t, res.Limits, "limits must be set")
+	cpu := res.Limits[v1.ResourceCPU]
+	mem := res.Limits[v1.ResourceMemory]
+	assert.True(t, cpu.Equal(resource.MustParse("500m")),
+		"cpu_limit 500m must appear in pod spec, got %s", cpu.String())
+	assert.True(t, mem.Equal(resource.MustParse("512Mi")),
+		"memory_limit 512Mi must appear in pod spec, got %s", mem.String())
+}
+
+// TestPodSpec_ResourceRequestsAndLimits verifies all four resource fields are
+// applied together when all are specified in a single request.
+func TestPodSpec_ResourceRequestsAndLimits(t *testing.T) {
+	_, pod := setupPod(t, "spec-res-all", CreateRequest{
+		Image:         suite.Image,
+		CPURequest:    "100m",
+		CPULimit:      "500m",
+		MemoryRequest: "128Mi",
+		MemoryLimit:   "512Mi",
+	})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	res := pod.Spec.Containers[0].Resources
+
+	require.NotNil(t, res.Requests)
+	require.NotNil(t, res.Limits)
+	assert.True(t, res.Requests[v1.ResourceCPU].Equal(resource.MustParse("100m")))
+	assert.True(t, res.Limits[v1.ResourceCPU].Equal(resource.MustParse("500m")))
+	assert.True(t, res.Requests[v1.ResourceMemory].Equal(resource.MustParse("128Mi")))
+	assert.True(t, res.Limits[v1.ResourceMemory].Equal(resource.MustParse("512Mi")))
+}
+
+// TestPodSpec_NoResourcesWhenNotRequested verifies that when the CreateRequest omits
+// all resource fields, the pod spec has no Requests or Limits (K8s defaults apply).
+func TestPodSpec_NoResourcesWhenNotRequested(t *testing.T) {
+	_, pod := setupPod(t, "spec-no-res", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.Containers, 1)
+	res := pod.Spec.Containers[0].Resources
+	assert.Nil(t, res.Requests, "Requests must be nil when no cpu_request/memory_request given")
+	assert.Nil(t, res.Limits, "Limits must be nil when no cpu_limit/memory_limit given")
+}
+
+// ---------------------------------------------------------------------------
+// Full pod lifecycle: Pending → Running (integration smoke)
+// ---------------------------------------------------------------------------
+
+// TestPodSpec_PodBecomesRunning verifies that a pod created by the manager
+// eventually transitions to the Running phase, indicating the image was pulled
+// and the container started successfully.
+func TestPodSpec_PodBecomesRunning(t *testing.T) {
+	wlID := uniqueID("spec-running")
+	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
+	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
+
+	status := waitWorkloadRunning(t, testWS, testProj, wlID, 5*time.Minute)
+	assert.Equal(t, "Running", status.Phase)
+	assert.NotEmpty(t, status.PodName)
+	assert.NotEmpty(t, status.IP, "running pod must have an IP address")
+}

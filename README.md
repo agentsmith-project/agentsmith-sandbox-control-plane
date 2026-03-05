@@ -1,421 +1,156 @@
 # mbos-sandbox-v1
 
-A Kubernetes-based sandbox system for running isolated, persistent shell sessions with a WebSocket API, automatic workspace snapshot/restore, and TTL-based lifecycle management.
+Simplified Kubernetes Sandbox Manager
 
-## Features
+## Overview
 
-- **Persistent Shell Sessions**: Long-lived tmux sessions that survive WebSocket reconnections
-- **WebSocket API**: Bidirectional communication with automatic message buffering
-- **Snapshot & Restore**: Automatic workspace persistence via MinIO/S3
-- **TTL Management**: Configurable idle timeout and max lifetime with automatic cleanup
-- **Security Controls**: Network policies, resource limits, readonly filesystem, and capabilities
-- **Flexible Runtime**: Support for custom container images with configurable commands
-- **Developer-Friendly**: Single entrypoint (`./sbx`) for all operations
+A minimal Kubernetes pod lifecycle manager with JuiceFS-backed persistent workspaces. Provides a REST API for creating, managing, and executing commands in workload pods. Application-agnostic — the caller (e.g. AgentSmith) controls what runs inside pods.
+
+Workload pods are ephemeral compute units. Persistence is JVS-only: the manager assigns a workspace (JuiceFS + JVS) to each pod on creation and restores the latest JVS state when a pod is created. Clients send keepalive to the manager; if no keepalive is received within the idle threshold, the cleaner deletes the pod (no snapshot or GC on cleanup—lifecycle is manager-controlled).
 
 ## Architecture
 
 ```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│     Client      │◄────────►│     Manager     │◄────────►│      Pod        │
-│  (WebSocket)    │         │  (Go Service)   │         │ (User Container)│
-└─────────────────┘         │                 │         │                 │
-                            │  - Session Mgmt  │         │  /workspace     │
-                            │  - Ring Buffer   │         │                 │
-                            │  - kubectl exec  │         │  tmux session   │
-                            └────────┬─────────┘         └─────────────────┘
-                                     │
-                                     ▼
-                            ┌─────────────────┐
-                            │      MinIO      │
-                            │  (Snapshots)    │
-                            └─────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                  manager-service                     │
+│                                                      │
+│  ┌──────────────┐   ┌──────────────────────────┐    │
+│  │ Service Key   │──▶│ Workload API Handler      │    │
+│  │ Auth          │   │ (PUT/GET/DELETE/keepalive/exec)│    │
+│  └──────────────┘   └──────┬───────────┬────────┘    │
+│                             │           │             │
+│                    ┌────────▼──┐  ┌─────▼──────────┐ │
+│                    │ K8s Client │  │ K8s Executor   │ │
+│                    │ (pods,     │  │ (SPDY exec     │ │
+│                    │  patch)    │  │  streaming)    │ │
+│                    └────────┬──┘  └─────┬──────────┘ │
+│                             │           │             │
+│                    ┌────────▼───────────▼──────────┐ │
+│                    │     JVS Workspace Storage      │ │
+│                    │   (snapshot / restore on       │ │
+│                    │    JuiceFS mount)              │ │
+│                    └───────────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
 
-Cleaner (CronJob):
-  - Scans every 5 minutes
-  - Reads Pod annotations for TTL
-  - Directly deletes expired Pods
-  - Manager Finalizer handles snapshot
+┌───────────────────────┐
+│  cleaner (CronJob)    │   Separate binary.
+│  Scans for expired    │   Deletes pods whose
+│  pods (no keepalive   │   expires_at is past;
+│  within threshold)    │   no snapshot/GC.
+└───────────────────────┘
 ```
 
-## Quick Start
+**Core components:**
 
-### Prerequisites
+| Component | Package | Role |
+|---|---|---|
+| Service Key Auth | `internal/auth` | Validates `X-Service-Key` header using constant-time comparison |
+| Workload API Handler | `internal/workload` | REST endpoint routing for pod lifecycle and exec |
+| K8s Client | `internal/k8s` | Pod CRUD, activity patching, readiness polling |
+| K8s Executor | `internal/k8s` | SPDY-based command execution inside pods |
+| JVS Workspace Storage | `internal/workspace` | JVS workspace prepare/restore on JuiceFS (manager-assigned) |
 
-- Go 1.21+ (for local development)
-- kubectl or use vendored tools
-- Kubernetes cluster (kind for local, or any K8s cluster)
+## API Endpoints
 
-### Using Kind (Local Development)
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Create or ensure workload pod |
+| `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Get pod status |
+| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Delete pod |
+| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/keepalive` | Client keepalive (extend expires_at) |
+| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/exec` | Execute command in pod |
+| `GET` | `/healthz` | Liveness probe |
+| `GET` | `/readyz` | Readiness probe (checks K8s connectivity + config) |
+| `GET` | `/metrics` | Prometheus-format metrics |
 
-```bash
-# 1. Fetch vendored tools (recommended; avoids needing kubectl/kustomize installed)
-./sbx tools fetch --proxy auto
+See [docs/api-reference-v2.md](docs/api-reference-v2.md) for full request/response schemas and examples.
 
-# 2. Create kind cluster + build + deploy (end-to-end)
-./sbx dev up --force --proxy auto --harbor-ca auto
+## Authentication
 
-# 3. Access manager
-tools/bin/linux-amd64/kubectl -n sandbox-system port-forward svc/sandbox-manager 8080:80
-
-# 4. Test the WebSocket API
-# Connect to ws://localhost:8080/ws and send:
-{"type":"create","agent_thread_id":"test-123","image":"python:3.11","command":["/bin/bash"]}
-```
-
-### Make Targets (Convenience)
-
-```bash
-make test
-make test-integration
-make build-manager
-make build-runner
-make build-cleaner
-make kind-up
-make kind-status
-make smoke
-```
-
-### WS Client (Interactive)
-
-Build and run the CLI client:
-
-```bash
-cd manager-service
-go build -o ../bin/ws-client ./cmd/ws-client
-../bin/ws-client --url ws://localhost:8080/ws --agent-thread-id at_demo --image python:3.11 --command /bin/bash
-```
-
-Notes:
-- Raw TTY mode enabled by default; exit with `Ctrl-]` (or `--exit-key ctrl-c`).
-- Auto reconnect with backoff on disconnect.
-- Terminal resize is detected and sent automatically when running in a TTY.
-
-## Project Structure
-
-```
-mbos-sandbox-v1/
-├── manager-service/          # Go HTTP/WebSocket API service
-│   ├── cmd/                  # Main entrypoints (manager, cleaner)
-│   ├── internal/             # Internal packages
-│   │   ├── api/              # HTTP/WebSocket handlers
-│   │   ├── buffer/           # Ring buffer for messages
-│   │   ├── cleaner/          # TTL-based pod cleanup
-│   │   ├── config/           # Configuration loading
-│   │   ├── k8s/              # Kubernetes client utilities
-│   │   ├── sandbox/          # Pod creation and management
-│   │   ├── session/          # Session state management
-│   │   ├── snapshot/         # Workspace snapshot/restore
-│   │   └── websocket/        # WebSocket connection handling
-│   ├── integration/          # Integration tests
-│   ├── scripts/              # Build and test scripts
-│   └── manager-config.example.yaml
-├── images/
-│   ├── runner/               # Sandbox runner image
-│   └── gc/                   # Garbage collection image
-├── k8s/                      # Kubernetes manifests
-│   ├── base/                 # Kustomize base
-│   ├── overlays/
-│   │   ├── dev/              # Development (kind) overlay
-│   │   └── production/       # Production overlay
-│   └── scripts/              # Deployment utilities
-├── scripts/                  # Internal bash libraries
-├── tools/                    # Vendored binaries for offline
-├── sbx                       # Single workflow entrypoint
-└── docs/                     # Documentation
-    ├── plans/                # Design and implementation docs
-    ├── api-reference-v1.md   # Complete API reference
-    ├── API.md                # Quick API guide
-    ├── WORKFLOWS.md          # Common workflows
-    ├── CONFIGURATION_GUIDE.md
-    └── TROUBLESHOOTING.md
-```
-
-## WebSocket API
-
-### Connection
-
-```
-GET /ws
-```
-
-### Message Types
-
-#### Client → Manager
-
-**Create Session**
-```json
-{
-  "type": "create",
-  "agent_thread_id": "at_abc123",
-  "image": "python:3.11",
-  "command": ["/bin/bash"],
-  "env": {"MY_VAR": "value"},
-  "config": {
-    "allow_network_access": false,
-    "readonly_filesystem": false,
-    "cpu_limit": "2",
-    "memory_limit": "1Gi",
-    "idle_timeout": "30m",
-    "max_lifetime": "24h"
-  }
-}
-```
-
-**Send Input**
-```json
-{
-  "type": "stdin",
-  "data": "base64_encoded_string"
-}
-```
-
-#### Manager → Client
-
-**Status Update**
-```json
-{
-  "type": "status",
-  "state": "creating|restoring|ready|error",
-  "message": "string",
-  "progress": 0.0-1.0
-}
-```
-
-**Output**
-```json
-{
-  "type": "stdout",
-  "data": "base64_encoded_string"
-}
-```
-
-See [api-reference-v1.md](docs/api-reference-v1.md) for complete API documentation.
+All `/v1/` routes require a valid `X-Service-Key` header. Keys are loaded from the `SERVICE_KEYS` environment variable. Health, readiness, and metrics endpoints are unauthenticated.
 
 ## Configuration
-
-### Manager Configuration
-
-The manager is configured via YAML (see `manager-service/manager-config.example.yaml`):
-
-```yaml
-version: 1
-
-server:
-  httpPort: 8080
-  metrics:
-    enabled: true
-    path: /metrics
-
-kubernetes:
-  namespace: sandbox
-  qps: 50
-  burst: 100
-
-sandbox:
-  defaults:
-    namespace: sandbox
-    runnerImage: sandbox-runner:1.0.0
-    ttlSeconds: 900
-    resources:
-      limits:
-        cpu: "1"
-        memory: 1Gi
-
-storage:
-  endpoint: minio:9000
-  bucket: mbos-sandbox-snapshots
-  useSSL: false
-
-buffer:
-  capacity: 10000
-```
-
-### Environment Variables
-
-- `CONFIG_PATH`: Path to manager config YAML
-- `SERVICE_KEYS`: Comma-separated list of valid service keys
-- `MINIO_ACCESS_KEY`: MinIO/S3 access key
-- `MINIO_SECRET_KEY`: MinIO/S3 secret key
-
-## Security Controls
-
-| Control | Type | Description |
-|---------|------|-------------|
-| `allow_network_access` | bool | Allow external network access |
-| `readonly_filesystem` | bool | Mount root as read-only (except /workspace) |
-| `cpu_limit` | string | CPU limit (e.g., "2") |
-| `memory_limit` | string | Memory limit (e.g., "1Gi") |
-| `idle_timeout` | duration | Idle timeout before cleanup (e.g., "30m") |
-| `max_lifetime` | duration | Maximum lifetime (e.g., "24h") |
-| `drop_all_capabilities` | bool | Drop all Linux capabilities |
-| `allow_privileged` | bool | Allow privileged mode |
-
-## Development
-
-### Building Manager
-
-```bash
-cd manager-service
-./scripts/build.sh
-```
-
-### Running Tests
-
-```bash
-cd manager-service
-./scripts/test.sh
-```
-
-## Testing
-
-The project uses a comprehensive testing strategy with unit tests, integration tests, and E2E tests.
-
-### Prerequisites
-
-- Go 1.21+
-- Docker and Docker Compose
-- kind (Kubernetes in Docker) for E2E tests
-- kubectl
-
-### Running Tests
-
-#### Unit Tests
-
-Run unit tests only:
-
-```bash
-make test-unit
-```
-
-#### Integration Tests
-
-Integration tests require external services (MinIO). The Makefile automatically starts these services:
-
-```bash
-make test-integration
-```
-
-To manually start test dependencies:
-
-```bash
-make docker-compose-up
-./scripts/wait-for-minio.sh
-```
-
-#### E2E Tests
-
-E2E tests require a kind cluster with the sandbox manager deployed:
-
-```bash
-# Ensure kind cluster is running
-./sbx dev up
-
-# Run E2E tests
-make test-e2e
-```
-
-#### All Tests
-
-Run unit and integration tests:
-
-```bash
-make test
-```
-
-#### Coverage Report
-
-Generate HTML coverage report:
-
-```bash
-make test-coverage
-```
-
-The report is saved to `coverage.html`.
-
-### Test Structure
-
-```
-manager-service/
-├── internal/           # Unit tests alongside source code
-├── integration/        # Integration tests with external services
-├── e2e/               # End-to-end tests with full stack
-└── testdata/          # Test fixtures and configurations
-```
-
-### Sandbox Client
-
-The `sbx-client` CLI tool can be used for manual testing:
-
-```bash
-make build-sbx-client
-/tmp/sbx-client create
-/tmp/sbx-client attach <session-id>
-/tmp/sbx-client exec "echo hello"
-/tmp/sbx-client close
-```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MINIO_ENDPOINT` | `http://localhost:9000` | MinIO endpoint for integration tests |
-| `SBX_MANAGER_URL` | `ws://localhost:8080` | Manager WebSocket URL |
-| `SBX_SERVICE_KEY` | `test-service-key` | Service key for authentication |
+| `SERVICE_KEYS` | *(required)* | Comma-separated list of valid service keys |
+| `K8S_NAMESPACE` | `sandbox` | Kubernetes namespace for workload pods |
+| `JUICEFS_BASE_PATH` | `/mnt/juicefs/workloads` | JuiceFS mount path for workspace storage |
+| `JUICEFS_PVC_NAME` | `juicefs-workloads-pvc` | PVC name mounted into workload pods |
+| `CONFIG_PATH` | `/etc/sandbox-manager/manager-config.yaml` | Path to YAML configuration file |
 
-### Code Quality
+### YAML Configuration
+
+The YAML config controls server behavior, K8s client tuning, and rate limiting. It supports hot-reload via filesystem watching. See [docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md) for the full schema.
+
+Key defaults:
+
+- HTTP port: `8080`
+- Auth header: `X-Service-Key`
+- K8s QPS/Burst: `50/100`
+- K8s retry: 3 attempts, 200ms–2s exponential backoff
+- Rate limit: 100 RPS global, 10 RPS per-IP, 5 RPS per-session
+
+## Quick Start
 
 ```bash
+# Build
 cd manager-service
-./scripts/lint.sh
+go build -o bin/manager ./cmd/manager/
+go build -o bin/cleaner ./cmd/cleaner/
+
+# Configure
+export SERVICE_KEYS="my-secret-key"
+export K8S_NAMESPACE="sandbox"
+export JUICEFS_BASE_PATH="/mnt/juicefs/workloads"
+export JUICEFS_PVC_NAME="juicefs-workloads-pvc"
+
+# Run (requires kubeconfig or in-cluster config)
+./bin/manager
 ```
 
-### Making Changes
-
-1. Edit code in `manager-service/internal/`
-2. Run `./scripts/build.sh` to build
-3. Run `./scripts/test.sh` to verify
-4. Update documentation if needed
-
-## Deployment
-
-### Development (Kind)
+Or use the Makefile:
 
 ```bash
-./sbx dev up --force --proxy auto --harbor-ca auto
+make test           # Run unit tests with race detector
+make build-manager  # Build manager container image
+make kind-up        # Create a local kind cluster + deploy
+make smoke          # Port-forward + smoke test
 ```
 
-### Production (Harbor)
+## Project Structure
 
-```bash
-# 1. Push images to Harbor
-./sbx images push harbor \
-  --registry "$HARBOR_REGISTRY" \
-  --project "$HARBOR_PROJECT" \
-  --username "$HARBOR_USERNAME" \
-  --password "$HARBOR_PASSWORD"
-
-# 2. Deploy
-./sbx k8s deploy production
-
-# 3. Verify
-./sbx k8s verify production
+```
+manager-service/
+├── cmd/
+│   ├── manager/          # Main service binary
+│   └── cleaner/          # TTL cleanup CronJob binary
+├── internal/
+│   ├── app/              # Application lifecycle, HTTP server setup
+│   ├── auth/             # Service Key validator + middleware
+│   ├── config/           # YAML config loading, validation, hot-reload
+│   ├── errors/           # Retry utilities
+│   ├── k8s/              # K8s client, pod operations, SPDY exec
+│   ├── observability/    # Structured logging, Prometheus metrics, health checks
+│   ├── ratelimit/        # Three-tier rate limiting (global/per-IP/per-session)
+│   ├── workload/         # Workload REST handler (types, routing, pod builder)
+│   └── workspace/        # JVS workspace storage (snapshot, restore, GC)
+└── go.mod
+k8s/                      # Kubernetes manifests (base, overlays, scripts)
+docs/                     # Documentation and contracts
+Makefile                  # Build, test, and infrastructure targets
 ```
 
-See [WORKFLOWS.md](docs/WORKFLOWS.md) for more deployment workflows.
+## How It Works
 
-## Documentation
+1. **Pod Creation (PUT):** The handler prepares the JVS workspace (restoring the latest snapshot if one exists), builds a pod spec with the JuiceFS PVC mounted at `/workspace`, and creates it in Kubernetes. Waits up to 120s for the pod to become ready.
 
-- [API Reference](docs/api-reference-v1.md) - Complete WebSocket API documentation
-- [Workflows](docs/WORKFLOWS.md) - Common development and deployment workflows
-- [Configuration Guide](docs/CONFIGURATION_GUIDE.md) - Detailed configuration options
-- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
-- [Offline Mode](docs/OFFLINE.md) - Air-gapped deployment guide
-- [Design Docs](docs/plans/) - Architecture and implementation plans
+2. **Command Execution (POST /exec):** Opens a SPDY stream to the pod's `main` container and executes the given command. Returns stdout, stderr, exit code, and duration.
 
-## License
+3. **Keepalive (POST /keepalive):** Client sends keepalive periodically. Manager updates `expires_at` and `last_activity_at`. If no keepalive is received for `idle_timeout_sec`, the pod is considered expired (capped by `max_lifetime_sec`).
 
-[Add your license here]
+4. **Pod Deletion (DELETE):** Deletes the pod. No snapshot or resource handling—manager controls lifecycle.
 
-## Contributing
-
-[Add contributing guidelines here]
+5. **Cleaner (CronJob):** Scans for pods whose `expires_at` is in the past (no keepalive within threshold), deletes them only. No snapshot or GC.

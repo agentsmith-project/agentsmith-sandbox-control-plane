@@ -6,8 +6,6 @@
 source "${ROOT_DIR}/scripts/test/lib/runner.sh"
 # shellcheck source=scripts/lib/assertions.sh
 source "${ROOT_DIR}/scripts/test/lib/assertions.sh"
-# shellcheck source=scripts/lib/scenarios.sh
-source "${ROOT_DIR}/scripts/test/lib/scenarios.sh"
 
 # sbx_test_usage displays usage information for test commands
 sbx_test_usage() {
@@ -24,7 +22,6 @@ Options:
 Environment Variables:
   MANAGER_URL        Manager service URL (default: http://localhost:8080)
   SERVICE_KEY        Service key for authentication (default: test-key)
-  SANDBOX_NAMESPACE  Sandbox namespace (default: sandbox)
 EOF
 }
 
@@ -55,14 +52,9 @@ sbx_test_smoke() {
   # Source test libraries
   source "${ROOT_DIR}/scripts/test/lib/runner.sh"
   source "${ROOT_DIR}/scripts/test/lib/assertions.sh"
-  source "${ROOT_DIR}/scripts/test/lib/scenarios.sh"
 
   # Run smoke test scenarios
   run_scenario "${ROOT_DIR}/scripts/test/smoke/01-environment.sh" "Environment Check"
-  run_scenario "${ROOT_DIR}/scripts/test/smoke/02-create-sandbox.sh" "Create Sandbox"
-  run_scenario "${ROOT_DIR}/scripts/test/smoke/03-websocket-connection.sh" "WebSocket Connection"
-  run_scenario "${ROOT_DIR}/scripts/test/smoke/04-snapshot-restore.sh" "Snapshot & Restore"
-  run_scenario "${ROOT_DIR}/scripts/test/smoke/05-cleanup.sh" "Cleanup Resources"
 
   # Print final report
   print_report

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -127,7 +128,7 @@ func getInClusterNamespace() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	return strings.TrimSpace(string(data)), nil
 }
 
 // Clientset returns the underlying kubernetes clientset
@@ -228,23 +229,6 @@ func (c *Client) Retry(ctx context.Context, fn func() error) error {
 	}
 
 	return fmt.Errorf("max retry attempts reached: %w", lastErr)
-}
-
-// ListSandboxPods lists all pods in the sandbox namespace
-func (c *Client) ListSandboxPods(ctx context.Context) ([]*v1.Pod, error) {
-	pods, err := c.clientset.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app=sandbox",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	result := make([]*v1.Pod, 0, len(pods.Items))
-	for i := range pods.Items {
-		result = append(result, &pods.Items[i])
-	}
-
-	return result, nil
 }
 
 // WithTimeout creates a context with timeout for K8s operations
