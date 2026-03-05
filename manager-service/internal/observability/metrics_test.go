@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -9,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestResponseWriterWrapper_WriteHeader(t *testing.T) {
@@ -137,49 +134,31 @@ func TestPatternizePath(t *testing.T) {
 		{"root", "/", "/"},
 		{"static file", "/static/file.js", "/static/file.js"},
 
-		// API routes are patternized
+		// Workspace routes are patternized
 		{
-			name:     "sandbox touch",
-			input:    "/v1/sandboxes/abc123/touch",
-			expected: "/v1/sandboxes/{sessionId}/touch",
+			name:     "workload create",
+			input:    "/v1/workspaces/ws-abc/projects/proj-xyz/workloads/wl-001",
+			expected: "/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}",
 		},
 		{
-			name:     "sandbox exec",
-			input:    "/v1/sandboxes/session-456/exec",
-			expected: "/v1/sandboxes/{sessionId}/exec",
+			name:     "workload keepalive",
+			input:    "/v1/workspaces/ws-abc/projects/proj-xyz/workloads/wl-001/keepalive",
+			expected: "/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/keepalive",
 		},
 		{
-			name:     "sandbox with UUID",
-			input:    "/v1/sandboxes/a1b2c3d4-e5f6-7890-abcd-ef1234567890/upload",
-			expected: "/v1/sandboxes/{sessionId}/upload",
+			name:     "workload exec",
+			input:    "/v1/workspaces/ws-abc/projects/proj-xyz/workloads/wl-001/exec",
+			expected: "/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/exec",
 		},
 		{
-			name:     "base sandbox path",
-			input:    "/v1/sandboxes/session-id",
-			expected: "/v1/sandboxes/{sessionId}",
-		},
-		{
-			name:     "deep nested path",
-			input:    "/v1/sandboxes/session123/files/download/path/to/file.txt",
-			expected: "/v1/sandboxes/{sessionId}/files/download/path/to/file.txt",
+			name:     "workload short path",
+			input:    "/v1/workspaces/ws-abc/projects",
+			expected: "/v1/workspaces/ws-abc/projects",
 		},
 
 		// Edge cases
 		{"short v1 path", "/v1/", "/v1/"},
-		{"short v1 sandboxes", "/v1/sandboxes", "/v1/sandboxes"},
 		{"different version", "/v2/resource", "/v2/resource"},
-
-		// Special characters in session ID
-		{
-			name:     "session ID with dots",
-			input:    "/v1/sandboxes/session.123.456/touch",
-			expected: "/v1/sandboxes/{sessionId}/touch",
-		},
-		{
-			name:     "session ID with underscores",
-			input:    "/v1/sandboxes/session_123_456/exec",
-			expected: "/v1/sandboxes/{sessionId}/exec",
-		},
 	}
 
 	for _, tt := range tests {
@@ -260,32 +239,26 @@ func TestNewMetricsRegistry(t *testing.T) {
 	if m.httpRequestDuration == nil {
 		t.Error("NewMetricsRegistry() httpRequestDuration is nil")
 	}
-	if m.k8sAPIFailTotal == nil {
-		t.Error("NewMetricsRegistry() k8sAPIFailTotal is nil")
-	}
 }
 
 func TestMetricsRegistry_RecordHTTPRequest(t *testing.T) {
 	m := NewMetricsRegistry()
 
-	// RecordHTTPRequest uses the path as-is, without patternizing
-	m.RecordHTTPRequest("GET", "/v1/sandboxes/123/touch", http.StatusOK, 100*time.Millisecond)
-	m.RecordHTTPRequest("GET", "/v1/sandboxes/123/touch", http.StatusOK, 150*time.Millisecond)
-	m.RecordHTTPRequest("GET", "/v1/sandboxes/456/touch", http.StatusNotFound, 50*time.Millisecond)
+	m.RecordHTTPRequest("POST", "/v1/workspaces/ws1/projects/p1/workloads/wl1/keepalive", http.StatusOK, 100*time.Millisecond)
+	m.RecordHTTPRequest("POST", "/v1/workspaces/ws1/projects/p1/workloads/wl1/keepalive", http.StatusOK, 150*time.Millisecond)
+	m.RecordHTTPRequest("POST", "/v1/workspaces/ws1/projects/p1/workloads/wl2/keepalive", http.StatusNotFound, 50*time.Millisecond)
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Check totals - paths are stored as given, not patternized
-	if m.httpRequestTotal["GET:/v1/sandboxes/123/touch:200"] != 2 {
-		t.Errorf("RecordHTTPRequest() total count = %v, want 2", m.httpRequestTotal["GET:/v1/sandboxes/123/touch:200"])
+	if m.httpRequestTotal["POST:/v1/workspaces/ws1/projects/p1/workloads/wl1/keepalive:200"] != 2 {
+		t.Errorf("RecordHTTPRequest() total count = %v, want 2", m.httpRequestTotal["POST:/v1/workspaces/ws1/projects/p1/workloads/wl1/keepalive:200"])
 	}
-	if m.httpRequestTotal["GET:/v1/sandboxes/456/touch:404"] != 1 {
-		t.Errorf("RecordHTTPRequest() total count = %v, want 1", m.httpRequestTotal["GET:/v1/sandboxes/456/touch:404"])
+	if m.httpRequestTotal["POST:/v1/workspaces/ws1/projects/p1/workloads/wl2/keepalive:404"] != 1 {
+		t.Errorf("RecordHTTPRequest() total count = %v, want 1", m.httpRequestTotal["POST:/v1/workspaces/ws1/projects/p1/workloads/wl2/keepalive:404"])
 	}
 
-	// Check duration histogram - different paths create different histograms
-	hist1, ok1 := m.httpRequestDuration["GET:/v1/sandboxes/123/touch"]
+	hist1, ok1 := m.httpRequestDuration["POST:/v1/workspaces/ws1/projects/p1/workloads/wl1/keepalive"]
 	if !ok1 {
 		t.Fatal("RecordHTTPRequest() histogram for path 1 not created")
 	}
@@ -293,7 +266,7 @@ func TestMetricsRegistry_RecordHTTPRequest(t *testing.T) {
 		t.Errorf("RecordHTTPRequest() histogram count = %v, want 2", hist1.count)
 	}
 
-	hist2, ok2 := m.httpRequestDuration["GET:/v1/sandboxes/456/touch"]
+	hist2, ok2 := m.httpRequestDuration["POST:/v1/workspaces/ws1/projects/p1/workloads/wl2/keepalive"]
 	if !ok2 {
 		t.Fatal("RecordHTTPRequest() histogram for path 2 not created")
 	}
@@ -302,7 +275,7 @@ func TestMetricsRegistry_RecordHTTPRequest(t *testing.T) {
 	}
 }
 
-func TestMetricsRegistry_RecordSandboxOperations(t *testing.T) {
+func TestMetricsRegistry_RecordWorkloadOperations(t *testing.T) {
 	m := NewMetricsRegistry()
 
 	tests := []struct {
@@ -310,12 +283,10 @@ func TestMetricsRegistry_RecordSandboxOperations(t *testing.T) {
 		recordFunc func()
 		getCount   func(m *MetricsRegistry) int64
 	}{
-		{"create", m.RecordSandboxCreate, func(m *MetricsRegistry) int64 { return m.sandboxCreateTotal }},
-		{"touch", m.RecordSandboxTouch, func(m *MetricsRegistry) int64 { return m.sandboxTouchTotal }},
-		{"exec", m.RecordSandboxExec, func(m *MetricsRegistry) int64 { return m.sandboxExecTotal }},
-		{"upload", m.RecordSandboxUpload, func(m *MetricsRegistry) int64 { return m.sandboxUploadTotal }},
-		{"download", m.RecordSandboxDownload, func(m *MetricsRegistry) int64 { return m.sandboxDownloadTotal }},
-		{"delete", m.RecordSandboxDelete, func(m *MetricsRegistry) int64 { return m.sandboxDeleteTotal }},
+		{"create", m.RecordWorkloadCreate, func(m *MetricsRegistry) int64 { return m.workloadCreateTotal }},
+		{"keepalive", m.RecordWorkloadKeepalive, func(m *MetricsRegistry) int64 { return m.workloadKeepaliveTotal }},
+		{"exec", m.RecordWorkloadExec, func(m *MetricsRegistry) int64 { return m.workloadExecTotal }},
+		{"delete", m.RecordWorkloadDelete, func(m *MetricsRegistry) int64 { return m.workloadDeleteTotal }},
 	}
 
 	for _, tt := range tests {
@@ -335,68 +306,14 @@ func TestMetricsRegistry_RecordSandboxOperations(t *testing.T) {
 	}
 }
 
-func TestMetricsRegistry_RecordConfigReload(t *testing.T) {
-	m := NewMetricsRegistry()
-
-	t.Run("success", func(t *testing.T) {
-		hash := "abc123"
-		loadedAt := time.Now().UTC().Format(time.RFC3339)
-
-		m.RecordConfigReloadSuccess(hash, loadedAt)
-
-		m.mu.RLock()
-		if m.configReloadSuccess != 1 {
-			t.Errorf("RecordConfigReloadSuccess() count = %v, want 1", m.configReloadSuccess)
-		}
-		if m.configHash != hash {
-			t.Errorf("RecordConfigReloadSuccess() hash = %v, want %v", m.configHash, hash)
-		}
-		if m.configLoadedAt != loadedAt {
-			t.Errorf("RecordConfigReloadSuccess() loadedAt = %v, want %v", m.configLoadedAt, loadedAt)
-		}
-		if m.configLastReload == "" {
-			t.Error("RecordConfigReloadSuccess() lastReload not set")
-		}
-		m.mu.RUnlock()
-	})
-
-	t.Run("failure", func(t *testing.T) {
-		m.RecordConfigReloadFailure()
-
-		m.mu.RLock()
-		if m.configReloadFailure != 1 {
-			t.Errorf("RecordConfigReloadFailure() count = %v, want 1", m.configReloadFailure)
-		}
-		m.mu.RUnlock()
-	})
-}
-
-func TestMetricsRegistry_RecordK8sAPIFailure(t *testing.T) {
-	m := NewMetricsRegistry()
-
-	m.RecordK8sAPIFailure("CreatePod")
-	m.RecordK8sAPIFailure("CreatePod")
-	m.RecordK8sAPIFailure("GetPod")
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.k8sAPIFailTotal["CreatePod"] != 2 {
-		t.Errorf("RecordK8sAPIFailure() CreatePod count = %v, want 2", m.k8sAPIFailTotal["CreatePod"])
-	}
-	if m.k8sAPIFailTotal["GetPod"] != 1 {
-		t.Errorf("RecordK8sAPIFailure() GetPod count = %v, want 1", m.k8sAPIFailTotal["GetPod"])
-	}
-}
-
 func TestMetricsRegistry_Handler(t *testing.T) {
 	m := NewMetricsRegistry()
 
 	// Record some data
-	m.RecordSandboxCreate()
-	m.RecordSandboxCreate()
-	m.RecordSandboxTouch()
-	m.RecordHTTPRequest("GET", "/v1/sandboxes/123/touch", http.StatusOK, 100*time.Millisecond)
+	m.RecordWorkloadCreate()
+	m.RecordWorkloadCreate()
+	m.RecordWorkloadKeepalive()
+	m.RecordHTTPRequest("GET", "/v1/workspaces/ws-1/projects/p-1/workloads/wl-1/keepalive", http.StatusOK, 100*time.Millisecond)
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rr := httptest.NewRecorder()
@@ -417,15 +334,15 @@ func TestMetricsRegistry_Handler(t *testing.T) {
 
 	// Check for expected metric outputs
 	expectedSubstrings := []string{
-		"# HELP sandbox_create_total",
-		"# TYPE sandbox_create_total",
-		"sandbox_create_total 2",
-		"# HELP sandbox_touch_total",
-		"sandbox_touch_total 1",
+		"# HELP workload_create_total",
+		"# TYPE workload_create_total",
+		"workload_create_total 2",
+		"# HELP workload_keepalive_total",
+		"workload_keepalive_total 1",
 		"# HELP http_request_total",
 		"# TYPE http_request_total",
 		"http_request_total{method=\"GET\"",
-		"/v1/sandboxes/123/touch\"",
+		"/v1/workspaces/ws-1/projects/p-1/workloads/wl-1/keepalive\"",
 	}
 
 	for _, substr := range expectedSubstrings {
@@ -449,7 +366,7 @@ func TestMetricsRegistry_Handler_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < operationsPerGoroutine; j++ {
-				m.RecordSandboxCreate()
+				m.RecordWorkloadCreate()
 			}
 		}()
 
@@ -466,7 +383,7 @@ func TestMetricsRegistry_Handler_Concurrent(t *testing.T) {
 	wg.Wait()
 
 	m.mu.RLock()
-	count := m.sandboxCreateTotal
+	count := m.workloadCreateTotal
 	m.mu.RUnlock()
 
 	if count != goroutines*operationsPerGoroutine {
@@ -482,11 +399,11 @@ func TestGetMetrics(t *testing.T) {
 	}
 
 	// Verify it's the global registry
-	m.RecordSandboxCreate()
+	m.RecordWorkloadCreate()
 
 	m2 := GetMetrics()
 	m2.mu.RLock()
-	count := m2.sandboxCreateTotal
+	count := m2.workloadCreateTotal
 	m2.mu.RUnlock()
 
 	if count != 1 {
@@ -620,18 +537,15 @@ func TestRequestIDMiddleware(t *testing.T) {
 		name       string
 		headerName string
 		reqHeaders map[string]string
-		validate   func(*testing.T, *httptest.ResponseRecorder, string)
+		validate   func(*testing.T, *httptest.ResponseRecorder)
 	}{
 		{
-			name:       "adds request ID to context and response",
+			name:       "sets request ID in response header",
 			headerName: defaultHeaderName,
 			reqHeaders: map[string]string{
 				"X-Request-Id": "test-req-id",
 			},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
-				if requestID != "test-req-id" {
-					t.Errorf("RequestIDMiddleware() requestID = %v, want 'test-req-id'", requestID)
-				}
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get(defaultHeaderName)
 				if respHeader != "test-req-id" {
 					t.Errorf("RequestIDMiddleware() response header = %v, want 'test-req-id'", respHeader)
@@ -642,13 +556,10 @@ func TestRequestIDMiddleware(t *testing.T) {
 			name:       "generates new ID when not provided",
 			headerName: defaultHeaderName,
 			reqHeaders: map[string]string{},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
-				if requestID == "" {
-					t.Error("RequestIDMiddleware() requestID is empty, want generated ID")
-				}
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get(defaultHeaderName)
-				if respHeader != requestID {
-					t.Errorf("RequestIDMiddleware() response header = %v, want %v", respHeader, requestID)
+				if respHeader == "" {
+					t.Error("RequestIDMiddleware() response header is empty, want generated ID")
 				}
 			},
 		},
@@ -656,10 +567,10 @@ func TestRequestIDMiddleware(t *testing.T) {
 			name:       "uses custom header name",
 			headerName: "X-Custom-Request-ID",
 			reqHeaders: map[string]string{},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get("X-Custom-Request-ID")
-				if respHeader != requestID {
-					t.Errorf("RequestIDMiddleware() response header = %v, want %v", respHeader, requestID)
+				if respHeader == "" {
+					t.Error("RequestIDMiddleware() custom response header is empty, want generated ID")
 				}
 			},
 		},
@@ -667,10 +578,7 @@ func TestRequestIDMiddleware(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a handler that captures the request ID from context
-			var capturedRequestID string
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedRequestID = RequestIDFromContext(r.Context())
 				w.WriteHeader(http.StatusOK)
 			})
 
@@ -685,42 +593,8 @@ func TestRequestIDMiddleware(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 
-			tt.validate(t, rr, capturedRequestID)
+			tt.validate(t, rr)
 		})
 	}
 }
 
-func TestRequestIDFromContext(t *testing.T) {
-	t.Run("extracts request ID from context", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), RequestIDKey, "test-req-id")
-		id := RequestIDFromContext(ctx)
-		if id != "test-req-id" {
-			t.Errorf("RequestIDFromContext() = %v, want 'test-req-id'", id)
-		}
-	})
-
-	t.Run("returns empty string when not in context", func(t *testing.T) {
-		ctx := context.Background()
-		id := RequestIDFromContext(ctx)
-		if id != "" {
-			t.Errorf("RequestIDFromContext() = %v, want ''", id)
-		}
-	})
-
-	t.Run("returns empty string for wrong type", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), RequestIDKey, 12345)
-		id := RequestIDFromContext(ctx)
-		if id != "" {
-			t.Errorf("RequestIDFromContext() = %v, want '' for wrong type", id)
-		}
-	})
-
-	t.Run("works with uuid.UUID type", func(t *testing.T) {
-		testUUID := uuid.New()
-		ctx := context.WithValue(context.Background(), RequestIDKey, testUUID.String())
-		id := RequestIDFromContext(ctx)
-		if id != testUUID.String() {
-			t.Errorf("RequestIDFromContext() = %v, want %v", id, testUUID.String())
-		}
-	})
-}

@@ -1,4 +1,0 @@
-This is a test file for sandbox operations.
-
-It contains multiple lines of text.
-Used for testing file upload/download operations.

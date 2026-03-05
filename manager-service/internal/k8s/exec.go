@@ -6,8 +6,6 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 // ExecOptions contains options for executing commands in a pod
@@ -40,21 +39,19 @@ type ExecResult struct {
 
 // Executor handles command execution in pods
 type Executor struct {
-	config           *rest.Config
-	clientset        *kubernetes.Clientset
-	restClient       rest.Interface
-	namespace        string
-	defaultContainer string
+	config     *rest.Config
+	clientset  *kubernetes.Clientset
+	restClient rest.Interface
+	namespace  string
 }
 
 // NewExecutor creates a new executor
 func NewExecutor(client *Client) *Executor {
 	return &Executor{
-		config:           client.config,
-		clientset:        client.clientset,
-		restClient:       client.clientset.CoreV1().RESTClient(),
-		namespace:        client.namespace,
-		defaultContainer: client.defaultContainer,
+		config:     client.config,
+		clientset:  client.clientset,
+		restClient: client.clientset.CoreV1().RESTClient(),
+		namespace:  client.namespace,
 	}
 }
 
@@ -65,7 +62,7 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 	}
 
 	if opts.Container == "" {
-		opts.Container = e.defaultContainer // default container name
+		opts.Container = "main"
 	}
 
 	startTime := time.Now()
@@ -148,6 +145,13 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 	}
 
 	if err != nil {
+		// A non-zero process exit is reported via ExitError – extract the status
+		// code and return it as a successful exec (process ran; it just exited non-zero).
+		if exitErr, ok := err.(utilexec.ExitError); ok {
+			result.ExitCode = exitErr.ExitStatus()
+			log.Printf("Exec finished with non-zero exit code %d after %v", result.ExitCode, duration)
+			return result, nil
+		}
 		result.ExitCode = -1
 		log.Printf("Exec error after %v: %v", duration, err)
 		return result, err
@@ -155,29 +159,6 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 
 	result.ExitCode = 0
 	return result, nil
-}
-
-// ExecWithExitCode executes a command and tries to extract the exit code
-// from a marker in stderr (if configured).
-//
-// The marker is always attempted even when Exec returns an error, because
-// the SPDY protocol returns an error for non-zero exit codes but the marker
-// may still have been written to stderr before the stream closed.
-func (e *Executor) ExecWithExitCode(ctx context.Context, podName string, opts *ExecOptions, markerKey string) (*ExecResult, error) {
-	result, execErr := e.Exec(ctx, podName, opts)
-
-	// Try to extract exit code from marker even on exec error.
-	// The marker may have been written before the SPDY stream reported failure.
-	if markerKey != "" && result != nil && result.Stderr != "" {
-		markerCode := ExtractExitCodeMarker(result.Stderr, markerKey)
-		if markerCode >= 0 {
-			result.ExitCode = markerCode
-		}
-		// Remove the marker from stderr
-		result.Stderr = RemoveExitCodeMarker(result.Stderr, markerKey)
-	}
-
-	return result, execErr
 }
 
 // buildExecURL builds the exec URL for a pod
@@ -226,110 +207,3 @@ func (b *bufferWriter) String() string {
 	return string(b.data)
 }
 
-// ExtractExitCodeMarker extracts the exit code from a marker in stderr
-// The marker format is: __SBX_EXIT_CODE__=<n>
-func ExtractExitCodeMarker(stderr, markerKey string) int {
-	// Find the marker in stderr
-	markerPrefix := markerKey + "="
-	idx := findLastMarkerStart(stderr, markerPrefix)
-	if idx == -1 {
-		return -1 // marker not found
-	}
-
-	// Extract the number after the marker
-	exitCodeStr := stderr[idx+len(markerPrefix):]
-
-	// The exit code should be at the end of a line
-	// Find the end of the line (or end of string)
-	lineEnd := strings.IndexAny(exitCodeStr, "\n\r")
-	if lineEnd >= 0 {
-		exitCodeStr = exitCodeStr[:lineEnd]
-	}
-
-	// Parse the exit code
-	exitCode, err := strconv.Atoi(strings.TrimSpace(exitCodeStr))
-	if err != nil {
-		return -1
-	}
-
-	return exitCode
-}
-
-// RemoveExitCodeMarker removes the exit code marker from output
-func RemoveExitCodeMarker(output, markerKey string) string {
-	markerPrefix := markerKey + "="
-	idx := findLastMarkerStart(output, markerPrefix)
-	if idx < 0 {
-		return output
-	}
-
-	// Find the start of the line containing the marker
-	lineStart := idx
-	for lineStart > 0 && output[lineStart-1] != '\n' && output[lineStart-1] != '\r' {
-		lineStart--
-	}
-
-	// Find the end of the marker line
-	lineEnd := idx
-	for lineEnd < len(output) && output[lineEnd] != '\n' && output[lineEnd] != '\r' {
-		lineEnd++
-	}
-
-	// Skip past the line ending
-	if lineEnd < len(output) && (output[lineEnd] == '\n' || output[lineEnd] == '\r') {
-		lineEnd++
-		if lineEnd < len(output) && output[lineEnd-1] == '\r' && output[lineEnd] == '\n' {
-			// Handle Windows CRLF
-			lineEnd++
-		}
-	}
-
-	// Remove the marker line
-	return output[:lineStart] + output[lineEnd:]
-}
-
-// findLastMarkerStart finds the start of the last marker in output
-func findLastMarkerStart(output, markerPrefix string) int {
-	lastIdx := -1
-	searchFrom := 0
-
-	for {
-		idx := strings.Index(output[searchFrom:], markerPrefix)
-		if idx < 0 {
-			break
-		}
-
-		// Adjust to absolute position
-		absIdx := searchFrom + idx
-
-		// Verify this looks like a marker (should be at line start or after whitespace)
-		if absIdx == 0 || output[absIdx-1] == ' ' || output[absIdx-1] == '\t' ||
-			output[absIdx-1] == '\n' || output[absIdx-1] == '\r' {
-			lastIdx = absIdx
-		}
-
-		searchFrom = absIdx + len(markerPrefix)
-	}
-
-	return lastIdx
-}
-
-// indexOf finds the first occurrence of substr in s starting from idx
-func indexOf(s, substr string, idx int) int {
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(s) {
-		return -1
-	}
-	if substr == "" {
-		return idx
-	}
-
-	for i := idx; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}

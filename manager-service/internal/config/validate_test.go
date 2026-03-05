@@ -1,192 +1,283 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
-func TestDefaultConfigValidates(t *testing.T) {
-	cfg := DefaultConfig()
-	result := cfg.Validate()
-	if !result.Valid {
-		for _, e := range result.Errors {
-			t.Errorf("validation error: [%s] %s: %s", e.Code, e.FieldPath, e.Message)
-		}
-		t.Fatalf("default config should be valid, got %d errors", len(result.Errors))
-	}
-}
-
-func TestValidate_InvalidVersion(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Version = 99
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for version 99")
-	}
-	assertHasError(t, result, "version")
-}
-
-func TestValidate_InvalidHTTPPort(t *testing.T) {
+func TestValidateVersion(t *testing.T) {
 	tests := []struct {
-		name string
-		port int
+		name    string
+		version int
+		wantErr bool
 	}{
-		{"zero", 0},
-		{"negative", -1},
-		{"too high", 70000},
+		{"valid version 1", 1, false},
+		{"invalid version 0", 0, true},
+		{"invalid version 2", 2, true},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.Server.HTTPPort = tt.port
-			result := cfg.Validate()
-			if result.Valid {
-				t.Errorf("expected invalid for port %d", tt.port)
+			err := validateVersion(tt.version)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateVersion() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			assertHasError(t, result, "server.httpPort")
 		})
 	}
 }
 
-func TestValidate_EmptyRequestIDHeader(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Server.RequestIDHeader = ""
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for empty requestIdHeader")
+func TestValidateServerConfig(t *testing.T) {
+	validBase := ServerConfig{
+		HTTPPort:        8080,
+		RequestIDHeader: "X-Request-Id",
+		Timeouts:        ServerTimeouts{ReadHeader: 5 * time.Second, Read: 30 * time.Second, Write: 60 * time.Second, Idle: 120 * time.Second},
+		MaxHeaderBytes:  1 << 20,
+		Metrics:        MetricsConfig{Path: "/metrics"},
+		Debug:          DebugConfig{ConfigPath: "/debug/config"},
 	}
-	assertHasError(t, result, "server.requestIdHeader")
-}
-
-func TestValidate_InvalidK8sQPS(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Kubernetes.QPS = 2000
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for QPS > 1000")
-	}
-	assertHasError(t, result, "kubernetes.qps")
-}
-
-func TestValidate_InvalidSandboxNamespace(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Sandbox.Defaults.Namespace = ""
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for empty namespace")
-	}
-	assertHasError(t, result, "sandbox.defaults.namespace")
-}
-
-func TestValidate_InvalidTTLSeconds(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Sandbox.Defaults.TTLSeconds = 0
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for TTL 0")
-	}
-	assertHasError(t, result, "sandbox.defaults.ttlSeconds")
-}
-
-func TestValidate_InvalidExecTimeout(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Exec.MaxTimeout = cfg.Exec.DefaultTimeout / 2
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid when maxTimeout < defaultTimeout")
-	}
-	assertHasError(t, result, "exec.maxTimeout")
-}
-
-func TestValidate_InvalidFilesRootPrefix(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Files.RootPrefix = "relative/path"
-	result := cfg.Validate()
-	if result.Valid {
-		t.Error("expected invalid for relative rootPrefix")
-	}
-	assertHasError(t, result, "files.rootPrefix")
-}
-
-func TestValidateEnvKey(t *testing.T) {
-	cfg := DefaultConfig()
-
 	tests := []struct {
-		key   string
-		valid bool
+		name    string
+		cfg     ServerConfig
+		wantErr bool
 	}{
-		{"FOO", true},
-		{"FOO_BAR", true},
-		{"_FOO", true},
-		{"A123", true},
-		{"foo", false},
-		{"1FOO", false},
-		{"FOO-BAR", false},
-		{"", false},
+		{
+			name:    "valid config",
+			cfg:     validBase,
+			wantErr: false,
+		},
+		{
+			name: "invalid port",
+			cfg: ServerConfig{
+				HTTPPort:        0,
+				RequestIDHeader: "X-Request-Id",
+			},
+			wantErr: true,
+		},
+		{
+			name: "port over 65535",
+			cfg: ServerConfig{
+				HTTPPort:        65536,
+				RequestIDHeader: "X-Request-Id",
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty request id header",
+			cfg: ServerConfig{
+				HTTPPort:        8080,
+				RequestIDHeader: "",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid metrics path",
+			cfg: ServerConfig{
+				HTTPPort:        8080,
+				RequestIDHeader: "X-Request-Id",
+				Metrics:         MetricsConfig{Path: "metrics"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative readHeader",
+			cfg: func() ServerConfig {
+				c := validBase
+				c.Timeouts.ReadHeader = -1
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "negative read timeout",
+			cfg: func() ServerConfig {
+				c := validBase
+				c.Timeouts.Read = -time.Second
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "negative maxHeaderBytes",
+			cfg: func() ServerConfig {
+				c := validBase
+				c.MaxHeaderBytes = -1
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "debug configPath not starting with /",
+			cfg: func() ServerConfig {
+				c := validBase
+				c.Debug.ConfigPath = "relative"
+				return c
+			}(),
+			wantErr: true,
+		},
 	}
+
 	for _, tt := range tests {
-		t.Run(tt.key, func(t *testing.T) {
-			if got := cfg.ValidateEnvKey(tt.key); got != tt.valid {
-				t.Errorf("ValidateEnvKey(%q) = %v, want %v", tt.key, got, tt.valid)
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateServerConfig(&tt.cfg)
+			if (len(errs) > 0) != tt.wantErr {
+				t.Errorf("validateServerConfig() errors = %v, wantErr %v", errs, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestValidateWorkdir(t *testing.T) {
+func TestValidateAuthConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     AuthConfig
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			cfg: AuthConfig{
+				HeaderName: "X-Service-Key",
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty header name",
+			cfg: AuthConfig{
+				HeaderName: "",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateAuthConfig(&tt.cfg)
+			if (len(errs) > 0) != tt.wantErr {
+				t.Errorf("validateAuthConfig() errors = %v, wantErr %v", errs, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateK8sConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     K8sConfig
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			cfg: K8sConfig{
+				QPS:            50,
+				Burst:          100,
+				RequestTimeout: 15 * time.Second,
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative qps",
+			cfg: K8sConfig{
+				QPS: -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative burst",
+			cfg: K8sConfig{
+				QPS:   50,
+				Burst: -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative requestTimeout",
+			cfg: K8sConfig{
+				QPS:            50,
+				Burst:          100,
+				RequestTimeout: -time.Second,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateK8sConfig(&tt.cfg)
+			if (len(errs) > 0) != tt.wantErr {
+				t.Errorf("validateK8sConfig() errors = %v, wantErr %v", errs, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	tests := []struct {
-		workdir string
-		valid   bool
-	}{
-		{"/workspace", true},
-		{"/workspace/subdir", true},
-		{"/tmp", false},
-		{"relative", false},
-		{"/etc/passwd", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.workdir, func(t *testing.T) {
-			if got := cfg.ValidateWorkdir(tt.workdir); got != tt.valid {
-				t.Errorf("ValidateWorkdir(%q) = %v, want %v", tt.workdir, got, tt.valid)
-			}
-		})
+	result := cfg.Validate()
+	if !result.Valid {
+		t.Errorf("DefaultConfig() validation failed: %d errors", len(result.Errors))
 	}
 }
 
-func TestValidateFilePath(t *testing.T) {
-	cfg := DefaultConfig()
-
-	tests := []struct {
-		path  string
-		valid bool
-	}{
-		{"/workspace", true},
-		{"/workspace/file.txt", true},
-		{"/etc/passwd", false},
-		{"relative", false},
-		{"/workspace/../etc/passwd", false},
+func TestValidate_ValidConfig(t *testing.T) {
+	cfg := &Config{
+		Version: 1,
+		Server: ServerConfig{
+			HTTPPort:        8080,
+			RequestIDHeader: "X-Request-Id",
+			Timeouts:        ServerTimeouts{ReadHeader: 5 * time.Second, Read: 30 * time.Second, Write: 60 * time.Second, Idle: 120 * time.Second},
+			MaxHeaderBytes:  1 << 20,
+			Metrics:         MetricsConfig{Path: "/metrics"},
+			Debug:           DebugConfig{ConfigPath: "/debug/config"},
+		},
+		Auth:       AuthConfig{HeaderName: "X-Service-Key"},
+		Kubernetes: K8sConfig{QPS: 50, Burst: 100, RequestTimeout: 15 * time.Second},
 	}
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			if got := cfg.ValidateFilePath(tt.path); got != tt.valid {
-				t.Errorf("ValidateFilePath(%q) = %v, want %v", tt.path, got, tt.valid)
-			}
-		})
+	result := cfg.Validate()
+	if !result.Valid {
+		t.Errorf("Validate() valid config: Valid = false, errors = %v", result.Errors)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Validate() valid config: got %d errors", len(result.Errors))
 	}
 }
 
-// assertHasError checks that the validation result contains an error for the given field
-func assertHasError(t *testing.T, result *ValidationResult, fieldPath string) {
-	t.Helper()
-	for _, e := range result.Errors {
-		if e.FieldPath == fieldPath {
-			return
-		}
+func TestValidate_InvalidCombined(t *testing.T) {
+	cfg := &Config{
+		Version:    0,
+		Server:     ServerConfig{RequestIDHeader: ""},
+		Auth:       AuthConfig{HeaderName: ""},
+		Kubernetes: K8sConfig{QPS: -1},
 	}
-	fields := make([]string, 0, len(result.Errors))
-	for _, e := range result.Errors {
-		fields = append(fields, e.FieldPath)
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("Validate() invalid config: Valid = true, want false")
 	}
-	t.Errorf("expected error for field %q, got errors for: %v", fieldPath, fields)
+	if len(result.Errors) < 2 {
+		t.Errorf("Validate() invalid config: got %d errors, want at least 2", len(result.Errors))
+	}
+}
+
+func TestCheckFileExists_NotExists(t *testing.T) {
+	if CheckFileExists(filepath.Join(t.TempDir(), "nonexistent")) {
+		t.Error("CheckFileExists(nonexistent) = true, want false")
+	}
+}
+
+func TestCheckFileExists_Exists(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !CheckFileExists(f) {
+		t.Error("CheckFileExists(existing file) = false, want true")
+	}
+}
+
+func TestCheckFileExists_DirReturnsFalse(t *testing.T) {
+	dir := t.TempDir()
+	if CheckFileExists(dir) {
+		t.Error("CheckFileExists(dir) = true, want false (must be file)")
+	}
 }

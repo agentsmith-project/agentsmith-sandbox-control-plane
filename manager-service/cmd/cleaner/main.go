@@ -4,66 +4,51 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
-	"net/url"
-	"os"
-	"sort"
-	"strings"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 )
 
 const (
-	sandboxAppLabel       = "llm-sandbox"
-	expiresAtAnnotation   = "expires_at"
-	sessionIDAnnotation  = "sandbox/sessionId"
-
-	// defaultFallbackTTL is the fallback TTL for pods with invalid or missing expires_at annotations
-	defaultFallbackTTL = 7 * 24 * time.Hour
-
-	// defaultManagerDeleteTimeout is the timeout for calling Manager DELETE API
-	defaultManagerDeleteTimeout = 2 * time.Minute
+	sandboxAppLabel     = "sandbox"
+	workloadAppLabel    = "managed-workload"
+	expiresAtAnnotation = "expires_at"
 )
 
-// allowedNamespaces is a whitelist of namespaces that the cleaner is allowed to clean.
-// Only the sandbox namespace runs sandbox pods; sandbox-system and sandbox-workspaces
-// do not and must not be managed by the cleaner.
-var allowedNamespaces = map[string]bool{
-	"sandbox": true,
-}
-
-func isNamespaceAllowed(ns string) bool {
-	return allowedNamespaces[ns]
-}
-
-func getAllowedNamespaceList() []string {
-	namespaces := make([]string, 0, len(allowedNamespaces))
-	for ns := range allowedNamespaces {
-		namespaces = append(namespaces, ns)
-	}
-	sort.Strings(namespaces)
-	return namespaces
-}
-
+// Cleaner deletes pods whose expires_at annotation is in the past. Activity is driven by
+// client keepalive; expired pods are deleted directly—resource lifecycle is manager-controlled.
 func main() {
 	namespace := flag.String("namespace", "default", "Kubernetes namespace to scan for expired pods")
-	dryRun := flag.Bool("dry-run", false, "If true, only print what would be deleted without actually deleting")
-	managerURL := flag.String("manager-url", os.Getenv("MANAGER_URL"), "Manager service URL. Defaults to MANAGER_URL env. Required for snapshot-before-delete.")
+	dryRun := flag.Bool("dry-run", true, "If true, only print what would be deleted without actually deleting")
+	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig file (defaults to in-cluster config)")
 	flag.Parse()
 
-	klog.Infof("Starting sandbox pod cleaner")
-	klog.Infof("Namespace: %s", *namespace)
-	klog.Infof("Dry-run: %v", *dryRun)
-	klog.Infof("Manager URL: %s", *managerURL)
+	switch *logLevel {
+	case "debug":
+		flag.Set("v", "4")
+	case "warn", "error":
+		flag.Set("v", "0")
+	default:
+		flag.Set("v", "2")
+	}
 
-	config, err := rest.InClusterConfig()
+	klog.Infof("Starting sandbox pod cleaner")
+	klog.Infof("Namespace: %s, dry-run: %v", *namespace, *dryRun)
+
+	var config *rest.Config
+	var err error
+	if *kubeconfig != "" {
+		config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	} else {
+		config, err = rest.InClusterConfig()
+	}
 	if err != nil {
-		klog.Fatalf("Error creating in-cluster config: %v", err)
+		klog.Fatalf("Error creating Kubernetes config: %v", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -72,18 +57,19 @@ func main() {
 	}
 
 	ctx := context.Background()
-	if err := runCleaner(ctx, clientset, *namespace, *dryRun, *managerURL); err != nil {
-		klog.Fatalf("Cleaner failed: %v", err)
+
+	if err := runCleaner(ctx, clientset, *namespace, *dryRun); err != nil {
+		klog.Errorf("Sandbox cleaner failed: %v", err)
+	}
+
+	if err := runWorkloadCleaner(ctx, clientset, *namespace, *dryRun); err != nil {
+		klog.Errorf("Workload cleaner failed: %v", err)
 	}
 
 	klog.Infof("Cleaner completed successfully")
 }
 
-func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool, managerURL string) error {
-	if !isNamespaceAllowed(namespace) {
-		return fmt.Errorf("namespace %q is not in the allowed whitelist. Allowed: %v", namespace, getAllowedNamespaceList())
-	}
-
+func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool) error {
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", sandboxAppLabel),
 	})
@@ -96,8 +82,6 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 	now := time.Now()
 	expiredCount := 0
 	skippedCount := 0
-	invalidTTLFallbackCount := 0
-	useManager := managerURL != ""
 
 	for _, pod := range pods.Items {
 		expiresAtStr, hasExpiry := pod.Annotations[expiresAtAnnotation]
@@ -109,106 +93,87 @@ func runCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 
 		expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
 		if err != nil {
-			if pod.CreationTimestamp.IsZero() {
-				klog.Warningf("Pod %s/%s has zero creation timestamp, skipping", pod.Namespace, pod.Name)
-				skippedCount++
-				continue
-			}
-			fallbackExpiresAt := pod.CreationTimestamp.Add(defaultFallbackTTL)
-			if now.After(fallbackExpiresAt) {
-				klog.Infof("Pod %s/%s exceeded fallback TTL (invalid %s)", pod.Namespace, pod.Name, expiresAtAnnotation)
-				if !dryRun {
-					if err := deleteExpiredPod(ctx, clientset, &pod, useManager, managerURL, ""); err != nil {
-						klog.Errorf("Failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
-					}
-				}
-				invalidTTLFallbackCount++
+			klog.Warningf("Pod %s/%s has invalid %s annotation (%q): %v, skipping",
+				pod.Namespace, pod.Name, expiresAtAnnotation, expiresAtStr, err)
+			skippedCount++
+			continue
+		}
+
+		if now.After(expiresAt) {
+			klog.Infof("Pod %s/%s expired at %s (now: %s)",
+				pod.Namespace, pod.Name, expiresAt.Format(time.RFC3339), now.Format(time.RFC3339))
+
+			if dryRun {
+				klog.Infof("[DRY-RUN] Would delete pod %s/%s", pod.Namespace, pod.Name)
 			} else {
-				skippedCount++
+				klog.Infof("Deleting pod %s/%s", pod.Namespace, pod.Name)
+				if err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+					klog.Errorf("Failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
+					continue
+				}
+				klog.Infof("Successfully deleted pod %s/%s", pod.Namespace, pod.Name)
 			}
-			continue
-		}
-
-		if !now.After(expiresAt) {
-			klog.V(2).Infof("Pod %s/%s has not expired yet (expires: %s)", pod.Namespace, pod.Name, expiresAt.Format(time.RFC3339))
-			continue
-		}
-
-		klog.Infof("Pod %s/%s expired at %s (now: %s)", pod.Namespace, pod.Name, expiresAt.Format(time.RFC3339), now.Format(time.RFC3339))
-
-		if dryRun {
-			klog.Infof("[DRY-RUN] Would delete pod %s/%s", pod.Namespace, pod.Name)
 			expiredCount++
-			continue
+		} else {
+			klog.V(2).Infof("Pod %s/%s has not expired yet (expires: %s)",
+				pod.Namespace, pod.Name, expiresAt.Format(time.RFC3339))
 		}
-
-		sessionID := getSessionID(&pod)
-		if err := deleteExpiredPod(ctx, clientset, &pod, useManager, managerURL, sessionID); err != nil {
-			klog.Errorf("Failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
-			continue
-		}
-		klog.Infof("Successfully deleted pod %s/%s", pod.Namespace, pod.Name)
-		expiredCount++
 	}
 
-	klog.Infof("Scan complete: %d expired, %d invalid TTL (deleted via fallback), %d skipped, %d total pods",
-		expiredCount, invalidTTLFallbackCount, skippedCount, len(pods.Items))
+	klog.Infof("Scan complete: %d expired, %d skipped, %d total pods",
+		expiredCount, skippedCount, len(pods.Items))
 
 	return nil
 }
 
-func getSessionID(pod *v1.Pod) string {
-	if pod.Annotations != nil {
-		if id, ok := pod.Annotations[sessionIDAnnotation]; ok && id != "" {
-			return id
-		}
+func runWorkloadCleaner(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dryRun bool) error {
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", workloadAppLabel),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list workload pods: %w", err)
 	}
-	return ""
-}
 
-// deleteExpiredPod deletes an expired pod. When useManager is true and managerURL is set and sessionID is non-empty,
-// it calls the Manager DELETE API so that a snapshot is taken before the pod is deleted. Otherwise it deletes the pod
-// directly via the Kubernetes API (no snapshot).
-func deleteExpiredPod(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.Pod, useManager bool, managerURL, sessionID string) error {
-	if useManager && managerURL != "" && sessionID != "" {
-		ok, err := callManagerDelete(ctx, managerURL, sessionID)
+	klog.Infof("Found %d workload pods (app=%s)", len(pods.Items), workloadAppLabel)
+
+	now := time.Now()
+	expiredCount := 0
+
+	for _, pod := range pods.Items {
+		expiresAtStr, hasExpiry := pod.Annotations[expiresAtAnnotation]
+		if !hasExpiry {
+			continue
+		}
+
+		expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
 		if err != nil {
-			return fmt.Errorf("manager delete failed: %w", err)
+			klog.Warningf("Workload pod %s: invalid expires_at %q: %v", pod.Name, expiresAtStr, err)
+			continue
 		}
-		if ok {
-			return nil
+
+		if !now.After(expiresAt) {
+			continue
 		}
-		// Manager returned 404 or other non-success; fall back to direct delete so pod is not left stuck
-		klog.Warningf("Manager DELETE did not succeed for pod %s/%s (sessionId=%s), falling back to direct K8s delete (no snapshot)", pod.Namespace, pod.Name, sessionID)
+
+		klog.Infof("Workload pod %s expired at %s (no keepalive)", pod.Name, expiresAt.Format(time.RFC3339))
+
+		if dryRun {
+			klog.Infof("[DRY-RUN] Would delete workload pod %s", pod.Name)
+			expiredCount++
+			continue
+		}
+
+		klog.Infof("Deleting workload pod %s", pod.Name)
+		if err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("Failed to delete workload pod %s: %v", pod.Name, err)
+			continue
+		}
+		klog.Infof("Successfully deleted workload pod %s", pod.Name)
+		expiredCount++
 	}
 
-	// Direct K8s delete (no snapshot when sessionID missing or manager not configured)
-	return clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-}
-
-// callManagerDelete calls DELETE /v1/sandboxes/{sessionId} on the Manager. Returns (true, nil) on 204, (false, nil) on 404, (false, err) on other errors.
-func callManagerDelete(ctx context.Context, baseURL, sessionID string) (bool, error) {
-	reqURL := strings.TrimSuffix(baseURL, "/") + "/v1/sandboxes/" + url.PathEscape(sessionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
-	if err != nil {
-		return false, err
-	}
-
-	client := &http.Client{Timeout: defaultManagerDeleteTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusNoContent:
-		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
+	klog.Infof("Workload scan complete: %d expired out of %d total", expiredCount, len(pods.Items))
+	return nil
 }
 
 func init() {

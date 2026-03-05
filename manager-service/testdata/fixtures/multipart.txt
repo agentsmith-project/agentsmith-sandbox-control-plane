@@ -1,9 +1,0 @@
-First section of content.
-
----
-
-Second section with special characters: !@#$%^&*()
-
----
-
-Third section with numbers: 123456789

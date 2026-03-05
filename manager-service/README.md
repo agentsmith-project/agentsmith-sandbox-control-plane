@@ -1,91 +1,96 @@
 # Sandbox Manager Service
 
-## Overview
+## 概述
 
-The Manager Service is the core component of the Sandbox system. It provides an HTTP API for:
-- Creating and managing sandbox pods (via Kubernetes)
-- Executing commands in pods via `kubectl exec` with SSE streaming output
-- File upload and download (tar.gz format)
-- Session management (TTL, activity tracking)
-- Automatic snapshot/restore of workspace state
+Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HTTP API：
+- 创建和管理 workload Pod（工作区目录由 manager 分配）
+- 在 Pod 中执行命令（exec）
+- 客户端 keepalive 续期（超时未收到 keepalive 则由 cleaner 回收 Pod）
 
-## Architecture
+## 快速开始
 
-```
-Client --HTTP/SSE--> Manager --kubectl exec--> Pod (sleep infinity)
-                       |
-                       +---> MinIO/S3 (snapshots)
-```
-
-- **No authentication**: The manager runs in a trusted intranet; the calling client handles auth.
-- **No shell-bridge**: Commands are executed directly via `kubectl exec`.
-- **SSE streaming**: Command output (stdout/stderr) is streamed as Server-Sent Events.
-- **Snapshot/restore**: On pod deletion, workspace is archived to object storage and restored on next creation.
-
-## Quick Start
-
-### Local Development
+### 本地开发
 
 ```bash
-# Build the manager binary
-cd manager-service && go build -o /tmp/sandbox-manager ./cmd/manager
+# 构建 Go 二进制
+./scripts/build.sh
 
-# Run (requires accessible K8s cluster via KUBECONFIG or in-cluster config)
+# 运行（需要可访问的 K8s 集群：in-cluster 或 KUBECONFIG）
 export CONFIG_PATH="$(pwd)/manager-config.example.yaml"
+export SERVICE_KEYS="test-key-123"
 ./manager
 ```
 
-### Build Image
+### 构建镜像
 
 ```bash
-./scripts/build-image.sh        # Build Docker image
-./scripts/build-image.sh -l     # Build and load into kind
-./scripts/build-image.sh -p     # Build and push
+# 构建 Docker 镜像
+./scripts/build-image.sh
+
+# 构建并加载到 kind
+./scripts/build-image.sh -l
+
+# 构建并推送
+./scripts/build-image.sh -p
 ```
 
-### Testing
+### 测试
 
 ```bash
-# From the project root:
-make test          # Run unit tests
-make test-unit     # Run unit tests (same as above)
-make vet           # Run go vet
+./scripts/test.sh
 ```
 
-## Configuration
+### API 冒烟测试（curl）
 
-The manager is configured via a YAML file. See `manager-config.example.yaml` for the full schema.
+```bash
+./scripts/test-manager.sh http://localhost:8080 test-key-123
+```
 
-**Environment Variables:**
-- `CONFIG_PATH`: Path to YAML config file (default: `/etc/sandbox-manager/manager-config.yaml`)
-- `CONFIG_RELOAD_DEBOUNCE` / `CONFIG_RELOAD_MIN_INTERVAL` / `CONFIG_RELOAD_BACKOFF_MAX`: Hot-reload tuning (optional)
-- `STRICT_CONFIG_RELOAD`: Fail on invalid config reload (optional)
-- `STORAGE_ENDPOINT` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` / `STORAGE_BUCKET`: Object storage credentials
+### 代码检查
 
-## API Endpoints
+```bash
+./scripts/lint.sh
+```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| PUT | `/v1/sandboxes/{id}` | Create or ensure sandbox pod |
-| POST | `/v1/sandboxes/{id}/exec` | Execute command (SSE stream) |
-| POST | `/v1/sandboxes/{id}/touch` | Extend TTL |
-| POST | `/v1/sandboxes/{id}/files/upload` | Upload tar.gz to pod |
-| GET | `/v1/sandboxes/{id}/files/download` | Download tar.gz from pod |
-| DELETE | `/v1/sandboxes/{id}` | Delete sandbox pod |
-| GET | `/healthz` | Liveness check |
-| GET | `/readyz` | Readiness check |
-| GET | `/metrics` | Prometheus metrics |
+## 配置与环境变量
 
-## Scripts
+- `CONFIG_PATH`: Manager YAML 配置文件路径（默认：`/etc/sandbox-manager/manager-config.yaml`）
+- `SERVICE_KEYS`: 逗号分隔的 service keys（用于 API 鉴权）
 
-- `build.sh` - Build Go binary
-- `build-image.sh` - Build Docker image
-- `test.sh` - Run tests
-- `lint.sh` - Code quality checks
+## API 文档
 
-## Troubleshooting
+详细 API 文档请参考项目根目录 `docs/api-reference-v2.md`。
 
-1. **K8s connection failed**: Check `KUBECONFIG` or in-cluster config
-2. **Pod creation failed**: Check RBAC permissions and namespace
-3. **Image pull failed**: Verify image exists and pull secrets are configured
-4. **Go version**: Requires Go 1.24+
+## 版本管理
+
+版本号存储在 `VERSION` 文件中。
+
+## 脚本说明
+
+- `build.sh`: 构建 Go 二进制
+- `build-image.sh`: 构建 Docker 镜像
+- `test.sh`: 运行测试
+- `lint.sh`: 代码检查
+- `tag.sh`: 版本标签管理
+- `push.sh`: 推送镜像
+- 镜像版本更新：使用 `k8s/scripts/update-images.sh` 统一更新
+- `verify.sh`: 验证镜像
+
+## 故障排查
+
+### 构建失败
+
+1. **Go 版本**：需要 Go 1.21+
+2. **依赖下载失败**：配置 GOPROXY
+3. **权限问题**：确保有 Docker 权限
+
+### 运行时错误
+
+1. **K8s 连接失败**：检查 KUBECONFIG 或集群内配置
+2. **Pod 创建失败**：检查 RBAC 权限
+3. **镜像拉取失败**：检查镜像是否存在
+
+## 更多信息
+
+- 当前版本：查看 `VERSION` 文件
+- 项目文档：查看项目根目录的 `docs/` 目录

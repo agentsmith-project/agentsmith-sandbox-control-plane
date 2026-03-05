@@ -73,7 +73,16 @@ cleanup() {
 
     # 停止端口转发
     if [ -f /tmp/sandbox-pf.pid ]; then
-        kill $(cat /tmp/sandbox-pf.pid) 2>/dev/null || true
+        # Validate PID before killing to prevent killing wrong process
+        local pid
+        pid=$(cat /tmp/sandbox-pf.pid 2>/dev/null)
+        # Check if PID is a valid number and belongs to port-forward process
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            # Verify it's actually a port-forward process
+            if ps -p "$pid" -o command= 2>/dev/null | grep -q "port-forward.*sandbox-manager"; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        fi
         rm -f /tmp/sandbox-pf.pid
     fi
 
@@ -380,8 +389,17 @@ test_start_minio() {
 test_port_forward() {
     log_step "Step 7: Setup Port Forward"
 
-    # 停止旧的端口转发
-    pkill -f "port-forward.*sandbox-manager" 2>/dev/null || true
+    # Stop old port forwarding processes atomically
+    local pids
+    pids=$(pgrep -f "port-forward.*sandbox-manager" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "$pids" | xargs kill 2>/dev/null || true
+        # Wait for processes to terminate
+        sleep 1
+    fi
+
+    # Clear any stale PID file
+    rm -f /tmp/sandbox-pf.pid
 
     # 启动端口转发
     kubectl port-forward -n sandbox-system svc/sandbox-manager 8080:80 \
