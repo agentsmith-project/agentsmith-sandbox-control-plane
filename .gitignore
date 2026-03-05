@@ -2,6 +2,8 @@
 *.tar
 *.tar.gz
 *.zip
+bin/
+manager-service/bin/
 manager-service/manager
 manager-service/cleaner
 manager-service/*.test

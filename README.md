@@ -6,7 +6,7 @@ Simplified Kubernetes Sandbox Manager
 
 A minimal Kubernetes pod lifecycle manager with JuiceFS-backed persistent workspaces. Provides a REST API for creating, managing, and executing commands in workload pods. Application-agnostic — the caller (e.g. AgentSmith) controls what runs inside pods.
 
-Workload pods are ephemeral compute units. Persistence is JVS-only: the manager assigns a workspace (JuiceFS + JVS) to each pod on creation and restores the latest JVS state when a pod is created. Clients send keepalive to the manager; if no keepalive is received within the idle threshold, the cleaner deletes the pod (no snapshot or GC on cleanup—lifecycle is manager-controlled).
+Workload pods are ephemeral compute units. Each pod gets a workspace directory on a JuiceFS PVC (no snapshot/JVS). Clients send keepalive to the manager; if no keepalive is received within the idle threshold, the cleaner deletes the pod (lifecycle is manager-controlled).
 
 ## Architecture
 
@@ -26,9 +26,8 @@ Workload pods are ephemeral compute units. Persistence is JVS-only: the manager 
 │                    └────────┬──┘  └─────┬──────────┘ │
 │                             │           │             │
 │                    ┌────────▼───────────▼──────────┐ │
-│                    │     JVS Workspace Storage      │ │
-│                    │   (snapshot / restore on       │ │
-│                    │    JuiceFS mount)              │ │
+│                    │  Workspace dir (JuiceFS PVC    │ │
+│                    │   per wsId/wlId, no snapshot)  │ │
 │                    └───────────────────────────────┘ │
 └─────────────────────────────────────────────────────┘
 
@@ -48,7 +47,7 @@ Workload pods are ephemeral compute units. Persistence is JVS-only: the manager 
 | Workload API Handler | `internal/workload` | REST endpoint routing for pod lifecycle and exec |
 | K8s Client | `internal/k8s` | Pod CRUD, activity patching, readiness polling |
 | K8s Executor | `internal/k8s` | SPDY-based command execution inside pods |
-| JVS Workspace Storage | `internal/workspace` | JVS workspace prepare/restore on JuiceFS (manager-assigned) |
+| Workspace directory | *(handler)* | Creates `{basePath}/{wsId}/{wlId}` on JuiceFS for pod subPath mount |
 
 ## API Endpoints
 
@@ -83,7 +82,7 @@ All `/v1/` routes require a valid `X-Service-Key` header. Keys are loaded from t
 
 ### YAML Configuration
 
-The YAML config controls server behavior, K8s client tuning, and rate limiting. It supports hot-reload via filesystem watching. See [docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md) for the full schema.
+The YAML config controls server behavior, K8s client tuning, and rate limiting. See [manager-service/manager-config.example.yaml](manager-service/manager-config.example.yaml) and [docs/api-reference-v2.md](docs/api-reference-v2.md) for the full schema.
 
 Key defaults:
 
@@ -91,7 +90,7 @@ Key defaults:
 - Auth header: `X-Service-Key`
 - K8s QPS/Burst: `50/100`
 - K8s retry: 3 attempts, 200ms–2s exponential backoff
-- Rate limit: 100 RPS global, 10 RPS per-IP, 5 RPS per-session
+- Rate limit: 100 RPS global (see `rateLimit.requestsPerMinute` in config)
 
 ## Quick Start
 
@@ -130,13 +129,12 @@ manager-service/
 ├── internal/
 │   ├── app/              # Application lifecycle, HTTP server setup
 │   ├── auth/             # Service Key validator + middleware
-│   ├── config/           # YAML config loading, validation, hot-reload
-│   ├── errors/           # Retry utilities
+│   ├── config/           # YAML config loading and validation
 │   ├── k8s/              # K8s client, pod operations, SPDY exec
 │   ├── observability/    # Structured logging, Prometheus metrics, health checks
-│   ├── ratelimit/        # Three-tier rate limiting (global/per-IP/per-session)
-│   ├── workload/         # Workload REST handler (types, routing, pod builder)
-│   └── workspace/        # JVS workspace storage (snapshot, restore, GC)
+│   ├── ratelimit/        # Global rate limiting
+│   ├── retry/            # Retry utilities for K8s operations
+│   └── workload/         # Workload REST handler (types, routing, pod builder)
 └── go.mod
 k8s/                      # Kubernetes manifests (base, overlays, scripts)
 docs/                     # Documentation and contracts
@@ -145,7 +143,7 @@ Makefile                  # Build, test, and infrastructure targets
 
 ## How It Works
 
-1. **Pod Creation (PUT):** The handler prepares the JVS workspace (restoring the latest snapshot if one exists), builds a pod spec with the JuiceFS PVC mounted at `/workspace`, and creates it in Kubernetes. Waits up to 120s for the pod to become ready.
+1. **Pod Creation (PUT):** The handler ensures the workspace directory exists under the JuiceFS base path, builds a pod spec with the PVC subPath mounted at `/workspace`, and creates the pod in Kubernetes. Waits up to 120s for the pod to become ready.
 
 2. **Command Execution (POST /exec):** Opens a SPDY stream to the pod's `main` container and executes the given command. Returns stdout, stderr, exit code, and duration.
 

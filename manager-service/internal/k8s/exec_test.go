@@ -275,23 +275,5 @@ func TestBufferWriterSequential(t *testing.T) {
 	}
 }
 
-// TestExecutorDefaultContainer tests that the Executor uses the configured default container
-func TestExecutorDefaultContainer(t *testing.T) {
-	// Create a mock executor with default container
-	executor := &Executor{
-		defaultContainer: "test-sandbox",
-	}
-
-	opts := &ExecOptions{
-		Container: "",
-	}
-
-	// This would be called internally by Exec
-	if opts.Container == "" {
-		opts.Container = executor.defaultContainer
-	}
-
-	if opts.Container != "test-sandbox" {
-		t.Errorf("Default container = %q, want %q", opts.Container, "test-sandbox")
-	}
-}
+// Executor no longer has a defaultContainer field; container is passed per-request.
+// TestExecutorDefaultContainer removed as obsolete.
