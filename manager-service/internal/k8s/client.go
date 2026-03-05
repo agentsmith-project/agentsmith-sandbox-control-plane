@@ -24,15 +24,6 @@ type Client struct {
 	qps       int
 	burst     int
 	timeout   time.Duration
-	retry     *RetryConfig
-}
-
-// RetryConfig contains retry configuration for K8s API calls
-type RetryConfig struct {
-	Enabled     bool
-	MaxAttempts int
-	BaseBackoff time.Duration
-	MaxBackoff  time.Duration
 }
 
 // ClientConfig contains configuration for creating a new K8s client
@@ -41,7 +32,6 @@ type ClientConfig struct {
 	QPS            int
 	Burst          int
 	RequestTimeout time.Duration
-	Retry          *RetryConfig
 }
 
 // NewClient creates a new Kubernetes client
@@ -59,14 +49,6 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	}
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 15 * time.Second
-	}
-	if cfg.Retry == nil {
-		cfg.Retry = &RetryConfig{
-			Enabled:     true,
-			MaxAttempts: 3,
-			BaseBackoff: 200 * time.Millisecond,
-			MaxBackoff:  2 * time.Second,
-		}
 	}
 
 	// Try in-cluster config first, fallback to kubeconfig
@@ -105,7 +87,7 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 		if ns, err := getInClusterNamespace(); err == nil {
 			namespace = ns
 		} else {
-			namespace = "sandbox" // default
+			namespace = "sandbox-workloads" // default
 		}
 	}
 
@@ -118,7 +100,6 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 		qps:       cfg.QPS,
 		burst:     cfg.Burst,
 		timeout:   cfg.RequestTimeout,
-		retry:     cfg.Retry,
 	}, nil
 }
 
@@ -187,51 +168,3 @@ func (c *Client) CreateNamespace(ctx context.Context, name string, labels map[st
 	return nil
 }
 
-// Retry executes a function with retry logic
-func (c *Client) Retry(ctx context.Context, fn func() error) error {
-	if !c.retry.Enabled {
-		return fn()
-	}
-
-	var lastErr error
-	backoff := c.retry.BaseBackoff
-
-	for attempt := 0; attempt < c.retry.MaxAttempts; attempt++ {
-		err := fn()
-		if err == nil {
-			if attempt > 0 {
-				log.Printf("K8s: retry succeeded on attempt %d", attempt+1)
-			}
-			return nil
-		}
-
-		lastErr = err
-
-		// Don't retry on certain errors
-		if errors.IsNotFound(err) || errors.IsAlreadyExists(err) || errors.IsForbidden(err) {
-			return err
-		}
-
-		// Wait before retry
-		if attempt < c.retry.MaxAttempts-1 {
-			log.Printf("K8s: attempt %d failed, backing off %v: %v", attempt+1, backoff, err)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-				// Exponential backoff
-				backoff *= 2
-				if backoff > c.retry.MaxBackoff {
-					backoff = c.retry.MaxBackoff
-				}
-			}
-		}
-	}
-
-	return fmt.Errorf("max retry attempts reached: %w", lastErr)
-}
-
-// WithTimeout creates a context with timeout for K8s operations
-func (c *Client) WithTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, c.timeout)
-}

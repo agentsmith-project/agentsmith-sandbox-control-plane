@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 )
 
@@ -19,18 +20,35 @@ const (
 )
 
 // Cleaner deletes pods whose expires_at annotation is in the past. Activity is driven by
-// client keepalive; the manager does not perform snapshot or GC on cleanup—resource lifecycle is manager-controlled.
+// client keepalive; expired pods are deleted directly—resource lifecycle is manager-controlled.
 func main() {
 	namespace := flag.String("namespace", "default", "Kubernetes namespace to scan for expired pods")
 	dryRun := flag.Bool("dry-run", true, "If true, only print what would be deleted without actually deleting")
+	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig file (defaults to in-cluster config)")
 	flag.Parse()
+
+	switch *logLevel {
+	case "debug":
+		flag.Set("v", "4")
+	case "warn", "error":
+		flag.Set("v", "0")
+	default:
+		flag.Set("v", "2")
+	}
 
 	klog.Infof("Starting sandbox pod cleaner")
 	klog.Infof("Namespace: %s, dry-run: %v", *namespace, *dryRun)
 
-	config, err := rest.InClusterConfig()
+	var config *rest.Config
+	var err error
+	if *kubeconfig != "" {
+		config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	} else {
+		config, err = rest.InClusterConfig()
+	}
 	if err != nil {
-		klog.Fatalf("Error creating in-cluster config: %v", err)
+		klog.Fatalf("Error creating Kubernetes config: %v", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)

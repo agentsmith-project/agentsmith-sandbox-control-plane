@@ -15,11 +15,17 @@ func ServiceKeyMiddleware(validator *ServiceKeyValidator, headerName string) fun
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get(headerName)
-			if !validator.Validate(key) {
-				w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", "application/json")
+			if key == "" {
 				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
-				log.Printf("Auth: rejected request (path=%s, hasKey=%v)", r.URL.Path, key != "")
+				json.NewEncoder(w).Encode(map[string]string{"error": "SERVICE_KEY_MISSING"})
+				log.Printf("Auth: rejected request (path=%s, reason=missing key)", r.URL.Path)
+				return
+			}
+			if !validator.Validate(key) {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]string{"error": "SERVICE_KEY_INVALID"})
+				log.Printf("Auth: rejected request (path=%s, reason=invalid key)", r.URL.Path)
 				return
 			}
 			next.ServeHTTP(w, r)

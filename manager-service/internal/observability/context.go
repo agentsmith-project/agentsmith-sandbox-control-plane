@@ -55,43 +55,6 @@ func (p *Poller) Poll(ctx context.Context, check func() (bool, error)) error {
 	}
 }
 
-// PollWithRetry is like Poll but allows retry on specific errors.
-// shouldRetry function determines whether to retry based on the error.
-// If shouldRetry returns false, the error is returned immediately.
-func (p *Poller) PollWithRetry(ctx context.Context, check func() (bool, error), shouldRetry func(error) bool) error {
-	ctx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(p.interval)
-	defer ticker.Stop()
-
-	var lastErr error
-
-	for {
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("poll canceled: %w (last error: %v)", ctx.Err(), lastErr)
-			}
-			return fmt.Errorf("poll canceled: %w", ctx.Err())
-
-		case <-ticker.C:
-			done, err := check()
-			if err != nil {
-				lastErr = err
-				if !shouldRetry(err) {
-					return err
-				}
-				// Continue polling for retryable errors
-				continue
-			}
-			if done {
-				return nil
-			}
-		}
-	}
-}
-
 // DefaultPoller returns a Poller with common defaults.
 func DefaultPoller() *Poller {
 	return NewPoller(2*time.Second, 5*time.Minute)

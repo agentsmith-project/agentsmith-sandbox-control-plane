@@ -16,21 +16,18 @@ import (
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/workload"
-	"github.com/sandbox/manager/internal/workspace"
 )
 
 var version = "dev"
 
 type Manager struct {
 	cfg              *config.Config
-	cfgWatcher       *config.Watcher
 	k8sClient        *k8s.Client
 	k8sExecutor      *k8s.Executor
 	authValidator    *auth.ServiceKeyValidator
-	healthChecker    *observability.HealthChecker
-	metrics          *observability.MetricsRegistry
-	workspaceStorage *workspace.Storage
-	workloadHandler  *workload.Handler
+	healthChecker   *observability.HealthChecker
+	metrics         *observability.MetricsRegistry
+	workloadHandler *workload.Handler
 	rateLimiter      *ratelimit.Limiter
 	httpServer       *http.Server
 	ctx              context.Context
@@ -47,7 +44,7 @@ func mainImpl() {
 
 	bootCfg := loadBootConfig()
 
-	cfg, cfgMeta, err := config.LoadWithDefaults(bootCfg.ConfigPath)
+	cfg, err := config.LoadWithDefaults(bootCfg.ConfigPath)
 	if err != nil {
 		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
@@ -61,20 +58,14 @@ func mainImpl() {
 		log.Fatalf("Configuration validation failed (%d errors)", len(validation.Errors))
 	}
 
-	log.Printf("Configuration loaded (hash=%s, source=%s)", cfgMeta.CurrentHash, cfgMeta.SourcePath)
+	log.Printf("Configuration loaded from %s", bootCfg.ConfigPath)
 
-	k8sNamespace := getEnvOrDefault("K8S_NAMESPACE", "sandbox")
+	k8sNamespace := getEnvOrDefault("K8S_NAMESPACE", "sandbox-workloads")
 	k8sClient, err := k8s.NewClient(&k8s.ClientConfig{
 		Namespace:      k8sNamespace,
 		QPS:            cfg.Kubernetes.QPS,
 		Burst:          cfg.Kubernetes.Burst,
 		RequestTimeout: cfg.Kubernetes.RequestTimeout,
-		Retry: &k8s.RetryConfig{
-			Enabled:     cfg.Kubernetes.Retry.Enabled,
-			MaxAttempts: cfg.Kubernetes.Retry.MaxAttempts,
-			BaseBackoff: cfg.Kubernetes.Retry.BaseBackoff,
-			MaxBackoff:  cfg.Kubernetes.Retry.MaxBackoff,
-		},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create K8s client: %v", err)
@@ -95,43 +86,25 @@ func mainImpl() {
 	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
-	cfgWatcher := config.NewWatcher(
-		bootCfg.ConfigPath,
-		cfg,
-		cfgMeta,
-		&config.WatcherOptions{
-			DebounceDuration: bootCfg.DebounceDuration,
-			MinInterval:      bootCfg.MinInterval,
-			MaxBackoff:       bootCfg.MaxBackoff,
-			StrictMode:       bootCfg.StrictMode,
-		},
-	)
-
 	juicefsBasePath := getEnvOrDefault("JUICEFS_BASE_PATH", "/mnt/juicefs/workloads")
-	workspaceStorage := workspace.NewStorage(juicefsBasePath)
-	log.Printf("Workspace storage initialized (basePath=%s)", juicefsBasePath)
-
 	juicefsPVCName := getEnvOrDefault("JUICEFS_PVC_NAME", "juicefs-workloads-pvc")
-	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, workspaceStorage, juicefsPVCName)
-	log.Printf("Workload handler initialized (pvc=%s)", juicefsPVCName)
+	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, juicefsPVCName, juicefsBasePath)
+	log.Printf("Workload handler initialized (pvc=%s, basePath=%s)", juicefsPVCName, juicefsBasePath)
 
 	rateLimitCfg := ratelimit.ConfigFromRequestsPerMinute(cfg.RateLimit.RequestsPerMinute)
 	rateLimiter := ratelimit.NewLimiter(rateLimitCfg)
-	rateLimiter.StartCleanup()
 	log.Printf("Rate limiter initialized (global RPS=%.1f)", rateLimitCfg.GlobalRPS)
 
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
 	mgr := &Manager{
 		cfg:              cfg,
-		cfgWatcher:       cfgWatcher,
 		k8sClient:        k8sClient,
 		k8sExecutor:      k8sExecutor,
 		authValidator:    authValidator,
-		healthChecker:    observability.NewHealthChecker(),
-		metrics:          observability.GetMetrics(),
-		workspaceStorage: workspaceStorage,
-		workloadHandler:  workloadHandler,
+		healthChecker:   observability.NewHealthChecker(),
+		metrics:         observability.GetMetrics(),
+		workloadHandler: workloadHandler,
 		rateLimiter:      rateLimiter,
 		ctx:              mgrCtx,
 		cancel:           mgrCancel,
@@ -139,12 +112,6 @@ func mainImpl() {
 
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
-
-	if err := cfgWatcher.Start(context.Background()); err != nil {
-		log.Printf("Warning: Config watcher failed to start (hot reload disabled): %v", err)
-	} else {
-		defer cfgWatcher.Stop()
-	}
 
 	log.Printf("Sandbox Manager started on port %d", cfg.Server.HTTPPort)
 	log.Printf("  Health check: http://localhost:%d/healthz", cfg.Server.HTTPPort)
@@ -158,27 +125,13 @@ func mainImpl() {
 }
 
 type BootConfig struct {
-	ConfigPath       string
-	DebounceDuration time.Duration
-	MinInterval      time.Duration
-	MaxBackoff       time.Duration
-	StrictMode       bool
+	ConfigPath string
 }
 
 func loadBootConfig() *BootConfig {
-	cfg := &BootConfig{
-		ConfigPath:       getEnvOrDefault("CONFIG_PATH", "/etc/sandbox-manager/manager-config.yaml"),
-		DebounceDuration: parseDuration(getEnvOrDefault("CONFIG_RELOAD_DEBOUNCE", "300ms")),
-		MinInterval:      parseDuration(getEnvOrDefault("CONFIG_RELOAD_MIN_INTERVAL", "1s")),
-		MaxBackoff:       parseDuration(getEnvOrDefault("CONFIG_RELOAD_BACKOFF_MAX", "30s")),
-		StrictMode:       os.Getenv("STRICT_CONFIG_RELOAD") == "true",
+	return &BootConfig{
+		ConfigPath: getEnvOrDefault("CONFIG_PATH", "/etc/sandbox-manager/manager-config.yaml"),
 	}
-
-	if err := config.IsConfigFileReadable(cfg.ConfigPath); err != nil {
-		log.Printf("Warning: %v", err)
-	}
-
-	return cfg
 }
 
 func (m *Manager) setupReadinessChecks() {
@@ -214,15 +167,19 @@ func (m *Manager) setupHTTPServer() {
 
 	var v1Handler http.Handler = v1Mux
 	v1Handler = authMiddleware(v1Handler)
-	v1Handler = observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)(v1Handler)
-	v1Handler = m.observabilityMiddleware(v1Handler)
 	v1Handler = m.rateLimiter.Middleware(v1Handler)
 
 	mux.Handle("/v1/", v1Handler)
 
+	// Apply request-ID and observability middlewares globally so all routes
+	// (including /healthz, /readyz, /metrics) are instrumented consistently.
+	var rootHandler http.Handler = mux
+	rootHandler = m.observabilityMiddleware(rootHandler)
+	rootHandler = observability.RequestIDMiddleware(m.cfg.Server.RequestIDHeader)(rootHandler)
+
 	m.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", m.cfg.Server.HTTPPort),
-		Handler:           mux,
+		Handler:           rootHandler,
 		ReadTimeout:       m.cfg.Server.Timeouts.Read,
 		WriteTimeout:      m.cfg.Server.Timeouts.Write,
 		IdleTimeout:       m.cfg.Server.Timeouts.Idle,
@@ -266,9 +223,7 @@ func (m *Manager) waitForShutdown() {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	if m.rateLimiter != nil {
-		m.rateLimiter.Stop()
-	}
+	// rateLimiter is a stateless global limiter; no cleanup needed.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -287,11 +242,3 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-func parseDuration(s string) time.Duration {
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		log.Printf("Warning: invalid duration %q, using default", s)
-		return 0
-	}
-	return d
-}

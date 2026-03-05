@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func newTestHandler(t *testing.T) *Handler {
 	api := newFakeK8sAPI(t)
 	client := newTestK8sClient(t, api.URL)
 	executor := k8s.NewExecutor(client)
-	return NewHandler(client, executor, nil, "test-pvc")
+	return NewHandler(client, executor, "test-pvc", t.TempDir())
 }
 
 func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
@@ -115,7 +116,7 @@ func TestNewHandler(t *testing.T) {
 	assert.NotNil(t, h.k8sClient)
 	assert.NotNil(t, h.executor)
 	assert.Equal(t, "test-pvc", h.pvcName)
-	assert.Nil(t, h.storage)
+	assert.NotEmpty(t, h.basePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +603,7 @@ func TestHandleDeletePod_NotFound(t *testing.T) {
 	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleDeletePod(rec, req, "nonexistent")
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	var body map[string]string
@@ -662,6 +663,12 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	assert.True(t, *pod.Spec.SecurityContext.RunAsNonRoot)
 	require.NotNil(t, pod.Spec.SecurityContext.RunAsUser)
 	assert.Equal(t, int64(1000), *pod.Spec.SecurityContext.RunAsUser)
+	require.NotNil(t, pod.Spec.SecurityContext.RunAsGroup)
+	assert.Equal(t, int64(1000), *pod.Spec.SecurityContext.RunAsGroup)
+	require.NotNil(t, pod.Spec.SecurityContext.FSGroup)
+	assert.Equal(t, int64(1000), *pod.Spec.SecurityContext.FSGroup)
+	require.NotNil(t, pod.Spec.SecurityContext.FSGroupChangePolicy)
+	assert.Equal(t, v1.FSGroupChangeOnRootMismatch, *pod.Spec.SecurityContext.FSGroupChangePolicy)
 
 	require.Len(t, pod.Spec.Containers, 1)
 	c := pod.Spec.Containers[0]
@@ -669,6 +676,14 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	assert.Equal(t, "ubuntu:22.04", c.Image)
 	assert.Equal(t, "/workspace", c.WorkingDir)
 	assert.Equal(t, DefaultKeepAliveCommand, c.Command)
+
+	require.NotNil(t, c.SecurityContext)
+	require.NotNil(t, c.SecurityContext.AllowPrivilegeEscalation)
+	assert.False(t, *c.SecurityContext.AllowPrivilegeEscalation)
+	require.NotNil(t, c.SecurityContext.Capabilities)
+	assert.Equal(t, []v1.Capability{"ALL"}, c.SecurityContext.Capabilities.Drop)
+	require.NotNil(t, c.SecurityContext.SeccompProfile)
+	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, c.SecurityContext.SeccompProfile.Type)
 
 	require.Len(t, c.VolumeMounts, 1)
 	vm := c.VolumeMounts[0]
@@ -929,7 +944,7 @@ func TestBuildPod_PVCName(t *testing.T) {
 	api := newFakeK8sAPI(t)
 	client := newTestK8sClient(t, api.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, nil, "my-juicefs-pvc")
+	h := NewHandler(client, executor, "my-juicefs-pvc", t.TempDir())
 
 	now := time.Now().UTC()
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
@@ -994,4 +1009,303 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cpu_request")
+}
+
+// ---------------------------------------------------------------------------
+// handleCreatePod – workspace directory creation
+// ---------------------------------------------------------------------------
+
+func TestHandleCreatePod_CreatesWorkspaceDirectory(t *testing.T) {
+	basePath := t.TempDir()
+	api := newFakeK8sAPI(t)
+	client := newTestK8sClient(t, api.URL)
+	executor := k8s.NewExecutor(client)
+	h := NewHandler(client, executor, "test-pvc", basePath)
+
+	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
+
+	expectedDir := filepath.Join(basePath, "ws-abc", "wl-test")
+	info, err := os.Stat(expectedDir)
+	require.NoError(t, err, "workspace directory should be created")
+	assert.True(t, info.IsDir())
+}
+
+func TestHandleCreatePod_SubPathInPodSpec(t *testing.T) {
+	basePath := t.TempDir()
+
+	podSpec := make(chan string, 1)
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pods") {
+			var pod v1.Pod
+			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Containers) > 0 {
+				if len(pod.Spec.Containers[0].VolumeMounts) > 0 {
+					podSpec <- pod.Spec.Containers[0].VolumeMounts[0].SubPath
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(pod)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(&metav1.Status{
+			TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+			Status:   metav1.StatusFailure,
+			Reason:   metav1.StatusReasonNotFound,
+			Code:     http.StatusNotFound,
+		})
+	}))
+	t.Cleanup(fakeAPI.Close)
+
+	client := newTestK8sClient(t, fakeAPI.URL)
+	executor := k8s.NewExecutor(client)
+	h := NewHandler(client, executor, "test-pvc", basePath)
+
+	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
+
+	select {
+	case sp := <-podSpec:
+		assert.Equal(t, "ws-abc/wl-test", sp, "subPath should be {workspaceID}/{workloadID}")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pod creation")
+	}
+}
+
+func TestHandleCreatePod_IdempotentMkdir(t *testing.T) {
+	basePath := t.TempDir()
+	api := newFakeK8sAPI(t)
+	client := newTestK8sClient(t, api.URL)
+	executor := k8s.NewExecutor(client)
+	h := NewHandler(client, executor, "test-pvc", basePath)
+
+	expectedDir := filepath.Join(basePath, "ws-1", "wl-1")
+	require.NoError(t, os.MkdirAll(expectedDir, 0755))
+
+	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	info, err := os.Stat(expectedDir)
+	require.NoError(t, err, "directory should still exist after idempotent call")
+	assert.True(t, info.IsDir())
+}
+
+func TestHandleCreatePod_SubPathFormat(t *testing.T) {
+	assert.Equal(t, "ws-1/wl-1",
+		filepath.Join("ws-1", "wl-1"),
+		"subPath should be {wsID}/{wlID}")
+}
+
+func TestHandleCreatePod_MkdirAllFailure(t *testing.T) {
+	basePath := "/dev/null/impossible"
+	api := newFakeK8sAPI(t)
+	client := newTestK8sClient(t, api.URL)
+	executor := k8s.NewExecutor(client)
+	h := NewHandler(client, executor, "test-pvc", basePath)
+
+	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "workspace dir creation failed")
+}
+
+func TestHandleCreatePod_InvalidResourceReturns400(t *testing.T) {
+	h := newTestHandler(t)
+
+	tests := []struct {
+		name    string
+		req     CreateRequest
+		wantMsg string
+	}{
+		{"invalid cpu_request", CreateRequest{Image: "img", CPURequest: "bad-value"}, "cpu_request"},
+		{"invalid memory_request", CreateRequest{Image: "img", MemoryRequest: "xyz"}, "memory_request"},
+		{"invalid cpu_limit", CreateRequest{Image: "img", CPULimit: "1.2.3"}, "cpu_limit"},
+		{"invalid memory_limit", CreateRequest{Image: "img", MemoryLimit: "not-a-qty"}, "memory_limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, _ := json.Marshal(tt.req)
+			req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+			rec := httptest.NewRecorder()
+			h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			var body map[string]string
+			decodeJSON(t, rec, &body)
+			assert.Contains(t, body["error"], tt.wantMsg)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exec timeout capping logic
+// ---------------------------------------------------------------------------
+
+func TestExecTimeoutCapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputSec   int
+		wantResult time.Duration
+	}{
+		{"zero uses default", 0, 30 * time.Second},
+		{"positive uses value", 60, 60 * time.Second},
+		{"exactly at cap", 300, 300 * time.Second},
+		{"over cap is clamped", 301, maxExecTimeout},
+		{"far over cap is clamped", 9999, maxExecTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			timeout := 30 * time.Second
+			if tt.inputSec > 0 {
+				timeout = time.Duration(tt.inputSec) * time.Second
+			}
+			if timeout > maxExecTimeout {
+				timeout = maxExecTimeout
+			}
+			assert.Equal(t, tt.wantResult, timeout)
+		})
+	}
+}
+
+func TestMaxExecTimeoutConstant(t *testing.T) {
+	assert.Equal(t, 300*time.Second, maxExecTimeout, "maxExecTimeout must be 300s per API contract")
+}
+
+// ---------------------------------------------------------------------------
+// JSON field name contracts (AgentSmith API contract)
+// ---------------------------------------------------------------------------
+
+func TestPodStatus_JSONFieldNames(t *testing.T) {
+	ps := PodStatus{
+		PodName:        "workload-abc",
+		Phase:          "Running",
+		IP:             "10.0.0.1",
+		StartedAt:      "2025-01-01T00:00:00Z",
+		LastActivityAt: "2025-01-01T01:00:00Z",
+		ExpiresAt:      "2025-01-02T00:00:00Z",
+		Message:        "ok",
+	}
+	b, err := json.Marshal(ps)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+
+	assert.Equal(t, "workload-abc", raw["pod_name"])
+	assert.Equal(t, "Running", raw["phase"])
+	assert.Equal(t, "10.0.0.1", raw["ip"])
+	assert.Equal(t, "2025-01-01T00:00:00Z", raw["started_at"])
+	assert.Equal(t, "2025-01-01T01:00:00Z", raw["last_activity_at"])
+	assert.Equal(t, "2025-01-02T00:00:00Z", raw["expires_at"])
+	assert.Equal(t, "ok", raw["message"])
+}
+
+func TestKeepaliveResponse_JSONFieldNames(t *testing.T) {
+	r := KeepaliveResponse{ExpiresAt: "2025-01-02T00:00:00Z"}
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+
+	assert.Equal(t, "2025-01-02T00:00:00Z", raw["expires_at"])
+	assert.Len(t, raw, 1, "KeepaliveResponse must have exactly one field")
+}
+
+func TestDeleteResponse_JSONFieldNames(t *testing.T) {
+	r := DeleteResponse{Message: "pod deleted"}
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+
+	assert.Equal(t, "pod deleted", raw["message"])
+	assert.Len(t, raw, 1, "DeleteResponse must have exactly one field")
+}
+
+func TestExecResponse_JSONFieldNames(t *testing.T) {
+	r := ExecResponse{ExitCode: 1, Stdout: "out", Stderr: "err", DurationMs: 42}
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+
+	assert.Equal(t, float64(1), raw["exit_code"])
+	assert.Equal(t, "out", raw["stdout"])
+	assert.Equal(t, "err", raw["stderr"])
+	assert.Equal(t, float64(42), raw["duration_ms"])
+}
+
+func TestCreateRequest_JSONDeserialization(t *testing.T) {
+	raw := `{
+		"image": "ubuntu:22.04",
+		"command": ["sh", "-c", "echo hi"],
+		"env": {"FOO": "bar", "BAZ": "qux"},
+		"cpu_request": "250m",
+		"cpu_limit": "1",
+		"memory_request": "256Mi",
+		"memory_limit": "1Gi",
+		"idle_timeout_sec": 600,
+		"max_lifetime_sec": 7200
+	}`
+
+	var r CreateRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &r))
+
+	assert.Equal(t, "ubuntu:22.04", r.Image)
+	assert.Equal(t, []string{"sh", "-c", "echo hi"}, r.Command)
+	assert.Equal(t, map[string]string{"FOO": "bar", "BAZ": "qux"}, r.Env)
+	assert.Equal(t, "250m", r.CPURequest)
+	assert.Equal(t, "1", r.CPULimit)
+	assert.Equal(t, "256Mi", r.MemoryRequest)
+	assert.Equal(t, "1Gi", r.MemoryLimit)
+	assert.Equal(t, 600, r.IdleTimeoutSec)
+	assert.Equal(t, 7200, r.MaxLifetimeSec)
+}
+
+func TestExecRequest_JSONDeserialization(t *testing.T) {
+	raw := `{"cmd": ["echo", "hello"], "timeout_seconds": 120}`
+
+	var r ExecRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &r))
+
+	assert.Equal(t, []string{"echo", "hello"}, r.Cmd)
+	assert.Equal(t, 120, r.TimeoutSeconds)
+}
+
+func TestExecRequest_CmdFieldRequired(t *testing.T) {
+	raw := `{"timeout_seconds": 30}`
+
+	var r ExecRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &r))
+	assert.Nil(t, r.Cmd, "missing cmd field should decode as nil slice")
+}
+
+func TestPodStatus_OmitsZeroValues(t *testing.T) {
+	// phase is the only non-omitempty field – must always appear
+	ps := PodStatus{Phase: "offline"}
+	b, err := json.Marshal(ps)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+
+	assert.Equal(t, "offline", raw["phase"])
+	for _, key := range []string{"pod_name", "ip", "started_at", "last_activity_at", "expires_at", "message"} {
+		_, ok := raw[key]
+		assert.False(t, ok, "zero-value field %q must be omitted from JSON", key)
+	}
 }

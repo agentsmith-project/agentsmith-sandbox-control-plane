@@ -17,7 +17,7 @@ MANAGER_BIN="${MANAGER_BIN:-./manager}"
 MANAGER_PORT="${MANAGER_PORT:-8080}"
 SERVICE_KEY="${SERVICE_KEY:-test-e2e-key-12345}"
 CONFIG_FILE="${CONFIG_FILE:-/tmp/e2e-manager-config.yaml}"
-NAMESPACE="${NAMESPACE:-sandbox}"
+NAMESPACE="${NAMESPACE:-sandbox-workloads}"
 LOG_FILE="${LOG_FILE:-/tmp/e2e-test.log}"
 MANAGER_PID=""
 
@@ -118,19 +118,12 @@ server:
   metrics:
     enabled: true
     path: /metrics
-    requireServiceKey: false
 auth:
-  enabled: true
   headerName: X-Service-Key
 kubernetes:
   qps: 50
   burst: 100
   requestTimeout: 15s
-  retry:
-    enabled: true
-    maxAttempts: 3
-    baseBackoff: 200ms
-    maxBackoff: 2s
 EOF
 
     # Start manager in background

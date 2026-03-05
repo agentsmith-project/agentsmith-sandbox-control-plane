@@ -164,28 +164,22 @@ server:
 			t.Fatalf("Failed to write config file: %v", err)
 		}
 
-		cfg, meta, err := LoadWithDefaults(configPath)
+		cfg, err := LoadWithDefaults(configPath)
 		if err != nil {
 			t.Fatalf("LoadWithDefaults() error = %v", err)
 		}
 
-		// Check that explicit value is preserved
 		if cfg.Server.HTTPPort != 9090 {
 			t.Errorf("LoadWithDefaults() httpPort = %v, want 9090", cfg.Server.HTTPPort)
 		}
 
-		// Check that defaults are applied
 		if cfg.Server.RequestIDHeader == "" {
 			t.Error("LoadWithDefaults() requestIDHeader was not applied from defaults")
-		}
-
-		if meta == nil {
-			t.Fatal("LoadWithDefaults() returned nil meta")
 		}
 	})
 
 	t.Run("nonexistent file returns error", func(t *testing.T) {
-		_, _, err := LoadWithDefaults("/nonexistent/path/config.yaml")
+		_, err := LoadWithDefaults("/nonexistent/path/config.yaml")
 		if err == nil {
 			t.Error("LoadWithDefaults() expected error, got nil")
 		}
@@ -249,46 +243,6 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
-func TestComputeHash(t *testing.T) {
-	tests := []struct {
-		name string
-		data string
-	}{
-		{"empty data", ""},
-		{"simple data", "version: 1\n"},
-		{"complex data", "version: 1\nserver:\n  httpPort: 8080\n"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			hash := ComputeHash([]byte(tt.data))
-			if hash == "" {
-				t.Error("ComputeHash() returned empty string")
-			}
-			if len(hash) != 64 { // SHA256 produces 64 hex characters
-				t.Errorf("ComputeHash() returned hash of length %v, want 64", len(hash))
-			}
-		})
-	}
-
-	t.Run("same data produces same hash", func(t *testing.T) {
-		data := []byte("test data")
-		hash1 := ComputeHash(data)
-		hash2 := ComputeHash(data)
-		if hash1 != hash2 {
-			t.Errorf("ComputeHash() inconsistent hashes: %v != %v", hash1, hash2)
-		}
-	})
-
-	t.Run("different data produces different hash", func(t *testing.T) {
-		hash1 := ComputeHash([]byte("data 1"))
-		hash2 := ComputeHash([]byte("data 2"))
-		if hash1 == hash2 {
-			t.Error("ComputeHash() produced same hash for different data")
-		}
-	})
-}
-
 func TestConfig_Clone(t *testing.T) {
 	tests := []struct {
 		name string
@@ -306,20 +260,18 @@ func TestConfig_Clone(t *testing.T) {
 					HTTPPort:        9090,
 					RequestIDHeader: "X-Custom-Id",
 				},
-				Auth: AuthConfig{
-					HeaderName: "X-Auth-Key",
-					Enabled:    true,
-				},
+			Auth: AuthConfig{
+				HeaderName: "X-Auth-Key",
 			},
 		},
-		{
-			name: "config with all fields",
-			cfg: &Config{
-				Version: 1,
-				Auth: AuthConfig{
-					HeaderName: "X-Auth-Key",
-					Enabled:    true,
-				},
+	},
+	{
+		name: "config with all fields",
+		cfg: &Config{
+			Version: 1,
+			Auth: AuthConfig{
+				HeaderName: "X-Auth-Key",
+			},
 				RateLimit: RateLimitConfig{
 					RequestsPerMinute: 120,
 				},
@@ -353,6 +305,23 @@ func TestConfig_Clone(t *testing.T) {
 				t.Error("Clone() modifying clone affected original")
 			}
 		})
+	}
+}
+
+func TestConfig_DeepCopy(t *testing.T) {
+	cfg := &Config{
+		Version: 1,
+		Server:  ServerConfig{HTTPPort: 9090, RequestIDHeader: "X-Req-Id"},
+	}
+	cp := cfg.DeepCopy()
+	if cp == cfg {
+		t.Error("DeepCopy() returned same pointer")
+	}
+	if cp.Version != cfg.Version {
+		t.Errorf("DeepCopy().Version = %d, want %d", cp.Version, cfg.Version)
+	}
+	if cp.Server.HTTPPort != cfg.Server.HTTPPort {
+		t.Errorf("DeepCopy().Server.HTTPPort = %d, want %d", cp.Server.HTTPPort, cfg.Server.HTTPPort)
 	}
 }
 

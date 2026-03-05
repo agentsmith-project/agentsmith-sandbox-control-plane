@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,25 +17,33 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	retryutil "github.com/sandbox/manager/internal/retry"
 	"github.com/sandbox/manager/internal/k8s"
-	"github.com/sandbox/manager/internal/workspace"
+	"github.com/sandbox/manager/internal/observability"
 )
+
+var k8sRetryConfig = retryutil.RetryConfig{
+	MaxAttempts:    3,
+	InitialBackoff: 500 * time.Millisecond,
+	MaxBackoff:     5 * time.Second,
+	BackoffFactor:  2.0,
+}
 
 // Handler provides REST endpoints for managed workload pod lifecycle.
 type Handler struct {
 	k8sClient *k8s.Client
 	executor  *k8s.Executor
-	storage   *workspace.Storage
 	pvcName   string
+	basePath  string // JuiceFS mount root for workspace directories
 }
 
 // NewHandler creates a new workload handler.
-func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor, storage *workspace.Storage, pvcName string) *Handler {
+func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor, pvcName string, basePath string) *Handler {
 	return &Handler{
 		k8sClient: k8sClient,
 		executor:  executor,
-		storage:   storage,
 		pvcName:   pvcName,
+		basePath:  basePath,
 	}
 }
 
@@ -86,7 +96,7 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	case action == "" && r.Method == http.MethodPut:
 		h.handleCreatePod(w, r, workspaceID, projectID, workloadID)
 	case action == "" && r.Method == http.MethodDelete:
-		h.handleDeletePod(w, r, workloadID)
+		h.handleDeletePod(w, r, workspaceID, projectID, workloadID)
 	case action == "" && r.Method == http.MethodGet:
 		h.handleGetPod(w, r, workloadID)
 	case action == "keepalive" && r.Method == http.MethodPost:
@@ -112,18 +122,17 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 
 	ctx := r.Context()
 
-	if h.storage == nil {
-		jsonError(w, http.StatusInternalServerError, "workspace storage not configured")
+	subPath := filepath.Join(workspaceID, workloadID)
+	fullPath := filepath.Join(h.basePath, subPath)
+	if err := os.MkdirAll(fullPath, 0755); err != nil {
+		log.Printf("workload/%s: mkdir failed: %v", workloadID, err)
+		jsonError(w, http.StatusInternalServerError, "workspace dir creation failed: "+err.Error())
 		return
 	}
-
-	payloadPath, err := h.storage.PrepareWorkspace(ctx, workspaceID, workloadID)
-	if err != nil {
-		log.Printf("workload/%s: workspace prepare failed: %v", workloadID, err)
-		jsonError(w, http.StatusInternalServerError, "workspace preparation failed: "+err.Error())
-		return
+	if err := os.Chown(fullPath, workloadRunAsUID, workloadRunAsUID); err != nil {
+		log.Printf("workload/%s: chown warning (non-fatal): %v", workloadID, err)
 	}
-	log.Printf("workload/%s: workspace ready at %s", workloadID, payloadPath)
+	log.Printf("workload/%s: workspace dir ready at %s", workloadID, fullPath)
 
 	idleTimeout := DefaultIdleTimeout
 	if req.IdleTimeoutSec > 0 {
@@ -142,7 +151,6 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	}
 
 	podName := PodName(workloadID)
-	subPath := h.storage.PayloadSubPath(workspaceID, workloadID)
 
 	env := make(map[string]string)
 	for k, v := range req.Env {
@@ -200,10 +208,11 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		}
 	}
 
+	observability.GetMetrics().RecordWorkloadCreate()
 	jsonResponse(w, http.StatusCreated, status)
 }
 
-func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workloadID string) {
+func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
 	podName := PodName(workloadID)
 
@@ -217,7 +226,9 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worklo
 		return
 	}
 
-	if err := h.k8sClient.DeletePod(ctx, podName, 10); err != nil {
+	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
+		return h.k8sClient.DeletePod(ctx, podName, 10)
+	}); err != nil {
 		log.Printf("workload/%s: pod deletion failed: %v", workloadID, err)
 		jsonError(w, http.StatusInternalServerError, "pod deletion failed: "+err.Error())
 		return
@@ -225,6 +236,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worklo
 
 	h.waitForPodDeletion(ctx, podName, 30*time.Second)
 
+	observability.GetMetrics().RecordWorkloadDelete()
 	jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
 }
 
@@ -290,11 +302,14 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 		}
 	}
 
-	if err := h.k8sClient.PatchActivity(ctx, podName, newExpires); err != nil {
+	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
+		return h.k8sClient.PatchActivity(ctx, podName, newExpires)
+	}); err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to update keepalive: "+err.Error())
 		return
 	}
 
+	observability.GetMetrics().RecordWorkloadKeepalive()
 	jsonResponse(w, http.StatusOK, KeepaliveResponse{
 		ExpiresAt: newExpires.Format(time.RFC3339),
 	})
@@ -349,6 +364,7 @@ func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID 
 		Stderr:     result.Stderr,
 		DurationMs: result.Duration.Milliseconds(),
 	}
+	observability.GetMetrics().RecordWorkloadExec()
 	jsonResponse(w, http.StatusOK, resp)
 }
 
@@ -437,7 +453,10 @@ func (h *Handler) buildPod(
 	}
 
 	nonRoot := true
-	var runAsUser int64 = 1000
+	var runAsUser int64 = workloadRunAsUID
+	var runAsGroup int64 = workloadRunAsUID
+	var fsGroup int64 = workloadRunAsUID
+	fsGroupPolicy := v1.FSGroupChangeOnRootMismatch
 	var gracePeriod int64 = 30
 
 	return &v1.Pod{
@@ -452,26 +471,38 @@ func (h *Handler) buildPod(
 			TerminationGracePeriodSeconds: &gracePeriod,
 			AutomountServiceAccountToken:  boolPtr(false),
 			SecurityContext: &v1.PodSecurityContext{
-				RunAsNonRoot: &nonRoot,
-				RunAsUser:    &runAsUser,
+				RunAsNonRoot:        &nonRoot,
+				RunAsUser:           &runAsUser,
+				RunAsGroup:          &runAsGroup,
+				FSGroup:             &fsGroup,
+				FSGroupChangePolicy: &fsGroupPolicy,
 			},
-			Containers: []v1.Container{
-				{
-					Name:       "main",
-					Image:      req.Image,
-					Command:    command,
-					Env:        envVars,
-					Resources:  resources,
-					WorkingDir: "/workspace",
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "workspace",
-							MountPath: "/workspace",
-							SubPath:   subPath,
-						},
+		Containers: []v1.Container{
+			{
+				Name:       "main",
+				Image:      req.Image,
+				Command:    command,
+				Env:        envVars,
+				Resources:  resources,
+				WorkingDir: "/workspace",
+				SecurityContext: &v1.SecurityContext{
+					AllowPrivilegeEscalation: boolPtr(false),
+					Capabilities: &v1.Capabilities{
+						Drop: []v1.Capability{"ALL"},
+					},
+					SeccompProfile: &v1.SeccompProfile{
+						Type: v1.SeccompProfileTypeRuntimeDefault,
+					},
+				},
+				VolumeMounts: []v1.VolumeMount{
+					{
+						Name:      "workspace",
+						MountPath: "/workspace",
+						SubPath:   subPath,
 					},
 				},
 			},
+		},
 			Volumes: []v1.Volume{
 				{
 					Name: "workspace",

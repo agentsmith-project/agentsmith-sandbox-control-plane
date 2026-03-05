@@ -24,7 +24,7 @@ func NewPodBuilder() *PodBuilder {
 	return &PodBuilder{
 		spec: &PodSpec{
 			Name:      "test-pod-" + uuid.New().String()[:8],
-			Namespace: "sandbox",
+			Namespace: "sandbox-workloads",
 			Image:     "test-runner:1.0.0",
 			Env:       make(map[string]string),
 			Labels:    make(map[string]string),

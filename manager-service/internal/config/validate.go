@@ -203,39 +203,6 @@ func validateK8sConfig(cfg *K8sConfig) []*ConfigError {
 		})
 	}
 
-	if cfg.Retry.Enabled {
-		if cfg.Retry.MaxAttempts < 1 {
-			errors = append(errors, &ConfigError{
-				Code:      "CONFIG_VALIDATION_FAILED",
-				FieldPath: "kubernetes.retry.maxAttempts",
-				RuleID:    "RANGE",
-				Rule:      "maxAttempts must be at least 1",
-				Message:   fmt.Sprintf("Invalid maxAttempts: %d", cfg.Retry.MaxAttempts),
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			})
-		}
-		if cfg.Retry.BaseBackoff < 0 {
-			errors = append(errors, &ConfigError{
-				Code:      "CONFIG_VALIDATION_FAILED",
-				FieldPath: "kubernetes.retry.baseBackoff",
-				RuleID:    "RANGE",
-				Rule:      "baseBackoff must be non-negative",
-				Message:   fmt.Sprintf("Invalid baseBackoff: %v", cfg.Retry.BaseBackoff),
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			})
-		}
-		if cfg.Retry.MaxBackoff < cfg.Retry.BaseBackoff {
-			errors = append(errors, &ConfigError{
-				Code:      "CONFIG_VALIDATION_FAILED",
-				FieldPath: "kubernetes.retry.maxBackoff",
-				RuleID:    "RELATION",
-				Rule:      "maxBackoff must be >= baseBackoff",
-				Message:   fmt.Sprintf("maxBackoff (%v) < baseBackoff (%v)", cfg.Retry.MaxBackoff, cfg.Retry.BaseBackoff),
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			})
-		}
-	}
-
 	return errors
 }
 

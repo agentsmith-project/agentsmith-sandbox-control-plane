@@ -30,9 +30,8 @@ type ServerTimeouts struct {
 }
 
 type MetricsConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	Path              string `yaml:"path"`
-	RequireServiceKey bool   `yaml:"requireServiceKey"`
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
 type DebugConfig struct {
@@ -41,22 +40,13 @@ type DebugConfig struct {
 }
 
 type AuthConfig struct {
-	Enabled    bool   `yaml:"enabled"`
 	HeaderName string `yaml:"headerName"`
 }
 
 type K8sConfig struct {
-	QPS            int            `yaml:"qps"`
-	Burst          int            `yaml:"burst"`
-	RequestTimeout time.Duration  `yaml:"requestTimeout"`
-	Retry          K8sRetryConfig `yaml:"retry"`
-}
-
-type K8sRetryConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	MaxAttempts int           `yaml:"maxAttempts"`
-	BaseBackoff time.Duration `yaml:"baseBackoff"`
-	MaxBackoff  time.Duration `yaml:"maxBackoff"`
+	QPS            int           `yaml:"qps"`
+	Burst          int           `yaml:"burst"`
+	RequestTimeout time.Duration `yaml:"requestTimeout"`
 }
 
 type RateLimitConfig struct {
@@ -99,9 +89,8 @@ func DefaultConfig() *Config {
 			},
 			MaxHeaderBytes: 1 << 20,
 			Metrics: MetricsConfig{
-				Enabled:           true,
-				Path:              "/metrics",
-				RequireServiceKey: false,
+				Enabled: true,
+				Path:    "/metrics",
 			},
 			Debug: DebugConfig{
 				ConfigPath:  "/debug/config",
@@ -109,19 +98,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		Auth: AuthConfig{
-			Enabled:    true,
 			HeaderName: "X-Service-Key",
 		},
 		Kubernetes: K8sConfig{
 			QPS:            50,
 			Burst:          100,
 			RequestTimeout: 15 * time.Second,
-			Retry: K8sRetryConfig{
-				Enabled:     true,
-				MaxAttempts: 3,
-				BaseBackoff: 200 * time.Millisecond,
-				MaxBackoff:  2 * time.Second,
-			},
 		},
 		RateLimit: RateLimitConfig{
 			RequestsPerMinute: 60,

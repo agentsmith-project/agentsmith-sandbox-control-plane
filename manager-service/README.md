@@ -3,7 +3,7 @@
 ## 概述
 
 Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HTTP API：
-- 创建和管理 workload Pod（JVS 工作区由 manager 分配）
+- 创建和管理 workload Pod（工作区目录由 manager 分配）
 - 在 Pod 中执行命令（exec）
 - 客户端 keepalive 续期（超时未收到 keepalive 则由 cleaner 回收 Pod）
 
@@ -56,7 +56,6 @@ export SERVICE_KEYS="test-key-123"
 
 - `CONFIG_PATH`: Manager YAML 配置文件路径（默认：`/etc/sandbox-manager/manager-config.yaml`）
 - `SERVICE_KEYS`: 逗号分隔的 service keys（用于 API 鉴权）
-- `CONFIG_RELOAD_DEBOUNCE` / `CONFIG_RELOAD_MIN_INTERVAL` / `CONFIG_RELOAD_BACKOFF_MAX` / `STRICT_CONFIG_RELOAD`: 配置热加载参数（可选）
 
 ## API 文档
 

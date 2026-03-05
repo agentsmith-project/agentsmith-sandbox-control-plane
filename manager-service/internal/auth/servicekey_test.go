@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewServiceKeyValidator_EmptyKeys_ReturnsError(t *testing.T) {
@@ -72,4 +73,16 @@ func TestParseServiceKeys_WhitespaceOnlyKeys_FiltersOutWhitespaceKeys(t *testing
 	assert.Len(t, keys, 2)
 	assert.Equal(t, "key1", keys[0])
 	assert.Equal(t, "key2", keys[1])
+}
+
+func TestHasKeys_True(t *testing.T) {
+	v, err := NewServiceKeyValidator([]string{"key1"})
+	require.NoError(t, err)
+	assert.True(t, v.HasKeys(), "HasKeys() with one key must be true")
+}
+
+func TestHasKeys_WithMultipleKeys_True(t *testing.T) {
+	v, err := NewServiceKeyValidator([]string{"a", "b"})
+	require.NoError(t, err)
+	assert.True(t, v.HasKeys())
 }

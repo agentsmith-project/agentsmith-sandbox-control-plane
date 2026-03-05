@@ -73,20 +73,10 @@ type MetricsRegistry struct {
 	httpRequestDuration map[string]*Histogram // method:path -> histogram
 
 	// Business metrics
-	workloadCreateTotal int64
+	workloadCreateTotal    int64
 	workloadKeepaliveTotal int64
-	workloadExecTotal   int64
-	workloadDeleteTotal int64
-
-	// Config metrics
-	configReloadSuccess int64
-	configReloadFailure int64
-	configHash          string
-	configLoadedAt      string
-	configLastReload    string
-
-	// K8s metrics
-	k8sAPIFailTotal map[string]int64 // operation -> count
+	workloadExecTotal      int64
+	workloadDeleteTotal    int64
 }
 
 // Histogram tracks value distributions
@@ -127,7 +117,6 @@ func NewMetricsRegistry() *MetricsRegistry {
 	return &MetricsRegistry{
 		httpRequestTotal:    make(map[string]int64),
 		httpRequestDuration: make(map[string]*Histogram),
-		k8sAPIFailTotal:     make(map[string]int64),
 	}
 }
 
@@ -173,30 +162,6 @@ func (m *MetricsRegistry) RecordWorkloadDelete() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.workloadDeleteTotal++
-}
-
-// RecordConfigReloadSuccess records a successful config reload
-func (m *MetricsRegistry) RecordConfigReloadSuccess(hash string, loadedAt string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.configReloadSuccess++
-	m.configHash = hash
-	m.configLoadedAt = loadedAt
-	m.configLastReload = time.Now().UTC().Format(time.RFC3339)
-}
-
-// RecordConfigReloadFailure records a failed config reload
-func (m *MetricsRegistry) RecordConfigReloadFailure() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.configReloadFailure++
-}
-
-// RecordK8sAPIFailure records a K8s API failure
-func (m *MetricsRegistry) RecordK8sAPIFailure(operation string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.k8sAPIFailTotal[operation]++
 }
 
 // Handler returns an HTTP handler for Prometheus metrics
@@ -298,46 +263,6 @@ func (m *MetricsRegistry) Handler() http.HandlerFunc {
 		io.WriteString(w, "workload_delete_total ")
 		io.WriteString(w, strconv.FormatInt(m.workloadDeleteTotal, 10))
 		io.WriteString(w, "\n")
-
-		// Config metrics
-		io.WriteString(w, "\n# HELP config_reload_success_total Total number of successful config reloads\n")
-		io.WriteString(w, "# TYPE config_reload_success_total counter\n")
-		io.WriteString(w, "config_reload_success_total ")
-		io.WriteString(w, strconv.FormatInt(m.configReloadSuccess, 10))
-		io.WriteString(w, "\n")
-
-		io.WriteString(w, "\n# HELP config_reload_failure_total Total number of failed config reloads\n")
-		io.WriteString(w, "# TYPE config_reload_failure_total counter\n")
-		io.WriteString(w, "config_reload_failure_total ")
-		io.WriteString(w, strconv.FormatInt(m.configReloadFailure, 10))
-		io.WriteString(w, "\n")
-
-		io.WriteString(w, "\n# HELP config_hash_info Info about current config hash\n")
-		io.WriteString(w, "# TYPE config_hash_info gauge\n")
-		io.WriteString(w, "config_hash_info{hash=\"")
-		io.WriteString(w, m.configHash)
-		io.WriteString(w, "\"} 1\n")
-
-		io.WriteString(w, "\n# HELP config_loaded_at_timestamp Timestamp when config was loaded\n")
-		io.WriteString(w, "# TYPE config_loaded_at_timestamp gauge\n")
-		if m.configLoadedAt != "" {
-			if t, err := time.Parse(time.RFC3339, m.configLoadedAt); err == nil {
-				io.WriteString(w, "config_loaded_at_timestamp ")
-				io.WriteString(w, strconv.FormatInt(t.Unix(), 10))
-				io.WriteString(w, "\n")
-			}
-		}
-
-		// K8s metrics
-		io.WriteString(w, "\n# HELP k8s_api_fail_total Total number of K8s API failures\n")
-		io.WriteString(w, "# TYPE k8s_api_fail_total counter\n")
-		for op, count := range m.k8sAPIFailTotal {
-			io.WriteString(w, "k8s_api_fail_total{operation=\"")
-			io.WriteString(w, op)
-			io.WriteString(w, "\"} ")
-			io.WriteString(w, strconv.FormatInt(count, 10))
-			io.WriteString(w, "\n")
-		}
 	}
 }
 

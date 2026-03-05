@@ -12,24 +12,17 @@ server:
   metrics:
     enabled: true
     path: /metrics
-    requireServiceKey: false
   debug:
     configPath: /debug/config
     enablePprof: false
 
 auth:
-  enabled: true
   headerName: X-Service-Key
 
 kubernetes:
   qps: 50
   burst: 100
   requestTimeout: 15s
-  retry:
-    enabled: true
-    maxAttempts: 3
-    baseBackoff: 200ms
-    maxBackoff: 2s
 
 rateLimit:
   requestsPerMinute: 60

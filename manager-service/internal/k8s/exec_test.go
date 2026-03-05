@@ -1,155 +1,80 @@
 package k8s
 
 import (
+	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestBuildExecURL(t *testing.T) {
-	t.Skip("Skipping BuildExecURL test - requires real restClient")
+	// buildExecURL is called from Exec; test via Exec against a fake API that returns 404.
+	// This exercises buildExecURL and the Exec error path (non-SPDY response).
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(fake.Close)
+
+	kubeconfig := `apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: ` + fake.URL + `
+    insecure-skip-tls-verify: true
+users:
+- name: test
+  user:
+    token: fake
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+current-context: test
+`
+	cfgPath := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(cfgPath, []byte(kubeconfig), 0644); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+	prev := os.Getenv("KUBECONFIG")
+	t.Cleanup(func() { _ = os.Setenv("KUBECONFIG", prev) })
+	os.Setenv("KUBECONFIG", cfgPath)
+
+	client, err := NewClient(&ClientConfig{Namespace: "test-ns"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	executor := NewExecutor(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, execErr := executor.Exec(ctx, "some-pod", &ExecOptions{
+		Command: []string{"echo", "hi"},
+		Timeout: time.Second,
+	})
+	if execErr == nil {
+		t.Error("Exec against non-SPDY fake expected error, got nil")
+	}
+	if result == nil {
+		t.Fatal("Exec must return non-nil result even on error")
+	}
+	if result.ExitCode != -1 {
+		t.Errorf("Exec on failure: ExitCode = %d, want -1", result.ExitCode)
+	}
 }
 
 func TestExecOptionsDefaults(t *testing.T) {
 	opts := &ExecOptions{}
-
-	if opts.Container == "" {
-		// The Exec function should set a default, but we're testing the struct
-		opts.Container = "runner" // Set expected default
+	if opts.Container != "" {
+		t.Errorf("Expected zero-value Container to be empty, got %q", opts.Container)
 	}
-
-	if opts.Container != "runner" {
-		t.Errorf("Expected default container to be 'runner', got '%s'", opts.Container)
-	}
-}
-
-func TestExtractExitCodeMarker(t *testing.T) {
-	tests := []struct {
-		name      string
-		stderr    string
-		markerKey string
-		want      int
-	}{
-		{
-			name:      "valid exit code at end",
-			stderr:    "some output\n__SBX_EXIT_CODE__=0",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      0,
-		},
-		{
-			name:      "exit code 1",
-			stderr:    "error occurred\n__SBX_EXIT_CODE__=1",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      1,
-		},
-		{
-			name:      "exit code 127",
-			stderr:    "command not found\n__SBX_EXIT_CODE__=127",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      127,
-		},
-		{
-			name:      "exit code with CRLF",
-			stderr:    "output\r\n__SBX_EXIT_CODE__=0\r\n",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      0,
-		},
-		{
-			name:      "no marker found",
-			stderr:    "some output without marker",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      -1,
-		},
-		{
-			name:      "empty stderr",
-			stderr:    "",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      -1,
-		},
-		{
-			name:      "marker with whitespace prefix",
-			stderr:    "output\n __SBX_EXIT_CODE__=0",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      0,
-		},
-		{
-			name:      "custom marker key",
-			stderr:    "output\nCUSTOM_EXIT=42",
-			markerKey: "CUSTOM_EXIT",
-			want:      42,
-		},
-		{
-			name:      "invalid exit code",
-			stderr:    "__SBX_EXIT_CODE__=abc",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      -1,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractExitCodeMarker(tt.stderr, tt.markerKey)
-			if got != tt.want {
-				t.Errorf("ExtractExitCodeMarker() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRemoveExitCodeMarker(t *testing.T) {
-	tests := []struct {
-		name      string
-		output    string
-		markerKey string
-		want      string
-	}{
-		{
-			name:      "remove marker at end",
-			output:    "some output\n__SBX_EXIT_CODE__=0\n",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "some output\n",
-		},
-		{
-			name:      "remove marker in middle",
-			output:    "line1\n__SBX_EXIT_CODE__=0\nline2",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "line1\nline2",
-		},
-		{
-			name:      "remove marker with CRLF",
-			output:    "output\r\n__SBX_EXIT_CODE__=0\r\n",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "output\r\n",
-		},
-		{
-			name:      "no marker to remove",
-			output:    "some output without marker",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "some output without marker",
-		},
-		{
-			name:      "empty output",
-			output:    "",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "",
-		},
-		{
-			name:      "marker with whitespace prefix",
-			output:    "output\n __SBX_EXIT_CODE__=0\n",
-			markerKey: "__SBX_EXIT_CODE__",
-			want:      "output\n",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RemoveExitCodeMarker(tt.output, tt.markerKey)
-			if got != tt.want {
-				t.Errorf("RemoveExitCodeMarker() = %q, want %q", got, tt.want)
-			}
-		})
-	}
+	// The Exec function fills the default container name ("main") at runtime.
 }
 
 func TestNewExecutor(t *testing.T) {
@@ -232,55 +157,6 @@ func TestExecOptionsValidation(t *testing.T) {
 			}
 			if tt.opts.Command == nil {
 				t.Skip("empty commands are handled by higher level")
-			}
-		})
-	}
-}
-
-func TestFindLastMarkerStart(t *testing.T) {
-	tests := []struct {
-		name         string
-		output       string
-		markerPrefix string
-		want         int
-	}{
-		{
-			name:         "single marker",
-			output:       "prefix=__MARKER__=value",
-			markerPrefix: "__MARKER__=",
-			want:         -1, // '=' is not a valid separator
-		},
-		{
-			name:         "multiple markers",
-			output:       "__MARKER__=0\nsome output\n__MARKER__=1",
-			markerPrefix: "__MARKER__=",
-			want:         25, // Last occurrence starts after "\nsome output\n"
-		},
-		{
-			name:         "no marker",
-			output:       "some output without markers",
-			markerPrefix: "__MARKER__=",
-			want:         -1,
-		},
-		{
-			name:         "marker at start",
-			output:       "__MARKER__=0\nrest",
-			markerPrefix: "__MARKER__=",
-			want:         0,
-		},
-		{
-			name:         "marker preceded by space",
-			output:       "  __MARKER__=0",
-			markerPrefix: "__MARKER__=",
-			want:         2, // space is a valid separator
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := findLastMarkerStart(tt.output, tt.markerPrefix)
-			if got != tt.want {
-				t.Errorf("findLastMarkerStart() = %v, want %v", got, tt.want)
 			}
 		})
 	}

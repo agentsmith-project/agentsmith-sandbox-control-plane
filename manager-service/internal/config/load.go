@@ -56,16 +56,15 @@ func MustLoad(path string) (*Config, *ConfigMeta) {
 }
 
 // LoadWithDefaults loads configuration and applies defaults for missing values
-func LoadWithDefaults(path string) (*Config, *ConfigMeta, error) {
-	cfg, meta, err := Load(path)
+func LoadWithDefaults(path string) (*Config, error) {
+	cfg, _, err := Load(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	// Ensure defaults are applied for any zero values
 	applyDefaults(cfg)
 
-	return cfg, meta, nil
+	return cfg, nil
 }
 
 // applyDefaults ensures all zero values have defaults applied
@@ -117,12 +116,6 @@ func applyDefaults(cfg *Config) {
 		cfg.Kubernetes.RequestTimeout = defaultCfg.Kubernetes.RequestTimeout
 	}
 
-}
-
-// ComputeHash computes the SHA256 hash of configuration data
-func ComputeHash(data []byte) string {
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
 }
 
 // Clone creates a deep copy of the configuration

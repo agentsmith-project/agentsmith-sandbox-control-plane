@@ -78,60 +78,6 @@ func TestPoller_CheckError(t *testing.T) {
 	}
 }
 
-func TestPollerWithRetry_Success(t *testing.T) {
-	poller := NewPoller(10*time.Millisecond, 100*time.Millisecond)
-
-	count := 0
-	ctx := context.Background()
-
-	shouldRetry := func(err error) bool {
-		return err.Error() == "transient"
-	}
-
-	err := poller.PollWithRetry(ctx, func() (bool, error) {
-		count++
-		if count == 1 {
-			return false, errors.New("transient")
-		}
-		if count == 2 {
-			return false, errors.New("transient")
-		}
-		return true, nil
-	}, shouldRetry)
-
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if count != 3 {
-		t.Fatalf("expected 3 polls, got %d", count)
-	}
-}
-
-func TestPollerWithRetry_NonRetryableError(t *testing.T) {
-	poller := NewPoller(10*time.Millisecond, 100*time.Millisecond)
-
-	count := 0
-	ctx := context.Background()
-
-	shouldRetry := func(err error) bool {
-		return err.Error() == "transient"
-	}
-
-	expectedErr := errors.New("permanent")
-
-	err := poller.PollWithRetry(ctx, func() (bool, error) {
-		count++
-		if count == 1 {
-			return false, errors.New("transient")
-		}
-		return false, expectedErr
-	}, shouldRetry)
-
-	if err != expectedErr {
-		t.Fatalf("expected permanent error, got %v", err)
-	}
-}
-
 func TestDefaultPoller(t *testing.T) {
 	poller := DefaultPoller()
 

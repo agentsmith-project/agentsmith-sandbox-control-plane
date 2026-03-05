@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -9,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestResponseWriterWrapper_WriteHeader(t *testing.T) {
@@ -242,9 +239,6 @@ func TestNewMetricsRegistry(t *testing.T) {
 	if m.httpRequestDuration == nil {
 		t.Error("NewMetricsRegistry() httpRequestDuration is nil")
 	}
-	if m.k8sAPIFailTotal == nil {
-		t.Error("NewMetricsRegistry() k8sAPIFailTotal is nil")
-	}
 }
 
 func TestMetricsRegistry_RecordHTTPRequest(t *testing.T) {
@@ -309,60 +303,6 @@ func TestMetricsRegistry_RecordWorkloadOperations(t *testing.T) {
 				t.Errorf("%s: count = %v, want 3", tt.name, count)
 			}
 		})
-	}
-}
-
-func TestMetricsRegistry_RecordConfigReload(t *testing.T) {
-	m := NewMetricsRegistry()
-
-	t.Run("success", func(t *testing.T) {
-		hash := "abc123"
-		loadedAt := time.Now().UTC().Format(time.RFC3339)
-
-		m.RecordConfigReloadSuccess(hash, loadedAt)
-
-		m.mu.RLock()
-		if m.configReloadSuccess != 1 {
-			t.Errorf("RecordConfigReloadSuccess() count = %v, want 1", m.configReloadSuccess)
-		}
-		if m.configHash != hash {
-			t.Errorf("RecordConfigReloadSuccess() hash = %v, want %v", m.configHash, hash)
-		}
-		if m.configLoadedAt != loadedAt {
-			t.Errorf("RecordConfigReloadSuccess() loadedAt = %v, want %v", m.configLoadedAt, loadedAt)
-		}
-		if m.configLastReload == "" {
-			t.Error("RecordConfigReloadSuccess() lastReload not set")
-		}
-		m.mu.RUnlock()
-	})
-
-	t.Run("failure", func(t *testing.T) {
-		m.RecordConfigReloadFailure()
-
-		m.mu.RLock()
-		if m.configReloadFailure != 1 {
-			t.Errorf("RecordConfigReloadFailure() count = %v, want 1", m.configReloadFailure)
-		}
-		m.mu.RUnlock()
-	})
-}
-
-func TestMetricsRegistry_RecordK8sAPIFailure(t *testing.T) {
-	m := NewMetricsRegistry()
-
-	m.RecordK8sAPIFailure("CreatePod")
-	m.RecordK8sAPIFailure("CreatePod")
-	m.RecordK8sAPIFailure("GetPod")
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.k8sAPIFailTotal["CreatePod"] != 2 {
-		t.Errorf("RecordK8sAPIFailure() CreatePod count = %v, want 2", m.k8sAPIFailTotal["CreatePod"])
-	}
-	if m.k8sAPIFailTotal["GetPod"] != 1 {
-		t.Errorf("RecordK8sAPIFailure() GetPod count = %v, want 1", m.k8sAPIFailTotal["GetPod"])
 	}
 }
 
@@ -597,18 +537,15 @@ func TestRequestIDMiddleware(t *testing.T) {
 		name       string
 		headerName string
 		reqHeaders map[string]string
-		validate   func(*testing.T, *httptest.ResponseRecorder, string)
+		validate   func(*testing.T, *httptest.ResponseRecorder)
 	}{
 		{
-			name:       "adds request ID to context and response",
+			name:       "sets request ID in response header",
 			headerName: defaultHeaderName,
 			reqHeaders: map[string]string{
 				"X-Request-Id": "test-req-id",
 			},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
-				if requestID != "test-req-id" {
-					t.Errorf("RequestIDMiddleware() requestID = %v, want 'test-req-id'", requestID)
-				}
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get(defaultHeaderName)
 				if respHeader != "test-req-id" {
 					t.Errorf("RequestIDMiddleware() response header = %v, want 'test-req-id'", respHeader)
@@ -619,13 +556,10 @@ func TestRequestIDMiddleware(t *testing.T) {
 			name:       "generates new ID when not provided",
 			headerName: defaultHeaderName,
 			reqHeaders: map[string]string{},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
-				if requestID == "" {
-					t.Error("RequestIDMiddleware() requestID is empty, want generated ID")
-				}
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get(defaultHeaderName)
-				if respHeader != requestID {
-					t.Errorf("RequestIDMiddleware() response header = %v, want %v", respHeader, requestID)
+				if respHeader == "" {
+					t.Error("RequestIDMiddleware() response header is empty, want generated ID")
 				}
 			},
 		},
@@ -633,10 +567,10 @@ func TestRequestIDMiddleware(t *testing.T) {
 			name:       "uses custom header name",
 			headerName: "X-Custom-Request-ID",
 			reqHeaders: map[string]string{},
-			validate: func(t *testing.T, rr *httptest.ResponseRecorder, requestID string) {
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder) {
 				respHeader := rr.Header().Get("X-Custom-Request-ID")
-				if respHeader != requestID {
-					t.Errorf("RequestIDMiddleware() response header = %v, want %v", respHeader, requestID)
+				if respHeader == "" {
+					t.Error("RequestIDMiddleware() custom response header is empty, want generated ID")
 				}
 			},
 		},
@@ -644,10 +578,7 @@ func TestRequestIDMiddleware(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a handler that captures the request ID from context
-			var capturedRequestID string
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedRequestID = RequestIDFromContext(r.Context())
 				w.WriteHeader(http.StatusOK)
 			})
 
@@ -662,42 +593,8 @@ func TestRequestIDMiddleware(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 
-			tt.validate(t, rr, capturedRequestID)
+			tt.validate(t, rr)
 		})
 	}
 }
 
-func TestRequestIDFromContext(t *testing.T) {
-	t.Run("extracts request ID from context", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), RequestIDKey, "test-req-id")
-		id := RequestIDFromContext(ctx)
-		if id != "test-req-id" {
-			t.Errorf("RequestIDFromContext() = %v, want 'test-req-id'", id)
-		}
-	})
-
-	t.Run("returns empty string when not in context", func(t *testing.T) {
-		ctx := context.Background()
-		id := RequestIDFromContext(ctx)
-		if id != "" {
-			t.Errorf("RequestIDFromContext() = %v, want ''", id)
-		}
-	})
-
-	t.Run("returns empty string for wrong type", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), RequestIDKey, 12345)
-		id := RequestIDFromContext(ctx)
-		if id != "" {
-			t.Errorf("RequestIDFromContext() = %v, want '' for wrong type", id)
-		}
-	})
-
-	t.Run("works with uuid.UUID type", func(t *testing.T) {
-		testUUID := uuid.New()
-		ctx := context.WithValue(context.Background(), RequestIDKey, testUUID.String())
-		id := RequestIDFromContext(ctx)
-		if id != testUUID.String() {
-			t.Errorf("RequestIDFromContext() = %v, want %v", id, testUUID.String())
-		}
-	})
-}
