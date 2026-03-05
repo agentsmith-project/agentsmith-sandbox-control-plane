@@ -1,0 +1,34 @@
+# NetworkPolicy for managed workload pods.
+# Default policy: blocks all ingress, allows DNS + AgentSmith WS + proxy egress.
+# Agent runner in the pod connects back to AgentSmith via WebSocket and
+# accesses LLM through AgentSmith's endpoint proxy (HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: managed-workload-policy
+  namespace: sandbox-workloads
+spec:
+  podSelector:
+    matchLabels:
+      app: managed-workload
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow AgentSmith API + WebSocket (agent-runner WS connection + endpoint proxy)
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 20000

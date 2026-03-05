@@ -1,0 +1,36 @@
+# JuiceFS PVC for sandbox-manager (in sandbox-system).
+# Manager uses this to create workspace directories via MkdirAll.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: juicefs-workloads-pvc
+  namespace: sandbox-system
+  labels:
+    app: sandbox-manager
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: juicefs-sc
+  resources:
+    requests:
+      storage: 100Gi
+---
+# JuiceFS PVC for workload pods (in sandbox-workloads).
+# Workload pods mount subPaths of this PVC for isolated workspace access.
+# Both PVCs use the same storageClass (ReadWriteMany) and access the same filesystem.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: juicefs-workloads-pvc
+  namespace: sandbox-workloads
+  labels:
+    app: sandbox-manager
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: juicefs-sc
+  resources:
+    requests:
+      storage: 100Gi

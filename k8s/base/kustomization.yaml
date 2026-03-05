@@ -11,10 +11,13 @@ resources:
   - configmap.yaml
   - manager-configmap.yaml
   - minio-secret.yaml
+  - juicefs-pvc.yaml
   - rbac-manager.yaml
+  - workload-rbac.yaml
   - manager-deployment.yaml
   - manager-service.yaml
   - network-policy.yaml
+  - workload-networkpolicy.yaml
   - cleaner-cronjob-sandbox.yaml
 
 # 通用标签
