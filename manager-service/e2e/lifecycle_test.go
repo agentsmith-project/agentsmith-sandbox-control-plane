@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,4 +428,49 @@ func TestLifecycle_KeepaliveThenGet_ExpiresAtUpdated(t *testing.T) {
 	// expires_at after keepalive should be at least as late as before (or later)
 	assert.True(t, ps2.ExpiresAt >= ps1.ExpiresAt,
 		"expires_at after keepalive should not decrease: before=%s after=%s", ps1.ExpiresAt, ps2.ExpiresAt)
+}
+
+// ---------------------------------------------------------------------------
+// Request validation – malformed path and body
+// ---------------------------------------------------------------------------
+
+// TestV1Path_TooShort_Returns404 verifies that a path with insufficient segments returns 404.
+// e.g. GET /v1/workspaces/ws/projects/proj (missing /workloads/{wlId})
+func TestV1Path_TooShort_Returns404(t *testing.T) {
+	c := newClient()
+	shortPath := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s", suite.ManagerURL, testWS, testProj)
+	resp := c.do(t, http.MethodGet, shortPath, nil)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"path without workload ID must return 404")
+}
+
+// TestCreate_InvalidJSON_Returns400 verifies PUT with invalid JSON body returns 400.
+func TestCreate_InvalidJSON_Returns400(t *testing.T) {
+	c := newClient()
+	wlID := uniqueID("create-bad-json")
+	url := c.workloadURL(testWS, testProj, wlID)
+	resp := c.do(t, http.MethodPut, url, strings.NewReader(`{invalid json}`))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.BodyString(), "invalid")
+}
+
+// TestCreate_EmptyBody_Returns400 verifies PUT with empty body still requires image; decoder may fail or image missing.
+func TestCreate_EmptyBody_Returns400(t *testing.T) {
+	c := newClient()
+	wlID := uniqueID("create-empty-body")
+	url := c.workloadURL(testWS, testProj, wlID)
+	resp := c.do(t, http.MethodPut, url, strings.NewReader("{}"))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.BodyString(), "image")
+}
+
+// TestExec_InvalidBody_Returns400 verifies POST .../exec with invalid JSON returns 400.
+func TestExec_InvalidBody_Returns400(t *testing.T) {
+	c := newClient()
+	wlID := uniqueID("exec-bad-json")
+	url := c.workloadURL(testWS, testProj, wlID) + "/exec"
+	resp := c.do(t, http.MethodPost, url, strings.NewReader(`{invalid json}`))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+		"exec with invalid JSON must return 400: %s", resp.BodyString())
+	assert.Contains(t, resp.BodyString(), "invalid")
 }

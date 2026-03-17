@@ -5,6 +5,7 @@ package e2e_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,5 +201,46 @@ func TestWorkspace_TwoWorkloadsHaveIsolatedFilesystems(t *testing.T) {
 	require.NoError(t, readResp.DecodeJSON(&er))
 	assert.Contains(t, er.Stdout, "absent",
 		"/workspace in wl2 must not see files written in wl1")
+}
+
+// TestWorkspace_MultiWorkspaceIsolation verifies that workloads in different
+// workspace/project pairs get distinct workspace directories and pods.
+func TestWorkspace_MultiWorkspaceIsolation(t *testing.T) {
+	ws1, ws2 := "ws-iso-a", "ws-iso-b"
+	proj1, proj2 := "proj-1", "proj-2"
+	wl1 := uniqueID("mwi-1")
+	wl2 := uniqueID("mwi-2")
+	c := newClient()
+
+	_ = mustCreateWorkload(t, ws1, proj1, wl1, CreateRequest{Image: suite.Image})
+	_ = mustCreateWorkload(t, ws2, proj2, wl2, CreateRequest{Image: suite.Image})
+	t.Cleanup(func() {
+		c.DeleteWorkload(t, ws1, proj1, wl1)
+		c.DeleteWorkload(t, ws2, proj2, wl2)
+	})
+
+	waitWorkloadRunning(t, ws1, proj1, wl1, 3*time.Minute)
+	waitWorkloadRunning(t, ws2, proj2, wl2, 3*time.Minute)
+
+	// Distinct workspace dirs on host.
+	dir1 := filepath.Join(suite.WorkspacePath, ws1, wl1)
+	dir2 := filepath.Join(suite.WorkspacePath, ws2, wl2)
+	_, err1 := os.Stat(dir1)
+	_, err2 := os.Stat(dir2)
+	require.NoError(t, err1, "workspace dir %s must exist", dir1)
+	require.NoError(t, err2, "workspace dir %s must exist", dir2)
+	assert.NotEqual(t, dir1, dir2)
+
+	// Distinct pods.
+	get1 := c.GetWorkload(t, ws1, proj1, wl1)
+	get2 := c.GetWorkload(t, ws2, proj2, wl2)
+	require.Equal(t, http.StatusOK, get1.StatusCode)
+	require.Equal(t, http.StatusOK, get2.StatusCode)
+	var ps1, ps2 PodStatus
+	require.NoError(t, get1.DecodeJSON(&ps1))
+	require.NoError(t, get2.DecodeJSON(&ps2))
+	assert.Equal(t, "workload-"+wl1, ps1.PodName)
+	assert.Equal(t, "workload-"+wl2, ps2.PodName)
+	assert.NotEqual(t, ps1.PodName, ps2.PodName)
 }
 

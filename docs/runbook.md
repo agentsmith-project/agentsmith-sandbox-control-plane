@@ -58,3 +58,16 @@ Service keys are provided via the `SERVICE_KEYS` environment variable (comma-sep
 | 503 / readyz failing | K8s API reachable; `K8S_NAMESPACE` (or in-cluster namespace) exists and is listable |
 | Pod not created | Check manager logs, K8s RBAC, resource quota, and namespace |
 | Pod not deleted by cleaner | See “If pods are not reclaimed” above |
+
+## Pre-release checklist
+
+Before cutting a release:
+
+1. **Repo:** `git status` clean; no uncommitted changes or unintended untracked files.
+2. **Lint & tests:** From repo root run `make release-gate` (runs `go vet`, optionally `golangci-lint`, unit tests with race, coverage ≥ threshold, and build of manager + cleaner).
+3. **Integration tests:** `make test-integration` (requires build tag `integration`; runs HTTP + fake K8s tests).
+4. **E2E (optional):** From repo root, build binaries then run E2E:
+   - `cd manager-service && go build -o bin/manager ./cmd/manager && go build -o bin/cleaner ./cmd/cleaner`
+   - `E2E_MANAGER_BIN=$(pwd)/bin/manager E2E_CLEANER_BIN=$(pwd)/bin/cleaner E2E_MANAGER_PORT=19090 E2E_JUICEFS=true go test -tags=e2e -count=1 -timeout=25m ./e2e/...`
+   - Use a free port for `E2E_MANAGER_PORT` if another manager is already bound (e.g. port-forward).
+5. **Version:** Bump `manager-service/VERSION` and `k8s/base/kustomization.yaml` images `newTag` if needed.

@@ -57,3 +57,10 @@ func TestAuth_MetricsNoAuthRequired(t *testing.T) {
 	resp := newUnauthClient().Metrics(t)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+// TestAuth_ReadyzNoAuthRequired verifies that the readiness endpoint is open (no key needed).
+func TestAuth_ReadyzNoAuthRequired(t *testing.T) {
+	resp := newUnauthClient().Readyz(t)
+	assert.True(t, resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusServiceUnavailable,
+		"readyz must not require auth; got %d", resp.StatusCode)
+}

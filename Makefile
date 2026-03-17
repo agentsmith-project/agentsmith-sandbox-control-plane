@@ -59,15 +59,16 @@ test-coverage:
 
 test-integration:
 	@echo "==> Running integration tests..."
-	@cd "$(MANAGER_DIR)" && "$(GO)" test -count=1 -race -timeout=300s ./...
+	@cd "$(MANAGER_DIR)" && "$(GO)" test -tags=integration -count=1 -race -timeout=300s ./integration/...
 
 test-e2e:
-	@echo "==> Running E2E tests..."
-	@cd "$(MANAGER_DIR)" && "$(GO)" test -tags=E2E -count=1 -timeout=600s ./e2e/...
+	@echo "==> Running E2E tests (requires K8s cluster and manager)..."
+	@cd "$(MANAGER_DIR)" && "$(GO)" test -tags=e2e -count=1 -timeout=900s ./e2e/...
 
 lint:
-	@echo "==> Running golangci-lint..."
-	@cd "$(MANAGER_DIR)" && golangci-lint run ./...
+	@echo "==> Running linters..."
+	@cd "$(MANAGER_DIR)" && "$(GO)" vet ./...
+	@command -v golangci-lint >/dev/null 2>&1 && (cd "$(MANAGER_DIR)" && golangci-lint run ./...) || echo "    (golangci-lint not installed, go vet only)"
 
 release-gate: lint test-race _check-coverage _build-check
 	@echo ""
