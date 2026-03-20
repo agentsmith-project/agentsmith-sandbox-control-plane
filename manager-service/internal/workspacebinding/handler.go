@@ -2,8 +2,6 @@ package workspacebinding
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,7 +42,8 @@ type Options struct {
 	MountServiceAccount   string
 	MountImage            string
 	StorageEndpoint       string
-	StorageCredentialSeed string
+	StorageAccessKey      string
+	StorageSecretKey      string
 }
 
 type EnsureRequest struct {
@@ -144,6 +143,14 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 	}
 	if req.FileLibraryID != bindingID {
 		jsonError(w, http.StatusBadRequest, "binding_id and file_library_id must match")
+		return
+	}
+	if firstNonEmpty(req.StorageEndpoint, h.options.StorageEndpoint) == "" {
+		jsonError(w, http.StatusInternalServerError, "storage endpoint is not configured")
+		return
+	}
+	if strings.TrimSpace(h.options.StorageAccessKey) == "" || strings.TrimSpace(h.options.StorageSecretKey) == "" {
+		jsonError(w, http.StatusInternalServerError, "storage access key and secret key must be configured")
 		return
 	}
 
@@ -269,8 +276,8 @@ func (h *Handler) buildSecret(status BindingStatus, req EnsureRequest) *v1.Secre
 			"metaurl":    req.MetadataURL,
 			"storage":    "s3",
 			"bucket":     strings.TrimRight(storageEndpoint, "/") + "/" + deterministicBucket(status.FileLibraryID),
-			"access-key": deterministicMinioUser(status.FileLibraryID),
-			"secret-key": deriveSecret(h.options.StorageCredentialSeed, status.FileLibraryID, 32),
+			"access-key": strings.TrimSpace(h.options.StorageAccessKey),
+			"secret-key": strings.TrimSpace(h.options.StorageSecretKey),
 		},
 	}
 }
@@ -382,24 +389,6 @@ func volumeHandle(workspaceID, projectID, bindingID string) string {
 
 func deterministicBucket(fileLibraryID string) string {
 	return sanitizeK8sName("jfs-lib-"+strings.ReplaceAll(fileLibraryID, "_", "-"), "jfs-lib")
-}
-
-func deterministicMinioUser(fileLibraryID string) string {
-	v := strings.ReplaceAll(fileLibraryID, "-", "_")
-	v = regexp.MustCompile(`[^a-z0-9_]+`).ReplaceAllString(strings.ToLower(v), "_")
-	v = strings.Trim(v, "_")
-	if len(v) > 31 {
-		v = v[:31]
-	}
-	if v == "" {
-		v = "library"
-	}
-	return "jfsm_" + v
-}
-
-func deriveSecret(seed string, fileLibraryID string, size int) string {
-	sum := sha256.Sum256([]byte(seed + ":" + fileLibraryID))
-	return base64.RawURLEncoding.EncodeToString(sum[:])[:size]
 }
 
 func firstNonEmpty(values ...string) string {

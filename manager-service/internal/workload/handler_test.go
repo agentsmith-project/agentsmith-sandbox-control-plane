@@ -109,7 +109,6 @@ func TestConstants(t *testing.T) {
 	assert.Equal(t, "managed-workload", WorkloadLabel)
 	assert.Equal(t, 30*time.Minute, DefaultIdleTimeout)
 	assert.Equal(t, 24*time.Hour, DefaultMaxLifetime)
-	assert.Equal(t, []string{"tail", "-f", "/dev/null"}, DefaultKeepAliveCommand)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +641,6 @@ func TestBuildPod_BasicFields(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{"WORKSPACE_PATH": "/workspace"},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}),
 		now, expiresAt,
 	)
@@ -679,7 +677,7 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	assert.Equal(t, "main", c.Name)
 	assert.Equal(t, "ubuntu:22.04", c.Image)
 	assert.Equal(t, "/workspace", c.WorkingDir)
-	assert.Equal(t, DefaultKeepAliveCommand, c.Command)
+	assert.Nil(t, c.Command)
 
 	require.NotNil(t, c.SecurityContext)
 	require.NotNil(t, c.SecurityContext.AllowPrivilegeEscalation)
@@ -709,8 +707,7 @@ func TestBuildPod_CustomCommand(t *testing.T) {
 	customCmd := []string{"python", "-m", "http.server", "8080"}
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		customCmd,
-		validCreateRequest(CreateRequest{Image: "python:3.12"}),
+		validCreateRequest(CreateRequest{Image: "python:3.12", Command: customCmd}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -725,7 +722,6 @@ func TestBuildPod_DefaultTimeouts(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, expiresAt,
 	)
@@ -754,7 +750,6 @@ func TestBuildPod_CustomTimeouts(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{
 			Image:          "img",
 			IdleTimeoutSec: customIdle, MaxLifetimeSec: customMax,
@@ -783,7 +778,6 @@ func TestBuildPod_EnvVars(t *testing.T) {
 	}
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", env,
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
@@ -807,7 +801,6 @@ func TestBuildPod_EmptyEnv(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
@@ -822,7 +815,6 @@ func TestBuildPod_ResourceRequestsOnly(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{
 			Image:         "img",
 			CPURequest:    "250m",
@@ -845,7 +837,6 @@ func TestBuildPod_ResourceLimitsOnly(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{
 			Image:       "img",
 			CPULimit:    "2",
@@ -868,7 +859,6 @@ func TestBuildPod_ResourceRequestsAndLimits(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{
 			Image:         "img",
 			CPURequest:    "100m",
@@ -895,7 +885,6 @@ func TestBuildPod_NoResources(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
@@ -912,7 +901,6 @@ func TestBuildPod_PartialCPURequest(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img", CPURequest: "500m"}),
 		now, now.Add(time.Hour),
 	)
@@ -931,7 +919,6 @@ func TestBuildPod_PartialMemoryLimit(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img", MemoryLimit: "2Gi"}),
 		now, now.Add(time.Hour),
 	)
@@ -953,7 +940,6 @@ func TestBuildPod_PVCName(t *testing.T) {
 	now := time.Now().UTC()
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
@@ -970,7 +956,6 @@ func TestBuildPod_AnnotationTimestamps(t *testing.T) {
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img"}),
 		now, expiresAt,
 	)
@@ -1007,7 +992,6 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 
 	_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		DefaultKeepAliveCommand,
 		validCreateRequest(CreateRequest{Image: "img", CPURequest: "invalid"}),
 		now, now.Add(time.Hour),
 	)

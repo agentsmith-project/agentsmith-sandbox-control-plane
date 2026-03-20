@@ -10,7 +10,16 @@ type Config struct {
 	Server     ServerConfig    `yaml:"server"`
 	Auth       AuthConfig      `yaml:"auth"`
 	Kubernetes K8sConfig       `yaml:"kubernetes"`
+	Sandbox    SandboxConfig   `yaml:"sandbox"`
 	RateLimit  RateLimitConfig `yaml:"rateLimit"`
+}
+
+type SandboxConfig struct {
+	Defaults SandboxDefaultsConfig `yaml:"defaults"`
+}
+
+type SandboxDefaultsConfig struct {
+	Namespace string `yaml:"namespace"`
 }
 
 type ServerConfig struct {
@@ -104,6 +113,11 @@ func DefaultConfig() *Config {
 			QPS:            50,
 			Burst:          100,
 			RequestTimeout: 15 * time.Second,
+		},
+		Sandbox: SandboxConfig{
+			Defaults: SandboxDefaultsConfig{
+				Namespace: "sandbox-workloads",
+			},
 		},
 		RateLimit: RateLimitConfig{
 			RequestsPerMinute: 60,

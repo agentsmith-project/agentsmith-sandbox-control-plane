@@ -149,12 +149,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	}
 	env["WORKSPACE_PATH"] = "/workspace"
 
-	command := DefaultKeepAliveCommand
-	if len(req.Command) > 0 {
-		command = req.Command
-	}
-
-	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, command, req, now, expiresAt)
+	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, req, now, expiresAt)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -403,7 +398,6 @@ func parseResourceRequirements(req CreateRequest) (v1.ResourceRequirements, erro
 func (h *Handler) buildPod(
 	workspaceID, projectID, workloadID, podName string,
 	env map[string]string,
-	command []string,
 	req CreateRequest,
 	now time.Time,
 	expiresAt time.Time,
@@ -438,6 +432,11 @@ func (h *Handler) buildPod(
 		envVars = append(envVars, v1.EnvVar{Name: k, Value: v})
 	}
 
+	var command []string
+	if len(req.Command) > 0 {
+		command = req.Command
+	}
+
 	resources, err := parseResourceRequirements(req)
 	if err != nil {
 		return nil, err
@@ -450,7 +449,7 @@ func (h *Handler) buildPod(
 	fsGroupPolicy := v1.FSGroupChangeOnRootMismatch
 	var gracePeriod int64 = 30
 
-	return &v1.Pod{
+	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        podName,
 			Namespace:   h.k8sClient.Namespace(),
@@ -472,7 +471,6 @@ func (h *Handler) buildPod(
 				{
 					Name:       "main",
 					Image:      req.Image,
-					Command:    command,
 					Env:        envVars,
 					Resources:  resources,
 					WorkingDir: "/workspace",
@@ -504,7 +502,13 @@ func (h *Handler) buildPod(
 				},
 			},
 		},
-	}, nil
+	}
+
+	if len(command) > 0 {
+		pod.Spec.Containers[0].Command = command
+	}
+
+	return pod, nil
 }
 
 func (h *Handler) waitForPodDeletion(ctx context.Context, podName string, timeout time.Duration) {

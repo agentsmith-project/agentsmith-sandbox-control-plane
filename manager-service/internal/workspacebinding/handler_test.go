@@ -73,13 +73,14 @@ func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string,
 func TestEnsureAndGetBinding(t *testing.T) {
 	client := &fakeK8sClient{}
 	handler := NewHandler(client, Options{
-		Namespace:             "sandbox-workloads",
-		CSIDriver:             "csi.juicefs.com",
-		StorageCapacity:       "1Pi",
-		StorageClassName:      "juicefs-static",
-		MountOptions:          []string{"writeback_cache"},
-		StorageEndpoint:       "http://minio.internal:19000",
-		StorageCredentialSeed: "seed-demo",
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		MountOptions:     []string{"writeback_cache"},
+		StorageEndpoint:  "http://minio.internal:19000",
+		StorageAccessKey: "minio-access",
+		StorageSecretKey: "minio-secret",
 	})
 
 	payload := `{"file_library_id":"flib_demo","filesystem_name":"jfs_demo","metadata_url":"postgres://juicefs:secret@pg:5432/jfs_demo","subdir":"/workspaces/ws/flib_demo"}`
@@ -92,6 +93,12 @@ func TestEnsureAndGetBinding(t *testing.T) {
 	}
 	if client.secret == nil || client.pv == nil || client.pvc == nil {
 		t.Fatalf("expected secret/pv/pvc to be ensured")
+	}
+	if got := string(client.secret.Data["access-key"]); got != "minio-access" {
+		t.Fatalf("expected access key to be propagated, got %q", got)
+	}
+	if got := string(client.secret.Data["secret-key"]); got != "minio-secret" {
+		t.Fatalf("expected secret key to be propagated, got %q", got)
 	}
 	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "/workspaces/ws/flib_demo" {
 		t.Fatalf("expected subdir to be propagated, got %q", got)

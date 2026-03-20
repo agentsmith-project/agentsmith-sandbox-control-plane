@@ -33,6 +33,9 @@ kubernetes:
   qps: 50
   burst: 100
   requestTimeout: 15s
+sandbox:
+  defaults:
+    namespace: "agentsmith-sandbox"
 rateLimit:
   requestsPerMinute: 60
 `
@@ -54,6 +57,9 @@ rateLimit:
 		}
 		if cfg.Version != 1 {
 			t.Errorf("Load() version = %v, want 1", cfg.Version)
+		}
+		if cfg.Sandbox.Defaults.Namespace != "agentsmith-sandbox" {
+			t.Errorf("Load() sandbox namespace = %q, want agentsmith-sandbox", cfg.Sandbox.Defaults.Namespace)
 		}
 		if meta.SourcePath != configPath {
 			t.Errorf("Load() sourcePath = %v, want %v", meta.SourcePath, configPath)
@@ -175,6 +181,9 @@ server:
 
 		if cfg.Server.RequestIDHeader == "" {
 			t.Error("LoadWithDefaults() requestIDHeader was not applied from defaults")
+		}
+		if cfg.Sandbox.Defaults.Namespace == "" {
+			t.Error("LoadWithDefaults() sandbox namespace was not applied from defaults")
 		}
 	})
 

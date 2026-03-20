@@ -116,6 +116,11 @@ func applyDefaults(cfg *Config) {
 		cfg.Kubernetes.RequestTimeout = defaultCfg.Kubernetes.RequestTimeout
 	}
 
+	// Sandbox defaults
+	if cfg.Sandbox.Defaults.Namespace == "" {
+		cfg.Sandbox.Defaults.Namespace = defaultCfg.Sandbox.Defaults.Namespace
+	}
+
 }
 
 // Clone creates a deep copy of the configuration

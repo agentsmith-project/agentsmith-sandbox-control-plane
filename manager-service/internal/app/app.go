@@ -63,7 +63,13 @@ func mainImpl() {
 
 	log.Printf("Configuration loaded from %s", bootCfg.ConfigPath)
 
-	k8sNamespace := getEnvOrDefault("K8S_NAMESPACE", "sandbox-workloads")
+	k8sNamespace := strings.TrimSpace(os.Getenv("K8S_NAMESPACE"))
+	if k8sNamespace == "" {
+		k8sNamespace = cfg.Sandbox.Defaults.Namespace
+	}
+	if k8sNamespace == "" {
+		k8sNamespace = "sandbox-workloads"
+	}
 	k8sClient, err := k8s.NewClient(&k8s.ClientConfig{
 		Namespace:      k8sNamespace,
 		QPS:            cfg.Kubernetes.QPS,
@@ -100,7 +106,8 @@ func mainImpl() {
 		MountServiceAccount:   os.Getenv("JUICEFS_MOUNT_SERVICE_ACCOUNT"),
 		MountImage:            os.Getenv("JUICEFS_MOUNT_IMAGE"),
 		StorageEndpoint:       getEnvOrDefault("JUICEFS_STORAGE_ENDPOINT", "http://localhost:19000"),
-		StorageCredentialSeed: getEnvOrDefault("JUICEFS_STORAGE_CREDENTIAL_SEED", "sandbox-juicefs-credential-seed"),
+		StorageAccessKey:      os.Getenv("JUICEFS_STORAGE_ACCESS_KEY"),
+		StorageSecretKey:      os.Getenv("JUICEFS_STORAGE_SECRET_KEY"),
 	})
 	log.Printf("Workload handler initialized with workspace binding model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
 

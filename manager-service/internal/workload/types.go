@@ -60,6 +60,3 @@ const (
 	maxExecTimeout     = 300 * time.Second
 	workloadRunAsUID   = 1000
 )
-
-// DefaultKeepAliveCommand is the default container entrypoint when no command is specified.
-var DefaultKeepAliveCommand = []string{"tail", "-f", "/dev/null"}
