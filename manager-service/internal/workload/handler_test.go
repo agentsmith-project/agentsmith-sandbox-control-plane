@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sandbox/manager/internal/k8s"
+	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -76,7 +77,12 @@ func newTestHandler(t *testing.T) *Handler {
 	api := newFakeK8sAPI(t)
 	client := newTestK8sClient(t, api.URL)
 	executor := k8s.NewExecutor(client)
-	return NewHandler(client, executor, "test-pvc", t.TempDir())
+	return NewHandler(client, executor)
+}
+
+func validCreateRequest(req CreateRequest) CreateRequest {
+	req.WorkspaceBindingID = "flib-demo"
+	return req
 }
 
 func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
@@ -115,8 +121,6 @@ func TestNewHandler(t *testing.T) {
 	require.NotNil(t, h)
 	assert.NotNil(t, h.k8sClient)
 	assert.NotNil(t, h.executor)
-	assert.Equal(t, "test-pvc", h.pvcName)
-	assert.NotEmpty(t, h.basePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,65 +129,65 @@ func TestNewHandler(t *testing.T) {
 
 func TestParseRoute(t *testing.T) {
 	tests := []struct {
-		name        string
-		path        string
-		wantWsID    string
-		wantProjID  string
-		wantWlID    string
-		wantAction  string
-		wantOK      bool
+		name       string
+		path       string
+		wantWsID   string
+		wantProjID string
+		wantWlID   string
+		wantAction string
+		wantOK     bool
 	}{
 		{
-			name:       "full path no action",
-			path:       "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1",
-			wantWsID:   "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
+			name:     "full path no action",
+			path:     "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1",
+			wantWsID: "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
 			wantAction: "", wantOK: true,
 		},
 		{
-			name:       "with keepalive action",
-			path:       "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/keepalive",
-			wantWsID:   "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
+			name:     "with keepalive action",
+			path:     "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/keepalive",
+			wantWsID: "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
 			wantAction: "keepalive", wantOK: true,
 		},
 		{
-			name:       "with exec action",
-			path:       "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/exec",
-			wantWsID:   "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
+			name:     "with exec action",
+			path:     "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/exec",
+			wantWsID: "ws-1", wantProjID: "proj-1", wantWlID: "wl-1",
 			wantAction: "exec", wantOK: true,
 		},
 		{
-			name: "wrong prefix",
-			path: "/v1/workloads/ws-1/projects/proj-1/workloads/wl-1",
+			name:   "wrong prefix",
+			path:   "/v1/workloads/ws-1/projects/proj-1/workloads/wl-1",
 			wantOK: false,
 		},
 		{
-			name: "too few parts",
-			path: "/v1/workspaces/ws-1/projects",
+			name:   "too few parts",
+			path:   "/v1/workspaces/ws-1/projects",
 			wantOK: false,
 		},
 		{
-			name: "wrong segment - not projects",
-			path: "/v1/workspaces/ws-1/other/proj-1/workloads/wl-1",
+			name:   "wrong segment - not projects",
+			path:   "/v1/workspaces/ws-1/other/proj-1/workloads/wl-1",
 			wantOK: false,
 		},
 		{
-			name: "wrong segment - not workloads",
-			path: "/v1/workspaces/ws-1/projects/proj-1/pods/wl-1",
+			name:   "wrong segment - not workloads",
+			path:   "/v1/workspaces/ws-1/projects/proj-1/pods/wl-1",
 			wantOK: false,
 		},
 		{
-			name: "empty workspace ID",
-			path: "/v1/workspaces//projects/proj-1/workloads/wl-1",
+			name:   "empty workspace ID",
+			path:   "/v1/workspaces//projects/proj-1/workloads/wl-1",
 			wantOK: false,
 		},
 		{
-			name: "empty project ID",
-			path: "/v1/workspaces/ws-1/projects//workloads/wl-1",
+			name:   "empty project ID",
+			path:   "/v1/workspaces/ws-1/projects//workloads/wl-1",
 			wantOK: false,
 		},
 		{
-			name: "empty workload ID",
-			path: "/v1/workspaces/ws-1/projects/proj-1/workloads/",
+			name:   "empty workload ID",
+			path:   "/v1/workspaces/ws-1/projects/proj-1/workloads/",
 			wantOK: false,
 		},
 	}
@@ -636,10 +640,10 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
 	expiresAt := now.Add(DefaultIdleTimeout)
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "ws-1/wl-1/main",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{"WORKSPACE_PATH": "/workspace"},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "ubuntu:22.04"},
+		validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}),
 		now, expiresAt,
 	)
 	require.NoError(t, err)
@@ -689,13 +693,13 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	vm := c.VolumeMounts[0]
 	assert.Equal(t, "workspace", vm.Name)
 	assert.Equal(t, "/workspace", vm.MountPath)
-	assert.Equal(t, "ws-1/wl-1/main", vm.SubPath)
+	assert.Empty(t, vm.SubPath)
 
 	require.Len(t, pod.Spec.Volumes, 1)
 	vol := pod.Spec.Volumes[0]
 	assert.Equal(t, "workspace", vol.Name)
 	require.NotNil(t, vol.PersistentVolumeClaim)
-	assert.Equal(t, "test-pvc", vol.PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"), vol.PersistentVolumeClaim.ClaimName)
 }
 
 func TestBuildPod_CustomCommand(t *testing.T) {
@@ -703,10 +707,10 @@ func TestBuildPod_CustomCommand(t *testing.T) {
 	now := time.Now().UTC()
 
 	customCmd := []string{"python", "-m", "http.server", "8080"}
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		customCmd,
-		CreateRequest{Image: "python:3.12"},
+		validCreateRequest(CreateRequest{Image: "python:3.12"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -719,10 +723,10 @@ func TestBuildPod_DefaultTimeouts(t *testing.T) {
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
 	expiresAt := now.Add(DefaultIdleTimeout)
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, expiresAt,
 	)
 	require.NoError(t, err)
@@ -748,13 +752,13 @@ func TestBuildPod_CustomTimeouts(t *testing.T) {
 	customMax := 7200
 	expiresAt := now.Add(time.Duration(customIdle) * time.Second)
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{
+		validCreateRequest(CreateRequest{
 			Image:          "img",
 			IdleTimeoutSec: customIdle, MaxLifetimeSec: customMax,
-		},
+		}),
 		now, expiresAt,
 	)
 	require.NoError(t, err)
@@ -778,9 +782,9 @@ func TestBuildPod_EnvVars(t *testing.T) {
 		"DB_URL":         "postgres://localhost",
 	}
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path", env,
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", env,
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -801,10 +805,10 @@ func TestBuildPod_EmptyEnv(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -816,14 +820,14 @@ func TestBuildPod_ResourceRequestsOnly(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{
+		validCreateRequest(CreateRequest{
 			Image:         "img",
 			CPURequest:    "250m",
 			MemoryRequest: "512Mi",
-		},
+		}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -839,14 +843,14 @@ func TestBuildPod_ResourceLimitsOnly(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{
+		validCreateRequest(CreateRequest{
 			Image:       "img",
 			CPULimit:    "2",
 			MemoryLimit: "4Gi",
-		},
+		}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -862,16 +866,16 @@ func TestBuildPod_ResourceRequestsAndLimits(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{
+		validCreateRequest(CreateRequest{
 			Image:         "img",
 			CPURequest:    "100m",
 			CPULimit:      "500m",
 			MemoryRequest: "256Mi",
 			MemoryLimit:   "1Gi",
-		},
+		}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -889,10 +893,10 @@ func TestBuildPod_NoResources(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -906,10 +910,10 @@ func TestBuildPod_PartialCPURequest(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img", CPURequest: "500m"},
+		validCreateRequest(CreateRequest{Image: "img", CPURequest: "500m"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -925,10 +929,10 @@ func TestBuildPod_PartialMemoryLimit(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img", MemoryLimit: "2Gi"},
+		validCreateRequest(CreateRequest{Image: "img", MemoryLimit: "2Gi"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -944,19 +948,19 @@ func TestBuildPod_PVCName(t *testing.T) {
 	api := newFakeK8sAPI(t)
 	client := newTestK8sClient(t, api.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "my-juicefs-pvc", t.TempDir())
+	h := NewHandler(client, executor)
 
 	now := time.Now().UTC()
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
 
 	require.Len(t, pod.Spec.Volumes, 1)
-	assert.Equal(t, "my-juicefs-pvc", pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }
 
 func TestBuildPod_AnnotationTimestamps(t *testing.T) {
@@ -964,10 +968,10 @@ func TestBuildPod_AnnotationTimestamps(t *testing.T) {
 	now := time.Date(2025, 3, 1, 12, 30, 0, 0, time.UTC)
 	expiresAt := time.Date(2025, 3, 2, 12, 30, 0, 0, time.UTC)
 
-	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img"},
+		validCreateRequest(CreateRequest{Image: "img"}),
 		now, expiresAt,
 	)
 	require.NoError(t, err)
@@ -984,10 +988,10 @@ func TestParseResourceRequirements_Invalid(t *testing.T) {
 		name string
 		req  CreateRequest
 	}{
-		{"invalid cpu_request", CreateRequest{Image: "img", CPURequest: "not-a-number"}},
-		{"invalid memory_request", CreateRequest{Image: "img", MemoryRequest: "xyz"}},
-		{"invalid cpu_limit", CreateRequest{Image: "img", CPULimit: "1.2.3"}},
-		{"invalid memory_limit", CreateRequest{Image: "img", MemoryLimit: "not-a-quantity"}},
+		{"invalid cpu_request", validCreateRequest(CreateRequest{Image: "img", CPURequest: "not-a-number"})},
+		{"invalid memory_request", validCreateRequest(CreateRequest{Image: "img", MemoryRequest: "xyz"})},
+		{"invalid cpu_limit", validCreateRequest(CreateRequest{Image: "img", CPULimit: "1.2.3"})},
+		{"invalid memory_limit", validCreateRequest(CreateRequest{Image: "img", MemoryLimit: "not-a-quantity"})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1001,10 +1005,10 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
-	_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1", "sub/path",
+	_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
 		DefaultKeepAliveCommand,
-		CreateRequest{Image: "img", CPURequest: "invalid"},
+		validCreateRequest(CreateRequest{Image: "img", CPURequest: "invalid"}),
 		now, now.Add(time.Hour),
 	)
 	require.Error(t, err)
@@ -1012,38 +1016,16 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleCreatePod – workspace directory creation
+// handleCreatePod – workspace binding usage
 // ---------------------------------------------------------------------------
 
-func TestHandleCreatePod_CreatesWorkspaceDirectory(t *testing.T) {
-	basePath := t.TempDir()
-	api := newFakeK8sAPI(t)
-	client := newTestK8sClient(t, api.URL)
-	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", basePath)
-
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
-	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
-	rec := httptest.NewRecorder()
-	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
-
-	expectedDir := filepath.Join(basePath, "ws-abc", "wl-test")
-	info, err := os.Stat(expectedDir)
-	require.NoError(t, err, "workspace directory should be created")
-	assert.True(t, info.IsDir())
-}
-
-func TestHandleCreatePod_SubPathInPodSpec(t *testing.T) {
-	basePath := t.TempDir()
-
+func TestHandleCreatePod_UsesBindingPVC(t *testing.T) {
 	podSpec := make(chan string, 1)
 	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pods") {
 			var pod v1.Pod
-			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Containers) > 0 {
-				if len(pod.Spec.Containers[0].VolumeMounts) > 0 {
-					podSpec <- pod.Spec.Containers[0].VolumeMounts[0].SubPath
-				}
+			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Volumes) > 0 && pod.Spec.Volumes[0].PersistentVolumeClaim != nil {
+				podSpec <- pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
@@ -1063,61 +1045,19 @@ func TestHandleCreatePod_SubPathInPodSpec(t *testing.T) {
 
 	client := newTestK8sClient(t, fakeAPI.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", basePath)
+	h := NewHandler(client, executor)
 
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	payload, _ := json.Marshal(validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
 
 	select {
-	case sp := <-podSpec:
-		assert.Equal(t, "ws-abc/wl-test", sp, "subPath should be {workspaceID}/{workloadID}")
+	case claimName := <-podSpec:
+		assert.Equal(t, workspacebinding.PVCName("ws-abc", "proj-123", "flib-demo"), claimName)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pod creation")
 	}
-}
-
-func TestHandleCreatePod_IdempotentMkdir(t *testing.T) {
-	basePath := t.TempDir()
-	api := newFakeK8sAPI(t)
-	client := newTestK8sClient(t, api.URL)
-	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", basePath)
-
-	expectedDir := filepath.Join(basePath, "ws-1", "wl-1")
-	require.NoError(t, os.MkdirAll(expectedDir, 0755))
-
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
-	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
-	rec := httptest.NewRecorder()
-	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
-
-	info, err := os.Stat(expectedDir)
-	require.NoError(t, err, "directory should still exist after idempotent call")
-	assert.True(t, info.IsDir())
-}
-
-func TestHandleCreatePod_SubPathFormat(t *testing.T) {
-	assert.Equal(t, "ws-1/wl-1",
-		filepath.Join("ws-1", "wl-1"),
-		"subPath should be {wsID}/{wlID}")
-}
-
-func TestHandleCreatePod_MkdirAllFailure(t *testing.T) {
-	basePath := "/dev/null/impossible"
-	api := newFakeK8sAPI(t)
-	client := newTestK8sClient(t, api.URL)
-	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", basePath)
-
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
-	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
-	rec := httptest.NewRecorder()
-	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
-
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Contains(t, rec.Body.String(), "workspace dir creation failed")
 }
 
 func TestHandleCreatePod_InvalidResourceReturns400(t *testing.T) {
@@ -1128,10 +1068,10 @@ func TestHandleCreatePod_InvalidResourceReturns400(t *testing.T) {
 		req     CreateRequest
 		wantMsg string
 	}{
-		{"invalid cpu_request", CreateRequest{Image: "img", CPURequest: "bad-value"}, "cpu_request"},
-		{"invalid memory_request", CreateRequest{Image: "img", MemoryRequest: "xyz"}, "memory_request"},
-		{"invalid cpu_limit", CreateRequest{Image: "img", CPULimit: "1.2.3"}, "cpu_limit"},
-		{"invalid memory_limit", CreateRequest{Image: "img", MemoryLimit: "not-a-qty"}, "memory_limit"},
+		{"invalid cpu_request", validCreateRequest(CreateRequest{Image: "img", CPURequest: "bad-value"}), "cpu_request"},
+		{"invalid memory_request", validCreateRequest(CreateRequest{Image: "img", MemoryRequest: "xyz"}), "memory_request"},
+		{"invalid cpu_limit", validCreateRequest(CreateRequest{Image: "img", CPULimit: "1.2.3"}), "cpu_limit"},
+		{"invalid memory_limit", validCreateRequest(CreateRequest{Image: "img", MemoryLimit: "not-a-qty"}), "memory_limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

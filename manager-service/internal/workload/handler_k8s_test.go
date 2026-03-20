@@ -190,7 +190,12 @@ func newHandlerWithRegistry(t *testing.T, reg *podRegistry) *Handler {
 	srv := reg.makeServer(t)
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
-	return NewHandler(client, executor, "test-pvc", t.TempDir())
+	return NewHandler(client, executor)
+}
+
+func validCreateRequestK8s(req CreateRequest) CreateRequest {
+	req.WorkspaceBindingID = "flib-demo"
+	return req
 }
 
 // shortCtx returns a context that expires quickly so that WaitForPodReady
@@ -209,7 +214,7 @@ func shortCtx(t *testing.T) context.Context {
 func TestHandleCreatePod_Returns201WithPodName(t *testing.T) {
 	h := newHandlerWithRegistry(t, newPodRegistry())
 
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -226,7 +231,7 @@ func TestHandleCreatePod_Returns201WithPodName(t *testing.T) {
 func TestHandleCreatePod_ExpiresAtReflectsIdleTimeout(t *testing.T) {
 	h := newHandlerWithRegistry(t, newPodRegistry())
 
-	payload, _ := json.Marshal(CreateRequest{Image: "img", IdleTimeoutSec: 600})
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "img", IdleTimeoutSec: 600}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	before := time.Now().UTC()
@@ -275,10 +280,10 @@ func TestHandleCreatePod_CustomCommandInPodSpec(t *testing.T) {
 
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", t.TempDir())
+	h := NewHandler(client, executor)
 
 	customCmd := []string{"python3", "-m", "http.server", "8080"}
-	payload, _ := json.Marshal(CreateRequest{Image: "python:3.12", Command: customCmd})
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "python:3.12", Command: customCmd}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -314,13 +319,13 @@ func TestHandleCreatePod_WorkspacePathAlwaysInjected(t *testing.T) {
 
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor, "test-pvc", t.TempDir())
+	h := NewHandler(client, executor)
 
 	// No explicit WORKSPACE_PATH in env – it must still be injected.
-	payload, _ := json.Marshal(CreateRequest{
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
 		Image: "ubuntu:22.04",
 		Env:   map[string]string{"MY_VAR": "hello"},
-	})
+	}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -353,7 +358,7 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 	}
 	h := newHandlerWithRegistry(t, newPodRegistry(existing))
 
-	payload, _ := json.Marshal(CreateRequest{Image: "ubuntu:22.04"})
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -374,7 +379,7 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 func TestHandleGetPod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 	reg := newPodRegistry(&v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"},
-		Status:    v1.PodStatus{Phase: v1.PodRunning},
+		Status:     v1.PodStatus{Phase: v1.PodRunning},
 	})
 	reg.setForceGetErrorFor("workload-wl-1")
 	h := newHandlerWithRegistry(t, reg)
@@ -553,7 +558,7 @@ func TestHandleKeepalive_PatchFails_Returns500(t *testing.T) {
 	now := time.Now().UTC()
 	reg := newPodRegistry(&v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-wl-1",
+			Name:        "workload-wl-1",
 			Annotations: map[string]string{"workload/maxExpiresAt": now.Add(24 * time.Hour).Format(time.RFC3339)},
 		},
 	})

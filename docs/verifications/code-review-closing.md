@@ -1,20 +1,22 @@
 # Code Review — Production Readiness
 
-**Scope:** manager-service core (workload API, K8s, workspace, cleaner).
+**Scope:** manager-service current production path (workspace bindings, workload API, K8s client, cleaner).
 
 ## Checklist
 
 | Area | Status |
 |------|--------|
-| **parseRoute** | `/v1/workspaces/{ws}/projects/{p}/workloads/{wl}[/action]`; `workloadID` validated for K8s name. |
-| **Pod create** | 200 when pod already exists; no duplicate create. |
-| **Keepalive** | `newExpires` capped by `workload/maxExpiresAt`; `PatchActivity` updates annotations. |
-| **Exec** | Pod existence checked; 404 when missing; container `main`; timeout capped (max 300s). |
-| **Delete** | Get pod → delete → wait. No snapshot or GC. |
-| **Cleaner** | Selects by `expires_at` and `app=managed-workload` / `app=sandbox`; deletes only (no snapshot/GC). |
-| **Auth** | Service-key middleware and validator. |
-| **K8s client** | In-cluster / kubeconfig; QPS/burst; retry; namespace trimmed. |
-| **Workspace** | JVS prepare/restore; `PayloadSubPath` for pod volume. Cleaner does not touch storage. |
+| **Route parsing** | `/v1/workspaces/{ws}/projects/{p}/workspace-bindings/{binding}` and `/workloads/{wl}` are both validated and dispatched cleanly. |
+| **Binding ensure** | Creates or reuses Secret/PV/PVC through JuiceFS CSI. |
+| **Workload create** | Requires `workspace_binding_id`; returns 200 on idempotent reuse. |
+| **Workspace mount** | Pod mounts `/workspace` from the binding PVC. |
+| **Keepalive** | `expires_at` is extended and capped correctly. |
+| **Exec** | Pod existence checked; timeout capped; container `main` only. |
+| **Delete** | Deletes compute only; workspace binding remains independent. |
+| **Cleaner** | Deletes expired workload pods only; does not touch bindings. |
+| **Auth** | Service-key middleware and validator protect all `/v1/` routes. |
+| **K8s client** | In-cluster / kubeconfig, QPS/burst, retry, namespace trimming. |
+| **Storage model** | Current release truth is JuiceFS CSI workspace bindings mounted at `/workspace`. |
 | **Shutdown** | Signal handling and HTTP server shutdown with timeout. |
-| **CreateRequest** | Resource quantities parsed with `resource.ParseQuantity`; 400 on invalid. |
-| **Rate limit** | Config from YAML used; limiter cleanup started/stopped. |
+| **CreateRequest** | Resource quantities parsed and invalid inputs rejected. |
+| **Rate limit** | YAML-configured limiter is active. |

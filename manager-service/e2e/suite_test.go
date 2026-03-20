@@ -15,8 +15,13 @@
 //	E2E_CLEANER_BIN        Path to cleaner binary             (default: ../bin/cleaner)
 //	E2E_SERVICE_KEY        Service key for auth               (default: e2e-test-key)
 //	E2E_NAMESPACE          Workload K8s namespace             (default: sandbox-workloads)
-//	E2E_PVC_NAME           JuiceFS / workspace PVC name       (default: juicefs-workloads-pvc)
-//	E2E_WORKSPACE_PATH     Manager workspace base path        (default: /tmp/e2e-workspace)
+//	E2E_METADATA_URL       JuiceFS metadata URL               (default: postgres://postgres:postgres@localhost:5432/juicefs?sslmode=disable)
+//	E2E_STORAGE_ENDPOINT   Object storage endpoint            (default: http://localhost:9000)
+//	E2E_FILESYSTEM_NAME    JuiceFS filesystem name            (default: agentsmith-workspace)
+//	E2E_STORAGE_CAPACITY   Binding storage capacity           (default: 1Pi)
+//	E2E_STORAGE_CLASS      Binding storage class              (default: "")
+//	E2E_MOUNT_OPTIONS      Comma-separated mount options      (default: "")
+//	E2E_SUBDIR             Binding subdir prefix              (default: "")
 //	E2E_IMAGE              Container image for workloads      (default: ubuntu:22.04)
 //	E2E_JUICEFS            "true" → enable file-persistence tests that require JuiceFS
 //	E2E_MANAGER_PORT       TCP port when auto-starting manager (default: 18080)
@@ -65,15 +70,20 @@ var (
 
 // SuiteConfig holds the E2E test configuration resolved from env vars.
 type SuiteConfig struct {
-	ManagerURL     string
-	ServiceKey     string
-	Namespace      string
-	PVCName        string
-	WorkspacePath  string
-	Image          string
-	CleanerBin     string
-	ManagerBin     string
-	JuiceFSEnabled bool // true → file-persistence tests are enabled
+	ManagerURL       string
+	ServiceKey       string
+	Namespace        string
+	MetadataURL      string
+	StorageEndpoint  string
+	FilesystemName   string
+	StorageCapacity  string
+	StorageClassName string
+	MountOptions     []string
+	Subdir           string
+	Image            string
+	CleanerBin       string
+	ManagerBin       string
+	JuiceFSEnabled   bool // true → file-persistence tests are enabled
 
 	managerCmd *exec.Cmd // non-nil when we started the manager
 	managerLog *os.File
@@ -85,15 +95,20 @@ type SuiteConfig struct {
 
 func TestMain(m *testing.M) {
 	c := &SuiteConfig{
-		ManagerURL:     envOr("E2E_MANAGER_URL", ""),
-		ServiceKey:     envOr("E2E_SERVICE_KEY", "e2e-test-key"),
-		Namespace:      envOr("E2E_NAMESPACE", "sandbox-workloads"),
-		PVCName:        envOr("E2E_PVC_NAME", "juicefs-workloads-pvc"),
-		WorkspacePath:  envOr("E2E_WORKSPACE_PATH", "/tmp/e2e-workspace"),
-		Image:          envOr("E2E_IMAGE", "ubuntu:22.04"),
-		CleanerBin:     absPath(envOr("E2E_CLEANER_BIN", "../bin/cleaner")),
-		ManagerBin:     absPath(envOr("E2E_MANAGER_BIN", "../bin/manager")),
-		JuiceFSEnabled: os.Getenv("E2E_JUICEFS") == "true",
+		ManagerURL:       envOr("E2E_MANAGER_URL", ""),
+		ServiceKey:       envOr("E2E_SERVICE_KEY", "e2e-test-key"),
+		Namespace:        envOr("E2E_NAMESPACE", "sandbox-workloads"),
+		MetadataURL:      envOr("E2E_METADATA_URL", "postgres://postgres:postgres@localhost:5432/juicefs?sslmode=disable"),
+		StorageEndpoint:  envOr("E2E_STORAGE_ENDPOINT", "http://localhost:9000"),
+		FilesystemName:   envOr("E2E_FILESYSTEM_NAME", "agentsmith-workspace"),
+		StorageCapacity:  envOr("E2E_STORAGE_CAPACITY", "1Pi"),
+		StorageClassName: envOr("E2E_STORAGE_CLASS", ""),
+		MountOptions:     splitCSV(os.Getenv("E2E_MOUNT_OPTIONS")),
+		Subdir:           envOr("E2E_SUBDIR", ""),
+		Image:            envOr("E2E_IMAGE", "ubuntu:22.04"),
+		CleanerBin:       absPath(envOr("E2E_CLEANER_BIN", "../bin/cleaner")),
+		ManagerBin:       absPath(envOr("E2E_MANAGER_BIN", "../bin/manager")),
+		JuiceFSEnabled:   os.Getenv("E2E_JUICEFS") == "true",
 	}
 	suite = c
 
@@ -106,11 +121,6 @@ func TestMain(m *testing.M) {
 
 	// ── Namespace ──────────────────────────────────────────────────────────
 	ensureNamespace(cli, c.Namespace)
-
-	// ── Workspace directory ────────────────────────────────────────────────
-	if err := os.MkdirAll(c.WorkspacePath, 0755); err != nil {
-		log.Fatalf("E2E: failed to create workspace path %s: %v", c.WorkspacePath, err)
-	}
 
 	// ── Manager ────────────────────────────────────────────────────────────
 	if c.ManagerURL == "" {
@@ -193,9 +203,13 @@ kubernetes:
 	cmd.Env = append(os.Environ(),
 		"CONFIG_PATH="+cfgPath,
 		"SERVICE_KEYS="+c.ServiceKey,
-		"JUICEFS_BASE_PATH="+c.WorkspacePath,
-		"JUICEFS_PVC_NAME="+c.PVCName,
 		"K8S_NAMESPACE="+c.Namespace,
+		"JUICEFS_CSI_DRIVER="+envOr("E2E_CSI_DRIVER", "csi.juicefs.com"),
+		"JUICEFS_STORAGE_CAPACITY="+c.StorageCapacity,
+		"JUICEFS_STORAGE_CLASS_NAME="+c.StorageClassName,
+		"JUICEFS_MOUNT_OPTIONS="+strings.Join(c.MountOptions, ","),
+		"JUICEFS_SUBDIR="+c.Subdir,
+		"JUICEFS_STORAGE_ENDPOINT="+c.StorageEndpoint,
 		"LOG_LEVEL=info",
 	)
 	if kubeconfig != "" {
@@ -417,6 +431,21 @@ func absPath(p string) string {
 		return p
 	}
 	return a
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }
 
 // uniqueID returns a K8s-safe unique workload ID for use in a single test.

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,22 +17,24 @@ import (
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/workload"
+	"github.com/sandbox/manager/internal/workspacebinding"
 )
 
 var version = "dev"
 
 type Manager struct {
-	cfg              *config.Config
-	k8sClient        *k8s.Client
-	k8sExecutor      *k8s.Executor
-	authValidator    *auth.ServiceKeyValidator
-	healthChecker   *observability.HealthChecker
-	metrics         *observability.MetricsRegistry
-	workloadHandler *workload.Handler
-	rateLimiter      *ratelimit.Limiter
-	httpServer       *http.Server
-	ctx              context.Context
-	cancel           context.CancelFunc
+	cfg                     *config.Config
+	k8sClient               *k8s.Client
+	k8sExecutor             *k8s.Executor
+	authValidator           *auth.ServiceKeyValidator
+	healthChecker           *observability.HealthChecker
+	metrics                 *observability.MetricsRegistry
+	workloadHandler         *workload.Handler
+	workspaceBindingHandler *workspacebinding.Handler
+	rateLimiter             *ratelimit.Limiter
+	httpServer              *http.Server
+	ctx                     context.Context
+	cancel                  context.CancelFunc
 }
 
 func Main() {
@@ -86,10 +89,20 @@ func mainImpl() {
 	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
-	juicefsBasePath := getEnvOrDefault("JUICEFS_BASE_PATH", "/mnt/juicefs/workloads")
-	juicefsPVCName := getEnvOrDefault("JUICEFS_PVC_NAME", "juicefs-workloads-pvc")
-	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, juicefsPVCName, juicefsBasePath)
-	log.Printf("Workload handler initialized (pvc=%s, basePath=%s)", juicefsPVCName, juicefsBasePath)
+	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor)
+	workspaceBindingHandler := workspacebinding.NewHandler(k8sClient, workspacebinding.Options{
+		Namespace:             k8sNamespace,
+		CSIDriver:             getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
+		StorageCapacity:       getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
+		StorageClassName:      os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
+		MountOptions:          parseMountOptions(os.Getenv("JUICEFS_MOUNT_OPTIONS")),
+		Subdir:                os.Getenv("JUICEFS_SUBDIR"),
+		MountServiceAccount:   os.Getenv("JUICEFS_MOUNT_SERVICE_ACCOUNT"),
+		MountImage:            os.Getenv("JUICEFS_MOUNT_IMAGE"),
+		StorageEndpoint:       getEnvOrDefault("JUICEFS_STORAGE_ENDPOINT", "http://localhost:19000"),
+		StorageCredentialSeed: getEnvOrDefault("JUICEFS_STORAGE_CREDENTIAL_SEED", "sandbox-juicefs-credential-seed"),
+	})
+	log.Printf("Workload handler initialized with workspace binding model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
 
 	rateLimitCfg := ratelimit.ConfigFromRequestsPerMinute(cfg.RateLimit.RequestsPerMinute)
 	rateLimiter := ratelimit.NewLimiter(rateLimitCfg)
@@ -98,16 +111,17 @@ func mainImpl() {
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
 	mgr := &Manager{
-		cfg:              cfg,
-		k8sClient:        k8sClient,
-		k8sExecutor:      k8sExecutor,
-		authValidator:    authValidator,
-		healthChecker:   observability.NewHealthChecker(),
-		metrics:         observability.GetMetrics(),
-		workloadHandler: workloadHandler,
-		rateLimiter:      rateLimiter,
-		ctx:              mgrCtx,
-		cancel:           mgrCancel,
+		cfg:                     cfg,
+		k8sClient:               k8sClient,
+		k8sExecutor:             k8sExecutor,
+		authValidator:           authValidator,
+		healthChecker:           observability.NewHealthChecker(),
+		metrics:                 observability.GetMetrics(),
+		workloadHandler:         workloadHandler,
+		workspaceBindingHandler: workspaceBindingHandler,
+		rateLimiter:             rateLimiter,
+		ctx:                     mgrCtx,
+		cancel:                  mgrCancel,
 	}
 
 	mgr.setupReadinessChecks()
@@ -163,7 +177,13 @@ func (m *Manager) setupHTTPServer() {
 	authMiddleware := auth.ServiceKeyMiddleware(m.authValidator, m.cfg.Auth.HeaderName)
 
 	v1Mux := http.NewServeMux()
-	m.workloadHandler.RegisterRoutes(v1Mux)
+	v1Mux.Handle("/v1/workspaces/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/workspace-bindings/") {
+			m.workspaceBindingHandler.ServeHTTP(w, r)
+			return
+		}
+		m.workloadHandler.ServeHTTP(w, r)
+	}))
 
 	var v1Handler http.Handler = v1Mux
 	v1Handler = authMiddleware(v1Handler)
@@ -242,3 +262,18 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+func parseMountOptions(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n'
+	})
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}

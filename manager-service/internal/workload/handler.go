@@ -6,20 +6,19 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sandbox/manager/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	retryutil "github.com/sandbox/manager/internal/retry"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/observability"
+	retryutil "github.com/sandbox/manager/internal/retry"
 )
 
 var k8sRetryConfig = retryutil.RetryConfig{
@@ -33,23 +32,23 @@ var k8sRetryConfig = retryutil.RetryConfig{
 type Handler struct {
 	k8sClient *k8s.Client
 	executor  *k8s.Executor
-	pvcName   string
-	basePath  string // JuiceFS mount root for workspace directories
 }
 
 // NewHandler creates a new workload handler.
-func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor, pvcName string, basePath string) *Handler {
+func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor) *Handler {
 	return &Handler{
 		k8sClient: k8sClient,
 		executor:  executor,
-		pvcName:   pvcName,
-		basePath:  basePath,
 	}
 }
 
 // RegisterRoutes registers workload HTTP routes on the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/workspaces/", h.routeRequest)
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.routeRequest(w, r)
 }
 
 // parseRoute extracts workspaceID, projectID, workloadID, and action from the URL path.
@@ -119,20 +118,12 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		jsonError(w, http.StatusBadRequest, "image is required")
 		return
 	}
-
-	ctx := r.Context()
-
-	subPath := filepath.Join(workspaceID, workloadID)
-	fullPath := filepath.Join(h.basePath, subPath)
-	if err := os.MkdirAll(fullPath, 0755); err != nil {
-		log.Printf("workload/%s: mkdir failed: %v", workloadID, err)
-		jsonError(w, http.StatusInternalServerError, "workspace dir creation failed: "+err.Error())
+	if req.WorkspaceBindingID == "" {
+		jsonError(w, http.StatusBadRequest, "workspace_binding_id is required")
 		return
 	}
-	if err := os.Chown(fullPath, workloadRunAsUID, workloadRunAsUID); err != nil {
-		log.Printf("workload/%s: chown warning (non-fatal): %v", workloadID, err)
-	}
-	log.Printf("workload/%s: workspace dir ready at %s", workloadID, fullPath)
+
+	ctx := r.Context()
 
 	idleTimeout := DefaultIdleTimeout
 	if req.IdleTimeoutSec > 0 {
@@ -163,7 +154,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		command = req.Command
 	}
 
-	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, subPath, env, command, req, now, expiresAt)
+	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, command, req, now, expiresAt)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -410,7 +401,7 @@ func parseResourceRequirements(req CreateRequest) (v1.ResourceRequirements, erro
 }
 
 func (h *Handler) buildPod(
-	workspaceID, projectID, workloadID, podName, subPath string,
+	workspaceID, projectID, workloadID, podName string,
 	env map[string]string,
 	command []string,
 	req CreateRequest,
@@ -477,38 +468,37 @@ func (h *Handler) buildPod(
 				FSGroup:             &fsGroup,
 				FSGroupChangePolicy: &fsGroupPolicy,
 			},
-		Containers: []v1.Container{
-			{
-				Name:       "main",
-				Image:      req.Image,
-				Command:    command,
-				Env:        envVars,
-				Resources:  resources,
-				WorkingDir: "/workspace",
-				SecurityContext: &v1.SecurityContext{
-					AllowPrivilegeEscalation: boolPtr(false),
-					Capabilities: &v1.Capabilities{
-						Drop: []v1.Capability{"ALL"},
+			Containers: []v1.Container{
+				{
+					Name:       "main",
+					Image:      req.Image,
+					Command:    command,
+					Env:        envVars,
+					Resources:  resources,
+					WorkingDir: "/workspace",
+					SecurityContext: &v1.SecurityContext{
+						AllowPrivilegeEscalation: boolPtr(false),
+						Capabilities: &v1.Capabilities{
+							Drop: []v1.Capability{"ALL"},
+						},
+						SeccompProfile: &v1.SeccompProfile{
+							Type: v1.SeccompProfileTypeRuntimeDefault,
+						},
 					},
-					SeccompProfile: &v1.SeccompProfile{
-						Type: v1.SeccompProfileTypeRuntimeDefault,
-					},
-				},
-				VolumeMounts: []v1.VolumeMount{
-					{
-						Name:      "workspace",
-						MountPath: "/workspace",
-						SubPath:   subPath,
+					VolumeMounts: []v1.VolumeMount{
+						{
+							Name:      "workspace",
+							MountPath: "/workspace",
+						},
 					},
 				},
 			},
-		},
 			Volumes: []v1.Volume{
 				{
 					Name: "workspace",
 					VolumeSource: v1.VolumeSource{
 						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: h.pvcName,
+							ClaimName: workspacebinding.PVCName(workspaceID, projectID, req.WorkspaceBindingID),
 						},
 					},
 				},

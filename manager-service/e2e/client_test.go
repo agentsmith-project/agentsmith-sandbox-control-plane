@@ -51,6 +51,11 @@ func (c *managerClient) workloadURL(wsID, projID, wlID string) string {
 		c.baseURL, wsID, projID, wlID)
 }
 
+func (c *managerClient) bindingURL(wsID, projID, bindingID string) string {
+	return fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workspace-bindings/%s",
+		c.baseURL, wsID, projID, bindingID)
+}
+
 // Response is the raw HTTP response plus its decoded body bytes.
 type Response struct {
 	StatusCode int
@@ -97,15 +102,45 @@ func (c *managerClient) do(t *testing.T, method, url string, body io.Reader) *Re
 
 // CreateRequest is a subset of the workload.CreateRequest struct.
 type CreateRequest struct {
-	Image          string            `json:"image"`
-	Command        []string          `json:"command,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	CPURequest     string            `json:"cpu_request,omitempty"`
-	CPULimit       string            `json:"cpu_limit,omitempty"`
-	MemoryRequest  string            `json:"memory_request,omitempty"`
-	MemoryLimit    string            `json:"memory_limit,omitempty"`
-	IdleTimeoutSec int               `json:"idle_timeout_sec,omitempty"`
-	MaxLifetimeSec int               `json:"max_lifetime_sec,omitempty"`
+	Image              string            `json:"image"`
+	Command            []string          `json:"command,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	CPURequest         string            `json:"cpu_request,omitempty"`
+	CPULimit           string            `json:"cpu_limit,omitempty"`
+	MemoryRequest      string            `json:"memory_request,omitempty"`
+	MemoryLimit        string            `json:"memory_limit,omitempty"`
+	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
+	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
+	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
+}
+
+type WorkspaceBindingRequest struct {
+	FileLibraryID    string   `json:"file_library_id"`
+	FilesystemName   string   `json:"filesystem_name"`
+	MetadataURL      string   `json:"metadata_url"`
+	StorageEndpoint  string   `json:"storage_endpoint,omitempty"`
+	StorageCapacity  string   `json:"storage_capacity,omitempty"`
+	StorageClassName string   `json:"storage_class_name,omitempty"`
+	MountOptions     []string `json:"mount_options,omitempty"`
+	Subdir           string   `json:"subdir,omitempty"`
+}
+
+type WorkspaceBindingResponse struct {
+	BindingID        string   `json:"binding_id"`
+	WorkspaceID      string   `json:"workspace_id"`
+	ProjectID        string   `json:"project_id"`
+	FileLibraryID    string   `json:"file_library_id"`
+	Status           string   `json:"status"`
+	Namespace        string   `json:"namespace"`
+	SecretName       string   `json:"secret_name"`
+	PVName           string   `json:"pv_name"`
+	PVCName          string   `json:"pvc_name"`
+	VolumeHandle     string   `json:"volume_handle"`
+	FilesystemName   string   `json:"filesystem_name"`
+	MountPath        string   `json:"mount_path"`
+	StorageClassName string   `json:"storage_class_name"`
+	MountOptions     []string `json:"mount_options"`
+	Subdir           string   `json:"subdir"`
 }
 
 // PodStatus mirrors workload.PodStatus.
@@ -140,7 +175,15 @@ type ExecResponse struct {
 // CreateWorkload sends PUT /v1/workspaces/{wsID}/projects/{projID}/workloads/{wlID}.
 func (c *managerClient) CreateWorkload(t *testing.T, wsID, projID, wlID string, req CreateRequest) *Response {
 	t.Helper()
+	if c.serviceKey == suite.ServiceKey {
+		ensureWorkspaceBindingForWorkload(t, wsID, projID, wlID, &req)
+	}
 	return c.do(t, http.MethodPut, c.workloadURL(wsID, projID, wlID), jsonBody(req))
+}
+
+func (c *managerClient) EnsureWorkspaceBinding(t *testing.T, wsID, projID, bindingID string, req WorkspaceBindingRequest) *Response {
+	t.Helper()
+	return c.do(t, http.MethodPut, c.bindingURL(wsID, projID, bindingID), jsonBody(req))
 }
 
 // GetWorkload sends GET /v1/workspaces/{wsID}/projects/{projID}/workloads/{wlID}.
@@ -205,6 +248,30 @@ func mustCreateWorkload(t *testing.T, wsID, projID, wlID string, req CreateReque
 		t.Fatalf("decode PodStatus: %v – body: %s", err, resp.BodyString())
 	}
 	return ps
+}
+
+func ensureWorkspaceBindingForWorkload(t *testing.T, wsID, projID, wlID string, req *CreateRequest) {
+	t.Helper()
+	if req.Image == "" {
+		return
+	}
+	if req.WorkspaceBindingID == "" {
+		req.WorkspaceBindingID = "binding-" + wlID
+	}
+	resp := newClient().EnsureWorkspaceBinding(t, wsID, projID, req.WorkspaceBindingID, WorkspaceBindingRequest{
+		FileLibraryID:    req.WorkspaceBindingID,
+		FilesystemName:   suite.FilesystemName,
+		MetadataURL:      suite.MetadataURL,
+		StorageEndpoint:  suite.StorageEndpoint,
+		StorageCapacity:  suite.StorageCapacity,
+		StorageClassName: suite.StorageClassName,
+		MountOptions:     suite.MountOptions,
+		Subdir:           suite.Subdir,
+	})
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		t.Fatalf("ensure binding %s: expected 201/200, got %d – %s",
+			req.WorkspaceBindingID, resp.StatusCode, resp.BodyString())
+	}
 }
 
 // mustDeleteWorkload deletes a workload and fails the test if response isn't 200.

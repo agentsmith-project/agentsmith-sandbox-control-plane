@@ -1,51 +1,75 @@
 # JuiceFS CSI Workspace Model
 
-This document describes the current persistent workspace model used by AgentSmith when integrating with `mbos-sandbox-v1`.
+This document defines the only supported persistence model for `mbos-sandbox-v1`.
 
 ## Product Truth
 
-- A workload pod mounts a persistent workspace at `/workspace`
-- The mounted workspace is the long-lived runtime environment
-- Keepalive/TTL only govern compute pod lifetime
-- Workspace persistence comes from the PVC-backed JuiceFS directory, not from snapshot restore
+- A workspace file library is the long-lived runtime environment
+- Sandbox binds that environment through JuiceFS CSI
+- Workload pods mount the bound environment at `/workspace`
+- Pod lifetime is ephemeral
+- Workspace lifetime is independent from pod lifetime
 
-This is the current release truth for notebook/internal agent execution.
+## Platform Boundary
 
-## Current Boundary
+`mbos-sandbox-v1` owns:
 
-`mbos-sandbox-v1` is responsible for:
-
+- workspace binding lifecycle
+- JuiceFS Secret / PV / PVC resources
 - workload pod lifecycle
-- mounting the configured PVC into the pod
-- command execution in the running pod
-- keepalive-driven cleanup
+- `/workspace` mount delivery
 
-`agentsmith` is responsible for:
+`agentsmith` owns:
 
-- deciding which file library maps to which persistent workspace
-- preparing runtime layout inside the mounted workspace
-- orchestrating notebook/agent task execution against that mounted workspace
+- which file library should be used
+- when to ensure a binding
+- task orchestration inside the mounted workspace
+- task namespace layout under the file library root
+
+## Binding Shape
+
+A `workspace binding` is the platform object that connects a business file library to a concrete JuiceFS CSI mount.
+
+At minimum it carries:
+
+- `binding_id`
+- `workspace_id`
+- `project_id`
+- `file_library_id`
+- `status`
+- `pvc_name`
+- `mount_path=/workspace`
+- optional `subdir`
+
+The caller should treat CSI details as implementation detail. The stable contract is the binding identifier.
+
+## Recommended CSI Model
+
+Based on the JuiceFS CSI documentation, the current model uses:
+
+- JuiceFS CSI Driver
+- static provisioning
+- stable PV/PVC per workspace binding
+- shared mount reuse through CSI mount pods
+
+This matches the AgentSmith requirement that one file library can be reused by multiple tasks while remaining a single persistent environment.
 
 ## Storage Shape
 
-The expected storage shape is:
+Inside the mounted file library root, AgentSmith is expected to organize task runtime state using task namespaces such as:
 
-- one shared JuiceFS PVC
-- per-workspace/per-workload subdirectories under a stable base path
-- workload pod mounts `/workspace` using PVC + `subPath`
+- `.codex/tasks/<taskId>/`
+- `.mbos/tasks/<taskId>/`
+- `.artifacts/tasks/<taskId>/`
 
-This keeps:
+The mounted root remains the complete environment; task isolation happens inside the file library, not by allocating a separate volume per task.
 
-- workspace contents persistent
-- workload pods ephemeral
-- lifecycle ownership clear
+## Release Checks
 
-## Release Readiness Expectations
+Before release, verify:
 
-Before calling this integration release-ready, verify:
-
-1. workload pod can mount the expected workspace directory at `/workspace`
-2. workspace contents survive pod restart/deletion
-3. keepalive expiry deletes the pod without deleting the workspace contents
-4. AgentSmith can reuse the same persistent workspace across workload recreations
-5. operational docs describe PVC/CSI as the persistence truth
+1. `PUT /workspace-bindings/{bindingId}` creates or reuses a stable binding
+2. `PUT /workloads/{wlId}` with that binding mounts `/workspace`
+3. deleting a workload leaves workspace contents intact
+4. the same binding can be reused by later workloads
+5. docs, tests, and operational runbooks all describe this same model

@@ -1,80 +1,79 @@
 # Runbook
 
-Current product note:
+This runbook covers the current production path only:
 
-- the current integration truth is the workload-oriented persistent workspace path
-- the mounted JuiceFS/PVC workspace is the persistence source of truth
-- this runbook should be read together with [JUICEFS_CSI_WORKSPACE_MODEL.md](JUICEFS_CSI_WORKSPACE_MODEL.md)
+- workspace bindings backed by JuiceFS CSI
+- workload pods mounted at `/workspace`
+- keepalive-driven workload reclaim
 
 ## Health and readiness
 
-- **Liveness:** `GET /healthz` — returns 200 when the process is up. No auth.
-- **Readiness:** `GET /readyz` — returns 200 when the manager can talk to the Kubernetes API and the configured namespace exists. No auth.
+- `GET /healthz` — process liveness
+- `GET /readyz` — manager can talk to Kubernetes and has valid config
+- `GET /metrics` — Prometheus metrics
+
+## Core operational checks
+
+### 1. Verify workspace binding
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz   # 200
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/readyz    # 200
+curl -s -X PUT \
+  http://localhost:8080/v1/workspaces/ws_001/projects/proj_001/workspace-bindings/flib_demo \
+  -H "X-Service-Key: $SERVICE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_library_id": "flib_demo",
+    "filesystem_name": "agentsmith-workspace",
+    "metadata_url": "postgres://postgres:postgres@db:5432/juicefs?sslmode=disable"
+  }' | jq .
 ```
 
-## Metrics
+Check:
 
-- **Metrics:** `GET /metrics` — Prometheus-format metrics. Path is configurable (`server.metrics.path`).
+- binding returns `status=ready`
+- `pvc_name` is present
+- binding can be fetched again with `GET`
 
-## Cleaner (CronJob)
+### 2. Verify workload mount
 
-- **Schedule:** Runs every 5 minutes (`*/5 * * * *`).
-- **Behavior:** Lists pods in the configured namespace(s) with labels `app=sandbox` or `app=managed-workload`, checks the `expires_at` annotation (RFC3339). If `now > expires_at`, the pod is deleted (or only logged when `--dry-run=true`).
-- **Pod-only cleanup:** The cleaner only deletes expired pods.
+Create a workload with `workspace_binding_id`, then check:
 
-### Checking the cleaner
+- pod reaches `Running`
+- pod mounts `/workspace`
+- pod can write and read under `/workspace`
+
+### 3. Verify reclaim behavior
+
+- let `expires_at` pass or delete the workload pod
+- confirm the pod is removed
+- recreate the workload with the same `workspace_binding_id`
+- confirm files under `/workspace` are still present
+
+## Cleaner
+
+The cleaner only deletes expired workload pods. It must not delete workspace bindings.
+
+Useful checks:
 
 ```bash
-# List CronJob and recent jobs
 kubectl -n sandbox-system get cronjob sandbox-cleaner
-kubectl -n sandbox-system get jobs -l app=sandbox-cleaner
-
-# Logs of the last run
 kubectl -n sandbox-system logs -l app=sandbox-cleaner --tail=100
 ```
 
-### If pods are not reclaimed
+If pods are not reclaimed:
 
-1. **Confirm `expires_at`:**  
-   `kubectl -n <namespace> get pod <pod-name> -o jsonpath='{.metadata.annotations.expires_at}'`  
-   If missing or in the future, the cleaner will not delete the pod.
+1. Check `expires_at`
+2. Check keepalive traffic
+3. Check cleaner namespace and `--dry-run`
+4. Check RBAC and namespace wiring
 
-2. **Keepalive:**  
-   Expiry is extended when the client sends `POST …/workloads/{id}/keepalive`. If the client stops sending keepalives, `expires_at` is not updated and the pod will be reclaimed after the idle timeout.
+## Release checks
 
-3. **Cleaner logs:**  
-   Check for `[DRY-RUN]` (dry-run still on) or errors (e.g. RBAC, namespace not found). In production, ensure the overlay sets `--dry-run=false` and the correct `--namespace`.
+Before release:
 
-4. **Namespace:**  
-   The cleaner scans the namespace passed via `--namespace`. Production patch uses `--namespace=sandbox-workloads`.
-
-## Secrets (SERVICE_KEYS)
-
-Service keys are provided via the `SERVICE_KEYS` environment variable (comma-separated). In Kubernetes, this is typically set from a Secret (e.g. `sandbox-manager-keys` → key `SERVICE_KEYS`). Rotate by updating the Secret and restarting the manager (and optionally the cleaner if it ever uses the same Secret). There is no in-memory hot-rotate of keys; restart is required.
-
-## Troubleshooting
-
-| Symptom | Checks |
-|--------|--------|
-| 401 on `/v1/` | `X-Service-Key` header present and value in `SERVICE_KEYS` |
-| 503 / readyz failing | K8s API reachable; `K8S_NAMESPACE` (or in-cluster namespace) exists and is listable |
-| Pod not created | Check manager logs, K8s RBAC, resource quota, and namespace |
-| Pod not deleted by cleaner | See “If pods are not reclaimed” above |
-
-## Pre-release checklist
-
-Before cutting a release:
-
-1. **Repo:** `git status` clean; no uncommitted changes or unintended untracked files.
-2. **Lint & tests:** From repo root run `make release-gate` (runs `go vet`, optionally `golangci-lint`, unit tests with race, coverage ≥ threshold, and build of manager + cleaner).
-3. **Integration tests:** `make test-integration` (requires build tag `integration`; runs HTTP + fake K8s tests).
-4. **E2E (optional):** From repo root, build binaries then run E2E:
-   - `cd manager-service && go build -o bin/manager ./cmd/manager && go build -o bin/cleaner ./cmd/cleaner`
-   - `E2E_MANAGER_BIN=$(pwd)/bin/manager E2E_CLEANER_BIN=$(pwd)/bin/cleaner E2E_MANAGER_PORT=19090 E2E_JUICEFS=true go test -tags=e2e -count=1 -timeout=25m ./e2e/...`
-   - Use a free port for `E2E_MANAGER_PORT` if another manager is already bound (e.g. port-forward).
-5. **Version:** Bump `manager-service/VERSION` and `k8s/base/kustomization.yaml` images `newTag` if needed.
-6. **Persistent workspace truth:** Verify the target environment documents and provisions JuiceFS/PVC workspace mounts as the persistence model. Do not rely on snapshot/restore assumptions for the current AgentSmith workload path.
+1. `git status` clean
+2. manager and cleaner tests pass
+3. workspace binding ensure/get/delete works
+4. workload create/get/delete/keepalive/exec works
+5. deleting a workload does not delete workspace contents
+6. docs and API reference match the current binding + JuiceFS CSI model

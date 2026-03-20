@@ -1,76 +1,44 @@
-# Sandbox Pre-Launch Technical Checklist
+# Sandbox Pre-Launch Checklist
 
-Current scope note:
+This checklist is for the current production model only:
 
-- this checklist originally tracked launch issues across older sandbox models
-- for the current AgentSmith integration, the primary release truth is the persistent workspace workload path
-- PVC/JuiceFS-backed `/workspace` behavior should be considered first-class in release review
+- JuiceFS CSI workspace bindings
+- workload pods mounted at `/workspace`
+- keepalive-driven reclaim of compute pods
 
-**Scope:** Issues that must be fixed before production launch. No scope creep; only items that cause incorrect behavior, stuck resources, or unacceptable security/resource risk.
+## Must-pass checks
 
-**Status:** Addressed per 2026-02-12 feedback. Cleaner runs only in `sandbox` namespace; TTL and resource limits clamped to config; finalizer does not store when sessionId missing; smoke tests use pod name from API; cleaner calls Manager DELETE so snapshot is always taken.
+### Binding lifecycle
 
----
+- [ ] `PUT /workspace-bindings/{bindingId}` creates or reuses a stable binding
+- [ ] `GET /workspace-bindings/{bindingId}` returns the current binding state
+- [ ] `DELETE /workspace-bindings/{bindingId}` removes the binding resources cleanly
+- [ ] ensuring the same binding twice returns the same stable PVC identity
 
-## 1. ~~Finalizer Only Watches One Namespace~~ → Cleaner Only Cleans `sandbox` (RESOLVED)
+### Workload lifecycle
 
-**Resolution:** Cleaner only cleans the `sandbox` namespace. `sandbox-system` and `sandbox-workspaces` do not run sandbox pods and are not managed by the cleaner. Removed cleaner CronJobs and RBAC for those namespaces; `allowedNamespaces` in the cleaner binary is only `sandbox`.
+- [ ] `PUT /workloads/{wlId}` requires `workspace_binding_id`
+- [ ] workload pod mounts `/workspace`
+- [ ] pod reaches `Running`
+- [ ] `POST /exec` works against the running pod
+- [ ] `POST /keepalive` extends `expires_at`
+- [ ] `DELETE /workloads/{wlId}` removes only compute
 
----
+### Persistence
 
-## 2. ~~Create-Sandbox Request TTL Not Capped~~ (RESOLVED)
+- [ ] files written under `/workspace` survive workload deletion and recreation
+- [ ] cleaner deletes expired pods without deleting workspace bindings
+- [ ] the same binding can be reused across multiple workloads and tasks
 
-**Resolution:** Request `ttlSeconds` is clamped to config max: `sandbox.defaults.ttlSeconds` is the maximum the user can set. In `buildPodSpec`, if `req.TTLSeconds > maxTTL` we set `ttl = maxTTL`.
+### Configuration
 
----
+- [ ] manager is configured through `JUICEFS_CSI_DRIVER`, storage capacity, storage class, mount options, and related CSI envs
+- [ ] all deployment paths use the current JuiceFS CSI binding env/config model
+- [ ] documentation and scripts use the same binding + CSI model
 
-## 3. Create-Sandbox Request Image (ACCEPTED AS-IS)
+### Release evidence
 
-**Decision:** Any image that is reachable (pullable) is considered trusted. No allowlist; client may pass any image. No code change.
-
----
-
-## 4. ~~Create-Sandbox Request Resource Limits Not Capped~~ (RESOLVED)
-
-**Resolution:** Config `sandbox.defaults.resources.limits` defines the maximum the user can set. Request CPU/memory/ephemeralStorage are clamped to these limits in `buildPodSpec` (same pattern as TTL).
-
----
-
-## 5. ~~Finalizer getSandboxID Fallback~~ (RESOLVED)
-
-**Resolution:** When `sandbox/sessionId` annotation is missing, we do not store a snapshot (no fallback to pod name). The finalizer skips snapshot and removes the finalizer so the pod can terminate.
-
----
-
-## 6. ~~Smoke Tests Use Wrong Pod Name~~ (RESOLVED)
-
-**Resolution:** Create response is parsed for `podName`; it is saved to `/tmp/smoke-test-pod-name.txt` and `SANDBOX_POD_NAME` is used in scenarios. `check_pod_ready` and all smoke steps use `SANDBOX_POD_NAME` when set.
-
----
-
-## 7. ~~Cleaner-Deleted Pods Must Get Snapshots~~ (RESOLVED)
-
-**Context:** When the **cleaner** CronJob deletes an expired pod, it uses `metav1.DeleteOptions{}` (default grace). The pod has `TerminationGracePeriodSeconds: 1`. The container can be terminated before the Manager’s finalizer loop runs (every 10s). The finalizer then sees the pod with no running containers and skips snapshot, then force-removes the finalizer. So **expired pods cleaned by cron do not get a snapshot**; only client-triggered DELETE gets the synchronous pre-delete snapshot.
-
-**Recommendation:** If product expectation is “expired pods are not snapshotted,” document this clearly. If “every deletion should snapshot when possible,” then either: give the pod a longer grace period when it’s only being deleted by TTL so the finalizer can run, or have the cleaner call the Manager DELETE API instead of deleting the pod directly (so the Manager does the sync snapshot then deletes). This is listed as design clarification; treat as must-fix only if product requires snapshot-on-expiry.
-
----
-
-## Additional current-release checks
-
-1. Persistent workspace lifecycle is documented as PVC/JuiceFS-based, not snapshot-based
-2. AgentSmith integration contract matches the current workload API and `/workspace` persistence model
-3. Workload pods can be recreated without losing mounted workspace contents
-4. Keepalive expiry deletes pods without implying workspace deletion
-
-## Summary Table
-
-| # | Issue | Status |
-|---|--------|--------|
-| 1 | Cleaner only cleans `sandbox` namespace | Resolved |
-| 2 | Request TTL clamped to config max | Resolved |
-| 3 | Image: any reachable image allowed | Accepted |
-| 4 | Request resource limits clamped to config max | Resolved |
-| 5 | Finalizer: no snapshot when sessionId missing | Resolved |
-| 6 | Smoke tests use pod name from create response | Resolved |
-| 7 | Cleaner calls Manager DELETE for snapshot before delete | Resolved |
+- [ ] API reference matches the live request/response shape
+- [ ] integration contract matches AgentSmith’s current request body
+- [ ] real workload runbook is up to date
+- [ ] no current docs or smoke scripts mention removed persistence concepts

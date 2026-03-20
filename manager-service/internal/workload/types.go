@@ -5,15 +5,16 @@ import "time"
 // CreateRequest is the request body for PUT /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}.
 // workspace_id and project_id come from URL path, not from body.
 type CreateRequest struct {
-	Image          string            `json:"image"`
-	Command        []string          `json:"command,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	CPURequest     string            `json:"cpu_request,omitempty"`
-	CPULimit       string            `json:"cpu_limit,omitempty"`
-	MemoryRequest  string            `json:"memory_request,omitempty"`
-	MemoryLimit    string            `json:"memory_limit,omitempty"`
-	IdleTimeoutSec int               `json:"idle_timeout_sec,omitempty"`
-	MaxLifetimeSec int               `json:"max_lifetime_sec,omitempty"`
+	Image              string            `json:"image"`
+	Command            []string          `json:"command,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	CPURequest         string            `json:"cpu_request,omitempty"`
+	CPULimit           string            `json:"cpu_limit,omitempty"`
+	MemoryRequest      string            `json:"memory_request,omitempty"`
+	MemoryLimit        string            `json:"memory_limit,omitempty"`
+	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
+	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
+	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
 }
 
 // ExecRequest is the request body for POST .../exec.

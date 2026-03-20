@@ -6,43 +6,54 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ---------------------------------------------------------------------------
-// Workspace directory tests
+// Workspace binding tests
 //
-// These tests validate the workspace lifecycle managed by the sandbox manager:
-//   - Manager creates {workspacePath}/{wsID}/{wlID} on the host at pod creation time
-//   - The pod mounts the PVC with subPath {wsID}/{wlID} at /workspace
-//   - Files written persist across pod restarts iff the PVC is persistent (JuiceFS)
+// These tests validate the current workspace lifecycle managed by the sandbox manager:
+//   - a workload uses a stable workspace binding
+//   - the pod mounts the binding PVC at /workspace
+//   - files written to /workspace persist across pod restarts
 // ---------------------------------------------------------------------------
 
-// TestWorkspace_DirectoryCreatedOnCreate verifies that creating a workload causes
-// the manager to create the workspace directory on the host filesystem.
-func TestWorkspace_DirectoryCreatedOnCreate(t *testing.T) {
+// TestWorkspace_BindingCreatedOnCreate verifies a workload ensure also ensures its binding.
+func TestWorkspace_BindingCreatedOnCreate(t *testing.T) {
 	wlID := uniqueID("ws-mkdir")
+	bindingID := "binding-" + wlID
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	expectedDir := filepath.Join(suite.WorkspacePath, testWS, wlID)
-	info, err := os.Stat(expectedDir)
-	require.NoError(t, err, "workspace directory must exist at %s after create", expectedDir)
-	assert.True(t, info.IsDir(), "workspace path must be a directory")
+	resp := newClient().EnsureWorkspaceBinding(t, testWS, testProj, bindingID, WorkspaceBindingRequest{
+		FileLibraryID:    bindingID,
+		FilesystemName:   suite.FilesystemName,
+		MetadataURL:      suite.MetadataURL,
+		StorageEndpoint:  suite.StorageEndpoint,
+		StorageCapacity:  suite.StorageCapacity,
+		StorageClassName: suite.StorageClassName,
+		MountOptions:     suite.MountOptions,
+		Subdir:           suite.Subdir,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var binding WorkspaceBindingResponse
+	require.NoError(t, resp.DecodeJSON(&binding))
+	assert.Equal(t, bindingID, binding.BindingID)
+	assert.Equal(t, "/workspace", binding.MountPath)
+	assert.Equal(t, workspacebinding.PVCName(testWS, testProj, bindingID), binding.PVCName)
 }
 
-// TestWorkspace_DirectoryIsolatedPerWorkload verifies that two workloads with different
-// IDs in the same workspace receive distinct subdirectories.
-func TestWorkspace_DirectoryIsolatedPerWorkload(t *testing.T) {
+// TestWorkspace_BindingIsolatedPerWorkload verifies different workloads use different bindings.
+func TestWorkspace_BindingIsolatedPerWorkload(t *testing.T) {
 	wlID1 := uniqueID("ws-iso-1")
 	wlID2 := uniqueID("ws-iso-2")
 	c := newClient()
@@ -54,55 +65,48 @@ func TestWorkspace_DirectoryIsolatedPerWorkload(t *testing.T) {
 		c.DeleteWorkload(t, testWS, testProj, wlID2)
 	})
 
-	dir1 := filepath.Join(suite.WorkspacePath, testWS, wlID1)
-	dir2 := filepath.Join(suite.WorkspacePath, testWS, wlID2)
-	assert.NotEqual(t, dir1, dir2, "each workload must have a distinct workspace directory")
-
-	_, err1 := os.Stat(dir1)
-	_, err2 := os.Stat(dir2)
-	assert.NoError(t, err1, "workspace dir for wlID1 must exist")
-	assert.NoError(t, err2, "workspace dir for wlID2 must exist")
+	pod1 := fetchPod(t, "workload-"+wlID1)
+	pod2 := fetchPod(t, "workload-"+wlID2)
+	require.Len(t, pod1.Spec.Volumes, 1)
+	require.Len(t, pod2.Spec.Volumes, 1)
+	require.NotNil(t, pod1.Spec.Volumes[0].PersistentVolumeClaim)
+	require.NotNil(t, pod2.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.NotEqual(t,
+		pod1.Spec.Volumes[0].PersistentVolumeClaim.ClaimName,
+		pod2.Spec.Volumes[0].PersistentVolumeClaim.ClaimName,
+		"each workload must mount a distinct binding PVC")
 }
 
-// TestWorkspace_DirectoryIdempotent verifies that recreating an existing workload
-// does not corrupt the existing workspace directory.
-func TestWorkspace_DirectoryIdempotent(t *testing.T) {
+// TestWorkspace_IdempotentCreatePreservesFiles verifies idempotent create does not disturb /workspace data.
+func TestWorkspace_IdempotentCreatePreservesFiles(t *testing.T) {
 	wlID := uniqueID("ws-idem")
 	c := newClient()
 
-	// Create – workspace dir appears.
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	wsDir := filepath.Join(suite.WorkspacePath, testWS, wlID)
-	_, err := os.Stat(wsDir)
-	require.NoError(t, err)
+	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
+	writeResp := c.Exec(t, testWS, testProj, wlID, []string{"sh", "-c", "echo sentinel > /workspace/sentinel.txt"}, 10)
+	require.Equal(t, http.StatusOK, writeResp.StatusCode)
 
-	// Write a sentinel file into the workspace dir on the host.
-	sentinelPath := filepath.Join(wsDir, "sentinel.txt")
-	require.NoError(t, os.WriteFile(sentinelPath, []byte("sentinel"), 0644))
-
-	// Create again (idempotent) – must not delete the sentinel.
 	c.CreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	_, err = os.Stat(sentinelPath)
-	assert.NoError(t, err, "idempotent create must not delete existing workspace files")
+	readResp := c.Exec(t, testWS, testProj, wlID, []string{"cat", "/workspace/sentinel.txt"}, 10)
+	require.Equal(t, http.StatusOK, readResp.StatusCode)
+	var execResp ExecResponse
+	require.NoError(t, readResp.DecodeJSON(&execResp))
+	assert.Equal(t, 0, execResp.ExitCode)
+	assert.Contains(t, execResp.Stdout, "sentinel")
 
 	c.DeleteWorkload(t, testWS, testProj, wlID)
 }
 
-// TestWorkspace_SubPathFormat verifies the subPath used for the PVC volume mount
-// is {wsID}/{wlID} (not flattened or escaped).
-func TestWorkspace_SubPathFormat(t *testing.T) {
+// TestWorkspace_PodMountUsesBindingPVC verifies the pod mounts the binding PVC at /workspace.
+func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 	wsID := "ws-subpath"
 	wlID := uniqueID("subpath")
+	bindingID := "binding-" + wlID
 
 	_ = mustCreateWorkload(t, wsID, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, wsID, testProj, wlID) })
 
-	// Validate workspace dir is at {basePath}/{wsID}/{wlID}
-	expected := filepath.Join(suite.WorkspacePath, wsID, wlID)
-	_, err := os.Stat(expected)
-	require.NoError(t, err, "workspace dir must be at %s", expected)
-
-	// Also verify via the K8s pod spec.
 	podName := "workload-" + wlID
 	waitPodPhase(t, suite.Namespace, podName, "Running", 3*time.Minute)
 
@@ -113,8 +117,9 @@ func TestWorkspace_SubPathFormat(t *testing.T) {
 	require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
 	vm := pod.Spec.Containers[0].VolumeMounts[0]
 	assert.Equal(t, "/workspace", vm.MountPath)
-	assert.Equal(t, fmt.Sprintf("%s/%s", wsID, wlID), vm.SubPath,
-		"pod volume subPath must be {wsID}/{wlID}")
+	assert.Empty(t, vm.SubPath, "workload pods no longer mount a per-workload subPath")
+	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.Equal(t, workspacebinding.PVCName(wsID, testProj, bindingID), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,15 +227,6 @@ func TestWorkspace_MultiWorkspaceIsolation(t *testing.T) {
 	waitWorkloadRunning(t, ws1, proj1, wl1, 3*time.Minute)
 	waitWorkloadRunning(t, ws2, proj2, wl2, 3*time.Minute)
 
-	// Distinct workspace dirs on host.
-	dir1 := filepath.Join(suite.WorkspacePath, ws1, wl1)
-	dir2 := filepath.Join(suite.WorkspacePath, ws2, wl2)
-	_, err1 := os.Stat(dir1)
-	_, err2 := os.Stat(dir2)
-	require.NoError(t, err1, "workspace dir %s must exist", dir1)
-	require.NoError(t, err2, "workspace dir %s must exist", dir2)
-	assert.NotEqual(t, dir1, dir2)
-
 	// Distinct pods.
 	get1 := c.GetWorkload(t, ws1, proj1, wl1)
 	get2 := c.GetWorkload(t, ws2, proj2, wl2)
@@ -242,5 +238,10 @@ func TestWorkspace_MultiWorkspaceIsolation(t *testing.T) {
 	assert.Equal(t, "workload-"+wl1, ps1.PodName)
 	assert.Equal(t, "workload-"+wl2, ps2.PodName)
 	assert.NotEqual(t, ps1.PodName, ps2.PodName)
-}
 
+	pod1 := fetchPod(t, ps1.PodName)
+	pod2 := fetchPod(t, ps2.PodName)
+	require.NotNil(t, pod1.Spec.Volumes[0].PersistentVolumeClaim)
+	require.NotNil(t, pod2.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.NotEqual(t, pod1.Spec.Volumes[0].PersistentVolumeClaim.ClaimName, pod2.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+}

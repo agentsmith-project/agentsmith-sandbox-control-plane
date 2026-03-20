@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -32,10 +31,10 @@ func TestCreate_MissingImage(t *testing.T) {
 // TestCreate_InvalidWorkloadID verifies IDs that violate DNS-label rules are rejected.
 func TestCreate_InvalidWorkloadID(t *testing.T) {
 	invalidIDs := []string{
-		"Invalid_ID",       // uppercase + underscore
-		"has space",        // space
-		"-starts-with",     // leading hyphen
-		"ends-with-",       // trailing hyphen
+		"Invalid_ID",   // uppercase + underscore
+		"has space",    // space
+		"-starts-with", // leading hyphen
+		"ends-with-",   // trailing hyphen
 		"a234567890123456789012345678901234567890123456789012345678901234", // 64 chars
 	}
 	for _, id := range invalidIDs {
@@ -271,18 +270,14 @@ func TestKeepalive_MaxExpiresAtCapped(t *testing.T) {
 	mustDeleteWorkload(t, testWS, testProj, wlID)
 }
 
-// TestCreate_WorkspaceDirCreated verifies the manager creates the workspace
-// directory at {workspacePath}/{wsID}/{wlID} when a workload is created.
-func TestCreate_WorkspaceDirCreated(t *testing.T) {
+// TestCreate_WorkspaceBindingRequired verifies create rejects missing workspace_binding_id.
+func TestCreate_WorkspaceBindingRequired(t *testing.T) {
 	wlID := uniqueID("wsdir")
-	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-
-	expectedDir := fmt.Sprintf("%s/%s/%s", suite.WorkspacePath, testWS, wlID)
-	info, err := os.Stat(expectedDir)
-	require.NoError(t, err, "workspace dir should be created at %s", expectedDir)
-	assert.True(t, info.IsDir())
-
-	mustDeleteWorkload(t, testWS, testProj, wlID)
+	resp := newClient().do(t, http.MethodPut,
+		newClient().workloadURL(testWS, testProj, wlID),
+		jsonBody(CreateRequest{Image: suite.Image, WorkspaceBindingID: ""}))
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, resp.BodyString(), "workspace_binding_id")
 }
 
 // TestCreate_MaxValidWorkloadIDLength verifies a workload ID of 63 chars (max DNS label) is accepted.

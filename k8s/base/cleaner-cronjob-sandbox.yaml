@@ -45,7 +45,7 @@ spec:
             - --dry-run=false
             - -v=2
             env:
-            # Manager URL for snapshot-before-delete (cleaner calls Manager DELETE API)
+            # Manager URL for workload DELETE requests issued by the cleaner
             - name: MANAGER_URL
               value: "http://sandbox-manager.sandbox-system.svc.cluster.local"
             # Boot configuration

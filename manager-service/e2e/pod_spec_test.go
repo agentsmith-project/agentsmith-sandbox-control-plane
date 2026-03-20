@@ -21,11 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ---------------------------------------------------------------------------
@@ -181,9 +182,8 @@ func TestPodSpec_ContainerSecurityContext(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestPodSpec_WorkspaceVolumeMount verifies the workspace PVC is mounted correctly:
-//   - volume name "workspace" backed by suite.PVCName
+//   - volume name "workspace" backed by the expected binding PVC
 //   - mount path /workspace
-//   - subPath = {wsID}/{wlID}  (not flattened)
 func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	const wsID = "ws-spec-vol"
 	wlID := uniqueID("spec-vol")
@@ -199,8 +199,8 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	vol := pod.Spec.Volumes[0]
 	assert.Equal(t, "workspace", vol.Name)
 	require.NotNil(t, vol.PersistentVolumeClaim, "volume must be backed by a PVC")
-	assert.Equal(t, suite.PVCName, vol.PersistentVolumeClaim.ClaimName,
-		"PVC claim name must match E2E_PVC_NAME configuration")
+	assert.Equal(t, workspacebinding.PVCName(wsID, testProj, "binding-"+wlID), vol.PersistentVolumeClaim.ClaimName,
+		"PVC claim name must match the expected binding PVC")
 
 	// Volume mount.
 	require.Len(t, pod.Spec.Containers, 1)
@@ -209,8 +209,7 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	vm := vms[0]
 	assert.Equal(t, "workspace", vm.Name)
 	assert.Equal(t, "/workspace", vm.MountPath, "workspace must be mounted at /workspace")
-	assert.Equal(t, fmt.Sprintf("%s/%s", wsID, wlID), vm.SubPath,
-		"subPath must be {wsID}/{wlID}")
+	assert.Empty(t, vm.SubPath, "binding-backed workload mounts no longer use per-workload subPath")
 }
 
 // ---------------------------------------------------------------------------
