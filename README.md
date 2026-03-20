@@ -8,6 +8,13 @@ A minimal Kubernetes pod lifecycle manager with JuiceFS-backed persistent worksp
 
 Workload pods are ephemeral compute units. Each pod gets a workspace directory on a JuiceFS PVC (no snapshot/JVS). Clients send keepalive to the manager; if no keepalive is received within the idle threshold, the cleaner deletes the pod (lifecycle is manager-controlled).
 
+Current product note:
+
+- this repo is now primarily the **persistent-workspace workload manager**
+- AgentSmith notebook and internal agent execution depend on this workload path
+- the persistence truth is the mounted JuiceFS/PVC workspace, not snapshot/restore
+- snapshot-oriented shell-session history should be treated as legacy context, not the current primary runtime model
+
 ## Architecture
 
 ```
@@ -48,6 +55,12 @@ Workload pods are ephemeral compute units. Each pod gets a workspace directory o
 | K8s Client | `internal/k8s` | Pod CRUD, activity patching, readiness polling |
 | K8s Executor | `internal/k8s` | SPDY-based command execution inside pods |
 | Workspace directory | *(handler)* | Creates `{basePath}/{wsId}/{wlId}` on JuiceFS for pod subPath mount |
+
+See also:
+
+- [docs/JUICEFS_CSI_WORKSPACE_MODEL.md](docs/JUICEFS_CSI_WORKSPACE_MODEL.md)
+- [docs/contracts/agentsmith-integration-contract-v2.md](docs/contracts/agentsmith-integration-contract-v2.md)
+- [docs/runbook.md](docs/runbook.md)
 
 ## API Endpoints
 

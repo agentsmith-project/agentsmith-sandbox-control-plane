@@ -8,7 +8,7 @@ This document defines how AgentSmith interacts with the Sandbox Manager API to p
 |------|-----------|
 | **Sandbox Manager** | The `manager-service` REST API documented in [api-reference-v2.md](../api-reference-v2.md) |
 | **Workload pod** | A Kubernetes pod created by the Sandbox Manager, running a container image chosen by AgentSmith |
-| **Workspace** | A persistent directory at `/workspace` inside the pod, backed by JuiceFS + JVS (manager-assigned) |
+| **Workspace** | A persistent directory at `/workspace` inside the pod, backed by a JuiceFS PVC mount |
 | **Agent process** | The process AgentSmith starts inside the workload pod via `/exec` |
 
 ## Authentication
@@ -68,7 +68,7 @@ PUT /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}
 
 - **No `command` field** — the pod starts with the default keep-alive (`tail -f /dev/null`). AgentSmith controls what runs via `/exec`.
 - **Idempotent** — if the pod already exists, the manager returns `200 OK` with the existing pod's status. AgentSmith can safely retry on transient failures.
-- **Workspace restoration** — if a previous snapshot exists for this `{wsId}/{wlId}`, the manager automatically restores it before pod creation. The agent process sees its previous `/workspace` state.
+- **Persistent workspace reuse** — the pod remounts the same workspace path for the same `{wsId}/{wlId}` lifecycle shape. The agent process sees the existing `/workspace` state because persistence comes from the mounted JuiceFS/PVC directory, not from snapshot restore.
 
 **AgentSmith handling:**
 
@@ -203,7 +203,7 @@ When AgentSmith detects that the agent process has exited (via pgrep returning e
    POST /keepalive
 ```
 
-**Crash recovery is AgentSmith's responsibility.** The Sandbox Manager does not monitor or restart processes inside pods. It only manages the pod lifecycle and workspace persistence.
+**Crash recovery is AgentSmith's responsibility.** The Sandbox Manager does not monitor or restart processes inside pods. It only manages the workload pod lifecycle and mounted workspace availability.
 
 ---
 

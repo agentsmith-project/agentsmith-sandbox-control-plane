@@ -1,5 +1,11 @@
 # Sandbox Pre-Launch Technical Checklist
 
+Current scope note:
+
+- this checklist originally tracked launch issues across older sandbox models
+- for the current AgentSmith integration, the primary release truth is the persistent workspace workload path
+- PVC/JuiceFS-backed `/workspace` behavior should be considered first-class in release review
+
 **Scope:** Issues that must be fixed before production launch. No scope creep; only items that cause incorrect behavior, stuck resources, or unacceptable security/resource risk.
 
 **Status:** Addressed per 2026-02-12 feedback. Cleaner runs only in `sandbox` namespace; TTL and resource limits clamped to config; finalizer does not store when sessionId missing; smoke tests use pod name from API; cleaner calls Manager DELETE so snapshot is always taken.
@@ -49,6 +55,13 @@
 **Recommendation:** If product expectation is “expired pods are not snapshotted,” document this clearly. If “every deletion should snapshot when possible,” then either: give the pod a longer grace period when it’s only being deleted by TTL so the finalizer can run, or have the cleaner call the Manager DELETE API instead of deleting the pod directly (so the Manager does the sync snapshot then deletes). This is listed as design clarification; treat as must-fix only if product requires snapshot-on-expiry.
 
 ---
+
+## Additional current-release checks
+
+1. Persistent workspace lifecycle is documented as PVC/JuiceFS-based, not snapshot-based
+2. AgentSmith integration contract matches the current workload API and `/workspace` persistence model
+3. Workload pods can be recreated without losing mounted workspace contents
+4. Keepalive expiry deletes pods without implying workspace deletion
 
 ## Summary Table
 

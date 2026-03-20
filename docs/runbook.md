@@ -1,5 +1,11 @@
 # Runbook
 
+Current product note:
+
+- the current integration truth is the workload-oriented persistent workspace path
+- the mounted JuiceFS/PVC workspace is the persistence source of truth
+- this runbook should be read together with [JUICEFS_CSI_WORKSPACE_MODEL.md](JUICEFS_CSI_WORKSPACE_MODEL.md)
+
 ## Health and readiness
 
 - **Liveness:** `GET /healthz` — returns 200 when the process is up. No auth.
@@ -71,3 +77,4 @@ Before cutting a release:
    - `E2E_MANAGER_BIN=$(pwd)/bin/manager E2E_CLEANER_BIN=$(pwd)/bin/cleaner E2E_MANAGER_PORT=19090 E2E_JUICEFS=true go test -tags=e2e -count=1 -timeout=25m ./e2e/...`
    - Use a free port for `E2E_MANAGER_PORT` if another manager is already bound (e.g. port-forward).
 5. **Version:** Bump `manager-service/VERSION` and `k8s/base/kustomization.yaml` images `newTag` if needed.
+6. **Persistent workspace truth:** Verify the target environment documents and provisions JuiceFS/PVC workspace mounts as the persistence model. Do not rely on snapshot/restore assumptions for the current AgentSmith workload path.
