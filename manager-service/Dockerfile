@@ -1,4 +1,6 @@
-FROM golang:1.25-alpine AS builder
+ARG GO_BASE_IMAGE=golang:1.25-alpine
+ARG RUNTIME_BASE_IMAGE=ubuntu:22.04
+FROM ${GO_BASE_IMAGE} AS builder
 
 # 代理配置（可选，仅用于构建时，不会保留在最终镜像中）
 ARG HTTP_PROXY
@@ -25,7 +27,7 @@ RUN VERSION="$(cat VERSION 2>/dev/null || echo dev)" && \
       -ldflags "-X github.com/sandbox/manager/internal/app.version=${VERSION}" \
       -o cleaner ./cmd/cleaner
 
-FROM ubuntu:22.04
+FROM ${RUNTIME_BASE_IMAGE}
 
 # 代理配置（可选，用于构建时，不会保留在最终镜像中）
 ARG HTTP_PROXY
