@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # 代理配置（可选，仅用于构建时，不会保留在最终镜像中）
 ARG HTTP_PROXY

@@ -32,13 +32,24 @@ var k8sRetryConfig = retryutil.RetryConfig{
 type Handler struct {
 	k8sClient *k8s.Client
 	executor  *k8s.Executor
+	options   Options
+}
+
+type Options struct {
+	DefaultNodeSelector map[string]string
+	DefaultTolerations  []v1.Toleration
 }
 
 // NewHandler creates a new workload handler.
-func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor) *Handler {
+func NewHandler(k8sClient *k8s.Client, executor *k8s.Executor, opts ...Options) *Handler {
+	var option Options
+	if len(opts) > 0 {
+		option = opts[0]
+	}
 	return &Handler{
 		k8sClient: k8sClient,
 		executor:  executor,
+		options:   option,
 	}
 }
 
@@ -460,6 +471,8 @@ func (h *Handler) buildPod(
 			RestartPolicy:                 v1.RestartPolicyNever,
 			TerminationGracePeriodSeconds: &gracePeriod,
 			AutomountServiceAccountToken:  boolPtr(false),
+			NodeSelector:                  h.options.DefaultNodeSelector,
+			Tolerations:                   h.options.DefaultTolerations,
 			SecurityContext: &v1.PodSecurityContext{
 				RunAsNonRoot:        &nonRoot,
 				RunAsUser:           &runAsUser,

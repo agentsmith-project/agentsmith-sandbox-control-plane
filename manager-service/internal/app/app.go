@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/workload"
 	"github.com/sandbox/manager/internal/workspacebinding"
+	v1 "k8s.io/api/core/v1"
 )
 
 var version = "dev"
@@ -95,19 +97,23 @@ func mainImpl() {
 	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
-	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor)
+	workloadOptions := workload.Options{
+		DefaultNodeSelector: mustParseStringMapEnv("WORKLOAD_NODE_SELECTOR_JSON"),
+		DefaultTolerations:  mustParseTolerationsEnv("WORKLOAD_TOLERATIONS_JSON"),
+	}
+	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, workloadOptions)
 	workspaceBindingHandler := workspacebinding.NewHandler(k8sClient, workspacebinding.Options{
-		Namespace:             k8sNamespace,
-		CSIDriver:             getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
-		StorageCapacity:       getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
-		StorageClassName:      os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
-		MountOptions:          parseMountOptions(os.Getenv("JUICEFS_MOUNT_OPTIONS")),
-		Subdir:                os.Getenv("JUICEFS_SUBDIR"),
-		MountServiceAccount:   os.Getenv("JUICEFS_MOUNT_SERVICE_ACCOUNT"),
-		MountImage:            os.Getenv("JUICEFS_MOUNT_IMAGE"),
-		StorageEndpoint:       getEnvOrDefault("JUICEFS_STORAGE_ENDPOINT", "http://localhost:19000"),
-		StorageAccessKey:      os.Getenv("JUICEFS_STORAGE_ACCESS_KEY"),
-		StorageSecretKey:      os.Getenv("JUICEFS_STORAGE_SECRET_KEY"),
+		Namespace:           k8sNamespace,
+		CSIDriver:           getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
+		StorageCapacity:     getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
+		StorageClassName:    os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
+		MountOptions:        parseMountOptions(os.Getenv("JUICEFS_MOUNT_OPTIONS")),
+		Subdir:              os.Getenv("JUICEFS_SUBDIR"),
+		MountServiceAccount: os.Getenv("JUICEFS_MOUNT_SERVICE_ACCOUNT"),
+		MountImage:          os.Getenv("JUICEFS_MOUNT_IMAGE"),
+		StorageEndpoint:     getEnvOrDefault("JUICEFS_STORAGE_ENDPOINT", "http://localhost:19000"),
+		StorageAccessKey:    os.Getenv("JUICEFS_STORAGE_ACCESS_KEY"),
+		StorageSecretKey:    os.Getenv("JUICEFS_STORAGE_SECRET_KEY"),
 	})
 	log.Printf("Workload handler initialized with workspace binding model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
 
@@ -153,6 +159,30 @@ func loadBootConfig() *BootConfig {
 	return &BootConfig{
 		ConfigPath: getEnvOrDefault("CONFIG_PATH", "/etc/sandbox-manager/manager-config.yaml"),
 	}
+}
+
+func mustParseStringMapEnv(key string) map[string]string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var value map[string]string
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		log.Fatalf("Failed to parse %s: %v", key, err)
+	}
+	return value
+}
+
+func mustParseTolerationsEnv(key string) []v1.Toleration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var value []v1.Toleration
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		log.Fatalf("Failed to parse %s: %v", key, err)
+	}
+	return value
 }
 
 func (m *Manager) setupReadinessChecks() {
