@@ -33,23 +33,24 @@ type k8sClient interface {
 }
 
 type Options struct {
-	Namespace             string
-	CSIDriver             string
-	StorageCapacity       string
-	StorageClassName      string
-	MountOptions          []string
-	Subdir                string
-	MountServiceAccount   string
-	MountImage            string
-	StorageEndpoint       string
-	StorageAccessKey      string
-	StorageSecretKey      string
+	Namespace           string
+	CSIDriver           string
+	StorageCapacity     string
+	StorageClassName    string
+	MountOptions        []string
+	Subdir              string
+	MountServiceAccount string
+	MountImage          string
+	StorageEndpoint     string
+	StorageAccessKey    string
+	StorageSecretKey    string
 }
 
 type EnsureRequest struct {
 	FileLibraryID       string   `json:"file_library_id"`
 	FilesystemName      string   `json:"filesystem_name"`
 	MetadataURL         string   `json:"metadata_url"`
+	MountPath           string   `json:"mount_path,omitempty"`
 	StorageEndpoint     string   `json:"storage_endpoint,omitempty"`
 	StorageCapacity     string   `json:"storage_capacity,omitempty"`
 	StorageClassName    string   `json:"storage_class_name,omitempty"`
@@ -169,7 +170,7 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 		PVCName:          pvc,
 		VolumeHandle:     volumeHandle(workspaceID, projectID, bindingID),
 		FilesystemName:   req.FilesystemName,
-		MountPath:        "/workspace",
+		MountPath:        firstNonEmpty(req.MountPath, "/workspace"),
 		StorageClassName: firstNonEmpty(req.StorageClassName, h.options.StorageClassName),
 		MountOptions:     firstSlice(req.MountOptions, h.options.MountOptions),
 		Subdir:           firstNonEmpty(req.Subdir, h.options.Subdir),
@@ -234,7 +235,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 		PVCName:          pvcName,
 		VolumeHandle:     valueOr(annotation(pv, "mbos.io/volume-handle"), volumeHandle(workspaceID, projectID, bindingID)),
 		FilesystemName:   secretString(secret, "name"),
-		MountPath:        "/workspace",
+		MountPath:        firstNonEmpty(annotation(secret, "mbos.io/mount-path"), "/workspace"),
 		StorageClassName: derefString(pvc.Spec.StorageClassName),
 		MountOptions:     pv.Spec.MountOptions,
 		Subdir:           pv.Spec.CSI.VolumeAttributes["subdir"],
@@ -266,6 +267,7 @@ func (h *Handler) buildSecret(status BindingStatus, req EnsureRequest) *v1.Secre
 			Annotations: map[string]string{
 				"mbos.io/workspace-id": workspaceID(status),
 				"mbos.io/project-id":   projectID(status),
+				"mbos.io/mount-path":   status.MountPath,
 				"mbos.io/created-at":   status.CreatedAt,
 				"mbos.io/updated-at":   status.UpdatedAt,
 			},

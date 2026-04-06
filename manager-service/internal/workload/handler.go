@@ -158,7 +158,11 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	for k, v := range req.Env {
 		env[k] = v
 	}
-	env["WORKSPACE_PATH"] = "/workspace"
+	workspacePath := strings.TrimSpace(env["WORKSPACE_PATH"])
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
+	env["WORKSPACE_PATH"] = workspacePath
 
 	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, req, now, expiresAt)
 	if err != nil {
@@ -186,7 +190,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 
-	ready, err := h.k8sClient.WaitForPodReady(ctx, podName, 120*time.Second, 2*time.Second)
+	ready, err := h.k8sClient.WaitForPodReady(ctx, podName, 300*time.Second, 2*time.Second)
 	if err != nil {
 		log.Printf("workload/%s: pod not ready: %v", workloadID, err)
 	}
@@ -442,6 +446,10 @@ func (h *Handler) buildPod(
 	for k, v := range env {
 		envVars = append(envVars, v1.EnvVar{Name: k, Value: v})
 	}
+	workspacePath := strings.TrimSpace(env["WORKSPACE_PATH"])
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
 
 	var command []string
 	if len(req.Command) > 0 {
@@ -486,7 +494,7 @@ func (h *Handler) buildPod(
 					Image:      req.Image,
 					Env:        envVars,
 					Resources:  resources,
-					WorkingDir: "/workspace",
+					WorkingDir: workspacePath,
 					SecurityContext: &v1.SecurityContext{
 						AllowPrivilegeEscalation: boolPtr(false),
 						Capabilities: &v1.Capabilities{
@@ -499,7 +507,7 @@ func (h *Handler) buildPod(
 					VolumeMounts: []v1.VolumeMount{
 						{
 							Name:      "workspace",
-							MountPath: "/workspace",
+							MountPath: workspacePath,
 						},
 					},
 				},
