@@ -8,12 +8,12 @@ AgentSmith decides:
 
 - which workspace / project / file library should be used
 - when a workspace binding should exist
-- what commands should run inside `/workspace`
+- what commands should run inside the task workspace directory
 
 Sandbox Manager decides:
 
 - how the workspace binding maps to JuiceFS CSI resources
-- how `/workspace` is mounted into a workload pod
+- how the requested PVC `sub_path` is mounted into a workload pod
 - workload pod lifecycle and exec
 
 ## Authentication
@@ -98,15 +98,21 @@ PUT /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}
   "memory_limit": "4Gi",
   "idle_timeout_sec": 1800,
   "max_lifetime_sec": 86400,
-  "workspace_binding_id": "flib_demo"
+  "workspace_binding_id": "flib_demo",
+  "mount_path": "/home/task-abc",
+  "sub_path": "agent-tasks/task-abc",
+  "working_dir": "/home/task-abc/workspace"
 }
 ```
 
 **Expected behavior**
 
 - pod is created or reused idempotently
-- workload pod mounts `/workspace` from the binding PVC
-- if the pod is recreated later with the same binding, `/workspace` contents remain available
+- workload pod mounts `sub_path` from the binding PVC at `mount_path`
+- container working directory is `working_dir`
+- runtime env includes `TASK_HOME=mount_path`, `HOME=mount_path`, and `WORKSPACE_PATH=working_dir`
+- if an existing pod has a different mount path, subPath, workingDir, PVC, or runtime path env, create/ensure returns `409 Conflict`
+- if the pod is recreated later with the same binding and subPath, task workspace contents remain available
 
 ## 3. Start Agent Process
 
@@ -147,6 +153,6 @@ These are separate lifecycle operations on purpose.
 Before release:
 
 1. AgentSmith ensures a binding before workload creation
-2. Sandbox Manager accepts `workspace_binding_id` as the only workspace mount input
-3. `/workspace` remains stable across workload recreation
+2. Sandbox Manager accepts `workspace_binding_id` plus explicit `mount_path`, `sub_path`, and `working_dir`
+3. task HOME and workspace paths remain stable across workload recreation
 4. external and internal task directory semantics stay aligned under the same file library model

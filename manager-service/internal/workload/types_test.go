@@ -14,6 +14,9 @@ func TestCreateRequest_JSON(t *testing.T) {
 		"image": "registry.example.com/myapp:latest",
 		"command": ["python", "main.py"],
 		"env": {"KEY1": "val1", "CUSTOM_URL": "ws://example:20000"},
+		"mount_path": "/home/task-abc",
+		"sub_path": "agent-tasks/task-abc",
+		"working_dir": "/home/task-abc/workspace",
 		"idle_timeout_sec": 300,
 		"max_lifetime_sec": 3600
 	}`
@@ -26,6 +29,9 @@ func TestCreateRequest_JSON(t *testing.T) {
 	assert.Equal(t, []string{"python", "main.py"}, req.Command)
 	assert.Equal(t, "val1", req.Env["KEY1"])
 	assert.Equal(t, "ws://example:20000", req.Env["CUSTOM_URL"])
+	assert.Equal(t, "/home/task-abc", req.MountPath)
+	assert.Equal(t, "agent-tasks/task-abc", req.SubPath)
+	assert.Equal(t, "/home/task-abc/workspace", req.WorkingDir)
 	assert.Equal(t, 300, req.IdleTimeoutSec)
 	assert.Equal(t, 3600, req.MaxLifetimeSec)
 }

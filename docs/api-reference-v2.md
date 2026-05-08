@@ -97,7 +97,10 @@ Creates a workload pod or returns the existing one.
   "memory_limit": "2Gi",
   "idle_timeout_sec": 1800,
   "max_lifetime_sec": 86400,
-  "workspace_binding_id": "flib_demo"
+  "workspace_binding_id": "flib_demo",
+  "mount_path": "/home/task-abc",
+  "sub_path": "agent-tasks/task-abc",
+  "working_dir": "/home/task-abc/workspace"
 }
 ```
 
@@ -105,14 +108,26 @@ Creates a workload pod or returns the existing one.
 |-------|----------|-------------|
 | `image` | yes | Container image |
 | `command` | no | Optional container command; defaults to keep-alive |
-| `env` | no | Additional env vars; `WORKSPACE_PATH=/workspace` is injected automatically |
+| `env` | no | Additional env vars; `TASK_HOME`, `HOME`, and `WORKSPACE_PATH` are injected from workload paths |
 | `cpu_request` | no | CPU request |
 | `cpu_limit` | no | CPU limit |
 | `memory_request` | no | Memory request |
 | `memory_limit` | no | Memory limit |
 | `idle_timeout_sec` | no | Idle timeout in seconds |
 | `max_lifetime_sec` | no | Maximum pod lifetime |
-| `workspace_binding_id` | yes | Workspace binding to mount at `/workspace` |
+| `workspace_binding_id` | yes | Workspace binding PVC to mount |
+| `mount_path` | no | Container PVC mount path. New Agent task workloads should pass `/home/<task_home_segment>`. Defaults to `/workspace` for legacy callers. Must be absolute and under an allowed prefix. |
+| `sub_path` | no | PVC subPath to mount. New Agent task workloads should pass `agent-tasks/<task_home_segment>`. Must be relative and cannot contain `..`. |
+| `working_dir` | no | Container working directory. New Agent task workloads should pass `/home/<task_home_segment>/workspace`. Must be absolute and inside `mount_path`. |
+
+When a workload is created with the Agent task path fields above, the generated pod has:
+
+- `VolumeMount.MountPath = mount_path`
+- `VolumeMount.SubPath = sub_path`
+- `Container.WorkingDir = working_dir`
+- env `TASK_HOME=mount_path`, `HOME=mount_path`, `WORKSPACE_PATH=working_dir`
+
+If `PUT` finds an existing pod but its mount path, subPath, workingDir, PVC, or runtime path env differs from the requested spec, the manager returns `409 Conflict` instead of silently treating the request as idempotent.
 
 **Response**
 

@@ -6,7 +6,7 @@ This document defines the only supported persistence model for `mbos-sandbox-v1`
 
 - A workspace file library is the long-lived runtime environment
 - Sandbox binds that environment through JuiceFS CSI
-- Workload pods mount the bound environment at `/workspace`
+- Workload pods mount an explicit PVC `sub_path` at the requested container `mount_path`
 - Pod lifetime is ephemeral
 - Workspace lifetime is independent from pod lifetime
 
@@ -17,7 +17,7 @@ This document defines the only supported persistence model for `mbos-sandbox-v1`
 - workspace binding lifecycle
 - JuiceFS Secret / PV / PVC resources
 - workload pod lifecycle
-- `/workspace` mount delivery
+- workload mount delivery from `workspace_binding_id` + `mount_path` + `sub_path` + `working_dir`
 
 `agentsmith` owns:
 
@@ -38,10 +38,16 @@ At minimum it carries:
 - `file_library_id`
 - `status`
 - `pvc_name`
-- `mount_path=/workspace`
+- `mount_path=/workspace` as the binding's legacy/recommended mount hint
 - optional `subdir`
 
 The caller should treat CSI details as implementation detail. The stable contract is the binding identifier.
+
+Workload creation has its own path contract. Agent task workloads should pass:
+
+- `mount_path=/home/<task_home_segment>`
+- `sub_path=agent-tasks/<task_home_segment>`
+- `working_dir=/home/<task_home_segment>/workspace`
 
 ## Recommended CSI Model
 
@@ -56,20 +62,21 @@ This matches the AgentSmith requirement that one file library can be reused by m
 
 ## Storage Shape
 
-Inside the mounted file library root, AgentSmith is expected to organize task runtime state using task namespaces such as:
+Inside the file library PVC, AgentSmith is expected to organize task runtime state using task namespaces such as:
 
-- `.codex/tasks/<taskId>/`
-- `.mbos/tasks/<taskId>/`
-- `.artifacts/tasks/<taskId>/`
+- `agent-tasks/<task_home_segment>/workspace/`
+- `agent-tasks/<task_home_segment>/.codex/`
+- `agent-tasks/<task_home_segment>/.mbos/`
+- `agent-tasks/<task_home_segment>/.agents/`
 
-The mounted root remains the complete environment; task isolation happens inside the file library, not by allocating a separate volume per task.
+The mounted task subtree is the container's task HOME. Task isolation happens with PVC subPath, not by allocating a separate volume per task.
 
 ## Release Checks
 
 Before release, verify:
 
 1. `PUT /workspace-bindings/{bindingId}` creates or reuses a stable binding
-2. `PUT /workloads/{wlId}` with that binding mounts `/workspace`
+2. `PUT /workloads/{wlId}` with that binding mounts `agent-tasks/<task_home_segment>` at `/home/<task_home_segment>`
 3. deleting a workload leaves workspace contents intact
 4. the same binding can be reused by later workloads
 5. docs, tests, and operational runbooks all describe this same model

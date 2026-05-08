@@ -21,8 +21,8 @@ import (
 //
 // These tests validate the current workspace lifecycle managed by the sandbox manager:
 //   - a workload uses a stable workspace binding
-//   - the pod mounts the binding PVC at /workspace
-//   - files written to /workspace persist across pod restarts
+//   - the pod mounts the binding PVC task subtree at /home/<task>
+//   - files written to /home/<task>/workspace persist across pod restarts
 // ---------------------------------------------------------------------------
 
 // TestWorkspace_BindingCreatedOnCreate verifies a workload ensure also ensures its binding.
@@ -77,18 +77,19 @@ func TestWorkspace_BindingIsolatedPerWorkload(t *testing.T) {
 		"each workload must mount a distinct binding PVC")
 }
 
-// TestWorkspace_IdempotentCreatePreservesFiles verifies idempotent create does not disturb /workspace data.
+// TestWorkspace_IdempotentCreatePreservesFiles verifies idempotent create does not disturb task workspace data.
 func TestWorkspace_IdempotentCreatePreservesFiles(t *testing.T) {
 	wlID := uniqueID("ws-idem")
 	c := newClient()
+	workspacePath := taskWorkspacePath(wlID)
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
-	writeResp := c.Exec(t, testWS, testProj, wlID, []string{"sh", "-c", "echo sentinel > /workspace/sentinel.txt"}, 10)
+	writeResp := c.Exec(t, testWS, testProj, wlID, []string{"sh", "-c", fmt.Sprintf("echo sentinel > %s/sentinel.txt", workspacePath)}, 10)
 	require.Equal(t, http.StatusOK, writeResp.StatusCode)
 
 	c.CreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	readResp := c.Exec(t, testWS, testProj, wlID, []string{"cat", "/workspace/sentinel.txt"}, 10)
+	readResp := c.Exec(t, testWS, testProj, wlID, []string{"cat", workspacePath + "/sentinel.txt"}, 10)
 	require.Equal(t, http.StatusOK, readResp.StatusCode)
 	var execResp ExecResponse
 	require.NoError(t, readResp.DecodeJSON(&execResp))
@@ -98,7 +99,7 @@ func TestWorkspace_IdempotentCreatePreservesFiles(t *testing.T) {
 	c.DeleteWorkload(t, testWS, testProj, wlID)
 }
 
-// TestWorkspace_PodMountUsesBindingPVC verifies the pod mounts the binding PVC at /workspace.
+// TestWorkspace_PodMountUsesBindingPVC verifies the pod mounts the binding PVC task subtree.
 func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 	wsID := "ws-subpath"
 	wlID := uniqueID("subpath")
@@ -116,8 +117,8 @@ func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 	require.Len(t, pod.Spec.Containers, 1)
 	require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
 	vm := pod.Spec.Containers[0].VolumeMounts[0]
-	assert.Equal(t, "/workspace", vm.MountPath)
-	assert.Empty(t, vm.SubPath, "workload pods no longer mount a per-workload subPath")
+	assert.Equal(t, taskHomePath(wlID), vm.MountPath)
+	assert.Equal(t, taskSubPath(wlID), vm.SubPath)
 	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
 	assert.Equal(t, workspacebinding.PVCName(wsID, testProj, bindingID), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }
@@ -125,7 +126,7 @@ func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 // ---------------------------------------------------------------------------
 // JuiceFS persistence tests (only run when E2E_JUICEFS=true)
 //
-// These tests verify that files written to /workspace in a pod persist across
+// These tests verify that files written to task HOME/workspace in a pod persist across
 // pod deletion and recreation (i.e., the PVC backend is truly persistent).
 // ---------------------------------------------------------------------------
 
@@ -143,7 +144,7 @@ func TestWorkspace_FilePersistsAcrossRestart(t *testing.T) {
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
-	const testFile = "/workspace/persist-test.txt"
+	testFile := taskWorkspacePath(wlID) + "/persist-test.txt"
 	const testContent = "persistence-check-e2e"
 	writeResp := c.Exec(t, testWS, testProj, wlID,
 		[]string{"sh", "-c", fmt.Sprintf("echo %s > %s", testContent, testFile)}, 10)
@@ -172,7 +173,7 @@ func TestWorkspace_FilePersistsAcrossRestart(t *testing.T) {
 }
 
 // TestWorkspace_TwoWorkloadsHaveIsolatedFilesystems verifies that files written
-// in one workload's /workspace are not visible in another workload's /workspace.
+// in one workload's task workspace are not visible in another workload's task workspace.
 func TestWorkspace_TwoWorkloadsHaveIsolatedFilesystems(t *testing.T) {
 	if !suite.JuiceFSEnabled {
 		t.Skip("skipped: set E2E_JUICEFS=true to enable JuiceFS isolation tests")
@@ -194,18 +195,18 @@ func TestWorkspace_TwoWorkloadsHaveIsolatedFilesystems(t *testing.T) {
 
 	// Write a file in wl1.
 	writeResp := c.Exec(t, testWS, testProj, wlID1,
-		[]string{"sh", "-c", "echo wl1-secret > /workspace/secret.txt"}, 10)
+		[]string{"sh", "-c", fmt.Sprintf("echo wl1-secret > %s/secret.txt", taskWorkspacePath(wlID1))}, 10)
 	require.Equal(t, 200, writeResp.StatusCode)
 
 	// The file must NOT be visible in wl2.
 	readResp := c.Exec(t, testWS, testProj, wlID2,
-		[]string{"sh", "-c", "test -f /workspace/secret.txt && echo found || echo absent"}, 10)
+		[]string{"sh", "-c", fmt.Sprintf("test -f %s/secret.txt && echo found || echo absent", taskWorkspacePath(wlID2))}, 10)
 	require.Equal(t, 200, readResp.StatusCode)
 
 	var er ExecResponse
 	require.NoError(t, readResp.DecodeJSON(&er))
 	assert.Contains(t, er.Stdout, "absent",
-		"/workspace in wl2 must not see files written in wl1")
+		"task workspace in wl2 must not see files written in wl1")
 }
 
 // TestWorkspace_MultiWorkspaceIsolation verifies that workloads in different

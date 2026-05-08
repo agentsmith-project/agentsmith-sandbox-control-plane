@@ -15,6 +15,9 @@ type CreateRequest struct {
 	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
 	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
 	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
+	MountPath          string            `json:"mount_path,omitempty"`
+	SubPath            string            `json:"sub_path,omitempty"`
+	WorkingDir         string            `json:"working_dir,omitempty"`
 }
 
 // ExecRequest is the request body for POST .../exec.

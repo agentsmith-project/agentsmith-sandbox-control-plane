@@ -3,7 +3,7 @@
 This checklist is for the current production model only:
 
 - JuiceFS CSI workspace bindings
-- workload pods mounted at `/workspace`
+- workload pods mounted with task HOME subPath semantics
 - keepalive-driven reclaim of compute pods
 
 ## Must-pass checks
@@ -18,7 +18,9 @@ This checklist is for the current production model only:
 ### Workload lifecycle
 
 - [ ] `PUT /workloads/{wlId}` requires `workspace_binding_id`
-- [ ] workload pod mounts `/workspace`
+- [ ] workload pod mounts `sub_path=agent-tasks/<task_home_segment>` at `mount_path=/home/<task_home_segment>`
+- [ ] workload container `workingDir` is `/home/<task_home_segment>/workspace`
+- [ ] workload env contains `TASK_HOME`, `HOME`, and `WORKSPACE_PATH`
 - [ ] pod reaches `Running`
 - [ ] `POST /exec` works against the running pod
 - [ ] `POST /keepalive` extends `expires_at`
@@ -26,7 +28,7 @@ This checklist is for the current production model only:
 
 ### Persistence
 
-- [ ] files written under `/workspace` survive workload deletion and recreation
+- [ ] files written under the task `WORKSPACE_PATH` survive workload deletion and recreation
 - [ ] cleaner deletes expired pods without deleting workspace bindings
 - [ ] the same binding can be reused across multiple workloads and tasks
 

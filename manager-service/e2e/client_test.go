@@ -112,6 +112,9 @@ type CreateRequest struct {
 	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
 	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
 	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
+	MountPath          string            `json:"mount_path,omitempty"`
+	SubPath            string            `json:"sub_path,omitempty"`
+	WorkingDir         string            `json:"working_dir,omitempty"`
 }
 
 type WorkspaceBindingRequest struct {
@@ -258,6 +261,15 @@ func ensureWorkspaceBindingForWorkload(t *testing.T, wsID, projID, wlID string, 
 	if req.WorkspaceBindingID == "" {
 		req.WorkspaceBindingID = "binding-" + wlID
 	}
+	if req.MountPath == "" {
+		req.MountPath = taskHomePath(wlID)
+	}
+	if req.SubPath == "" {
+		req.SubPath = taskSubPath(wlID)
+	}
+	if req.WorkingDir == "" {
+		req.WorkingDir = taskWorkspacePath(wlID)
+	}
 	resp := newClient().EnsureWorkspaceBinding(t, wsID, projID, req.WorkspaceBindingID, WorkspaceBindingRequest{
 		FileLibraryID:    req.WorkspaceBindingID,
 		FilesystemName:   suite.FilesystemName,
@@ -272,6 +284,18 @@ func ensureWorkspaceBindingForWorkload(t *testing.T, wsID, projID, wlID string, 
 		t.Fatalf("ensure binding %s: expected 201/200, got %d – %s",
 			req.WorkspaceBindingID, resp.StatusCode, resp.BodyString())
 	}
+}
+
+func taskHomePath(wlID string) string {
+	return "/home/" + wlID
+}
+
+func taskWorkspacePath(wlID string) string {
+	return taskHomePath(wlID) + "/workspace"
+}
+
+func taskSubPath(wlID string) string {
+	return "agent-tasks/" + wlID
 }
 
 // mustDeleteWorkload deletes a workload and fails the test if response isn't 200.

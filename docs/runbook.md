@@ -3,7 +3,7 @@
 This runbook covers the current production path only:
 
 - workspace bindings backed by JuiceFS CSI
-- workload pods mounted at `/workspace`
+- workload pods mounted with task HOME subPath semantics
 - keepalive-driven workload reclaim
 
 ## Health and readiness
@@ -39,15 +39,17 @@ Check:
 Create a workload with `workspace_binding_id`, then check:
 
 - pod reaches `Running`
-- pod mounts `/workspace`
-- pod can write and read under `/workspace`
+- pod mounts `sub_path=agent-tasks/<task_home_segment>` at `mount_path=/home/<task_home_segment>`
+- container `workingDir` is `/home/<task_home_segment>/workspace`
+- env includes `TASK_HOME=/home/<task_home_segment>`, `HOME=/home/<task_home_segment>`, `WORKSPACE_PATH=/home/<task_home_segment>/workspace`
+- pod can write and read under `$WORKSPACE_PATH`
 
 ### 3. Verify reclaim behavior
 
 - let `expires_at` pass or delete the workload pod
 - confirm the pod is removed
 - recreate the workload with the same `workspace_binding_id`
-- confirm files under `/workspace` are still present
+- confirm files under the same task `WORKSPACE_PATH` are still present
 
 ## Cleaner
 

@@ -9,10 +9,10 @@ package e2e_test
 //   - Annotations carry the lifecycle metadata (expires_at, last_activity_at, timeouts)
 //   - Pod-level SecurityContext enforces non-root execution with correct UID/GID
 //   - Container-level SecurityContext complies with K8s "restricted" PSS
-//   - PVC volume mount uses the correct subPath format {wsID}/{wlID}
-//   - Container working directory is /workspace
+//   - PVC volume mount uses mount_path plus sub_path for the task HOME subtree
+//   - Container working directory is /home/<task>/workspace
 //   - RestartPolicy=Never and AutomountServiceAccountToken=false are set
-//   - Environment variables include WORKSPACE_PATH + user-supplied vars
+//   - Environment variables include TASK_HOME, HOME, WORKSPACE_PATH + user-supplied vars
 //   - Resource requests/limits are applied exactly as requested
 
 import (
@@ -183,7 +183,7 @@ func TestPodSpec_ContainerSecurityContext(t *testing.T) {
 
 // TestPodSpec_WorkspaceVolumeMount verifies the workspace PVC is mounted correctly:
 //   - volume name "workspace" backed by the expected binding PVC
-//   - mount path /workspace
+//   - task HOME subtree is mounted at mount_path via sub_path
 func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	const wsID = "ws-spec-vol"
 	wlID := uniqueID("spec-vol")
@@ -208,41 +208,45 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	require.Len(t, vms, 1, "must have exactly one volume mount")
 	vm := vms[0]
 	assert.Equal(t, "workspace", vm.Name)
-	assert.Equal(t, "/workspace", vm.MountPath, "workspace must be mounted at /workspace")
-	assert.Empty(t, vm.SubPath, "binding-backed workload mounts no longer use per-workload subPath")
+	assert.Equal(t, taskHomePath(wlID), vm.MountPath, "task HOME subtree must be mounted at mount_path")
+	assert.Equal(t, taskSubPath(wlID), vm.SubPath, "task HOME subtree must use sub_path")
 }
 
 // ---------------------------------------------------------------------------
 // Container configuration
 // ---------------------------------------------------------------------------
 
-// TestPodSpec_WorkingDirIsWorkspace verifies the container's workingDir is /workspace.
+// TestPodSpec_WorkingDirIsWorkspace verifies the container's workingDir is task HOME/workspace.
 func TestPodSpec_WorkingDirIsWorkspace(t *testing.T) {
-	_, pod := setupPod(t, "spec-cwd", CreateRequest{Image: suite.Image})
+	wlID, pod := setupPod(t, "spec-cwd", CreateRequest{Image: suite.Image})
 
 	require.Len(t, pod.Spec.Containers, 1)
-	assert.Equal(t, "/workspace", pod.Spec.Containers[0].WorkingDir,
-		"container workingDir must be /workspace")
+	assert.Equal(t, taskWorkspacePath(wlID), pod.Spec.Containers[0].WorkingDir,
+		"container workingDir must be task HOME/workspace")
 }
 
-// TestPodSpec_WorkspacePathEnvVarInjected verifies WORKSPACE_PATH=/workspace is always
-// present in the container's environment, even when the caller sends no env block.
-func TestPodSpec_WorkspacePathEnvVarInjected(t *testing.T) {
-	_, pod := setupPod(t, "spec-env-ws", CreateRequest{Image: suite.Image})
+// TestPodSpec_RuntimeEnvVarsInjected verifies TASK_HOME, HOME, and WORKSPACE_PATH
+// are present in the container's environment, even when the caller sends no env block.
+func TestPodSpec_RuntimeEnvVarsInjected(t *testing.T) {
+	wlID, pod := setupPod(t, "spec-env-ws", CreateRequest{Image: suite.Image})
 
 	require.Len(t, pod.Spec.Containers, 1)
 	envMap := make(map[string]string)
 	for _, e := range pod.Spec.Containers[0].Env {
 		envMap[e.Name] = e.Value
 	}
-	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"],
-		"WORKSPACE_PATH must always be injected into the container environment")
+	assert.Equal(t, taskHomePath(wlID), envMap["TASK_HOME"],
+		"TASK_HOME must always be injected into the container environment")
+	assert.Equal(t, taskHomePath(wlID), envMap["HOME"],
+		"HOME must match TASK_HOME")
+	assert.Equal(t, taskWorkspacePath(wlID), envMap["WORKSPACE_PATH"],
+		"WORKSPACE_PATH must match working_dir")
 }
 
 // TestPodSpec_UserEnvVarsInjected verifies caller-supplied env vars are forwarded
-// to the container alongside the mandatory WORKSPACE_PATH.
+// to the container alongside the mandatory runtime path env vars.
 func TestPodSpec_UserEnvVarsInjected(t *testing.T) {
-	_, pod := setupPod(t, "spec-env-user", CreateRequest{
+	wlID, pod := setupPod(t, "spec-env-user", CreateRequest{
 		Image: suite.Image,
 		Env: map[string]string{
 			"MY_SECRET":   "abc123",
@@ -257,7 +261,9 @@ func TestPodSpec_UserEnvVarsInjected(t *testing.T) {
 	}
 	assert.Equal(t, "abc123", envMap["MY_SECRET"], "MY_SECRET must be forwarded to container")
 	assert.Equal(t, "https://example.com", envMap["MY_ENDPOINT"], "MY_ENDPOINT must be forwarded")
-	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must still be present")
+	assert.Equal(t, taskHomePath(wlID), envMap["TASK_HOME"], "TASK_HOME must still be present")
+	assert.Equal(t, taskHomePath(wlID), envMap["HOME"], "HOME must still be present")
+	assert.Equal(t, taskWorkspacePath(wlID), envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must still be present")
 }
 
 // TestPodSpec_DefaultCommandIsKeepAlive verifies that when no command is specified

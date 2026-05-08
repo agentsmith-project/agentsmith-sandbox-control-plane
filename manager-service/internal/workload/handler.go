@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +28,29 @@ var k8sRetryConfig = retryutil.RetryConfig{
 	InitialBackoff: 500 * time.Millisecond,
 	MaxBackoff:     5 * time.Second,
 	BackoffFactor:  2.0,
+}
+
+const (
+	defaultWorkspacePath        = "/workspace"
+	workspaceVolumeName         = "workspace"
+	workspaceInitContainerName  = "workspace-init"
+	workspaceArtifactsDirectory = ".artifacts"
+)
+
+var allowedMountPathPrefixes = []mountPathPrefix{
+	{path: defaultWorkspacePath, allowExact: true},
+	{path: "/home", allowExact: false},
+}
+
+type mountPathPrefix struct {
+	path       string
+	allowExact bool
+}
+
+type workloadPaths struct {
+	mountPath  string
+	subPath    string
+	workingDir string
 }
 
 // Handler provides REST endpoints for managed workload pod lifecycle.
@@ -158,11 +183,6 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	for k, v := range req.Env {
 		env[k] = v
 	}
-	workspacePath := strings.TrimSpace(env["WORKSPACE_PATH"])
-	if workspacePath == "" {
-		workspacePath = "/workspace"
-	}
-	env["WORKSPACE_PATH"] = workspacePath
 
 	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, req, now, expiresAt)
 	if err != nil {
@@ -175,6 +195,10 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		if errors.IsAlreadyExists(err) {
 			existingPod, getErr := h.k8sClient.GetPod(ctx, podName)
 			if getErr == nil {
+				if drift := workloadPodSpecDrift(existingPod, pod); drift != "" {
+					jsonError(w, http.StatusConflict, "existing pod spec drift: "+drift)
+					return
+				}
 				jsonResponse(w, http.StatusOK, PodStatus{
 					PodName:   existingPod.Name,
 					Phase:     string(existingPod.Status.Phase),
@@ -442,14 +466,11 @@ func (h *Handler) buildPod(
 		"workload/maxExpiresAt":   maxExpiresAt.Format(time.RFC3339),
 	}
 
-	var envVars []v1.EnvVar
-	for k, v := range env {
-		envVars = append(envVars, v1.EnvVar{Name: k, Value: v})
+	paths, err := resolveWorkloadPaths(req)
+	if err != nil {
+		return nil, err
 	}
-	workspacePath := strings.TrimSpace(env["WORKSPACE_PATH"])
-	if workspacePath == "" {
-		workspacePath = "/workspace"
-	}
+	envVars := buildRuntimeEnvVars(env, paths)
 
 	var command []string
 	if len(req.Command) > 0 {
@@ -488,13 +509,16 @@ func (h *Handler) buildPod(
 				FSGroup:             &fsGroup,
 				FSGroupChangePolicy: &fsGroupPolicy,
 			},
+			InitContainers: []v1.Container{
+				buildWorkspaceInitContainer(req.Image, paths),
+			},
 			Containers: []v1.Container{
 				{
 					Name:       "main",
 					Image:      req.Image,
 					Env:        envVars,
 					Resources:  resources,
-					WorkingDir: workspacePath,
+					WorkingDir: paths.workingDir,
 					SecurityContext: &v1.SecurityContext{
 						AllowPrivilegeEscalation: boolPtr(false),
 						Capabilities: &v1.Capabilities{
@@ -505,16 +529,13 @@ func (h *Handler) buildPod(
 						},
 					},
 					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "workspace",
-							MountPath: workspacePath,
-						},
+						workspaceVolumeMount(paths),
 					},
 				},
 			},
 			Volumes: []v1.Volume{
 				{
-					Name: "workspace",
+					Name: workspaceVolumeName,
 					VolumeSource: v1.VolumeSource{
 						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
 							ClaimName: workspacebinding.PVCName(workspaceID, projectID, req.WorkspaceBindingID),
@@ -530,6 +551,305 @@ func (h *Handler) buildPod(
 	}
 
 	return pod, nil
+}
+
+func buildWorkspaceInitContainer(image string, paths workloadPaths) v1.Container {
+	nonRoot := true
+	var runAsUser int64 = workloadRunAsUID
+	var runAsGroup int64 = workloadRunAsUID
+
+	return v1.Container{
+		Name:       workspaceInitContainerName,
+		Image:      image,
+		WorkingDir: paths.mountPath,
+		Command: []string{
+			"sh",
+			"-ceu",
+			`umask 0007
+mkdir -p "$WORKSPACE_PATH" "$ARTIFACTS_PATH"
+for dir in "$TASK_HOME" "$WORKSPACE_PATH" "$ARTIFACTS_PATH"; do
+  test -w "$dir"
+done`,
+		},
+		Env: []v1.EnvVar{
+			{Name: "ARTIFACTS_PATH", Value: path.Join(paths.workingDir, workspaceArtifactsDirectory)},
+			{Name: "TASK_HOME", Value: paths.mountPath},
+			{Name: "WORKSPACE_PATH", Value: paths.workingDir},
+		},
+		SecurityContext: &v1.SecurityContext{
+			RunAsNonRoot:             &nonRoot,
+			RunAsUser:                &runAsUser,
+			RunAsGroup:               &runAsGroup,
+			AllowPrivilegeEscalation: boolPtr(false),
+			Capabilities: &v1.Capabilities{
+				Drop: []v1.Capability{"ALL"},
+			},
+			SeccompProfile: &v1.SeccompProfile{
+				Type: v1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+		VolumeMounts: []v1.VolumeMount{
+			workspaceVolumeMount(paths),
+		},
+	}
+}
+
+func workspaceVolumeMount(paths workloadPaths) v1.VolumeMount {
+	return v1.VolumeMount{
+		Name:      workspaceVolumeName,
+		MountPath: paths.mountPath,
+		SubPath:   paths.subPath,
+	}
+}
+
+func resolveWorkloadPaths(req CreateRequest) (workloadPaths, error) {
+	mountPath := strings.TrimSpace(req.MountPath)
+	if mountPath == "" {
+		mountPath = defaultWorkspacePath
+	}
+	if !path.IsAbs(mountPath) {
+		return workloadPaths{}, fmt.Errorf("mount_path must be an absolute path")
+	}
+	if containsParentPathSegment(mountPath) {
+		return workloadPaths{}, fmt.Errorf("mount_path must not contain path traversal")
+	}
+	mountPath = path.Clean(mountPath)
+	if !hasAllowedMountPathPrefix(mountPath) {
+		return workloadPaths{}, fmt.Errorf("mount_path must use an allowed prefix: %s", allowedMountPathPrefixList())
+	}
+
+	subPath := strings.TrimSpace(req.SubPath)
+	if subPath != "" {
+		if path.IsAbs(subPath) {
+			return workloadPaths{}, fmt.Errorf("sub_path must be a relative path")
+		}
+		if containsParentPathSegment(subPath) {
+			return workloadPaths{}, fmt.Errorf("sub_path must not contain path traversal")
+		}
+		subPath = path.Clean(subPath)
+		if subPath == "." || subPath == "" {
+			return workloadPaths{}, fmt.Errorf("sub_path must not be empty when provided")
+		}
+	}
+
+	workingDir := strings.TrimSpace(req.WorkingDir)
+	if workingDir == "" {
+		if mountPath == defaultWorkspacePath {
+			workingDir = defaultWorkspacePath
+		} else {
+			workingDir = path.Join(mountPath, "workspace")
+		}
+	}
+	if !path.IsAbs(workingDir) {
+		return workloadPaths{}, fmt.Errorf("working_dir must be an absolute path")
+	}
+	if containsParentPathSegment(workingDir) {
+		return workloadPaths{}, fmt.Errorf("working_dir must not contain path traversal")
+	}
+	workingDir = path.Clean(workingDir)
+	if !pathWithinOrEqual(workingDir, mountPath) {
+		return workloadPaths{}, fmt.Errorf("working_dir must be inside mount_path")
+	}
+
+	return workloadPaths{
+		mountPath:  mountPath,
+		subPath:    subPath,
+		workingDir: workingDir,
+	}, nil
+}
+
+func buildRuntimeEnvVars(env map[string]string, paths workloadPaths) []v1.EnvVar {
+	envMap := make(map[string]string, len(env)+3)
+	for k, v := range env {
+		envMap[k] = v
+	}
+	envMap["TASK_HOME"] = paths.mountPath
+	envMap["HOME"] = paths.mountPath
+	envMap["WORKSPACE_PATH"] = paths.workingDir
+
+	keys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	envVars := make([]v1.EnvVar, 0, len(keys))
+	for _, k := range keys {
+		envVars = append(envVars, v1.EnvVar{Name: k, Value: envMap[k]})
+	}
+	return envVars
+}
+
+func containsParentPathSegment(value string) bool {
+	for _, part := range strings.Split(value, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAllowedMountPathPrefix(value string) bool {
+	for _, prefix := range allowedMountPathPrefixes {
+		cleanPrefix := path.Clean(prefix.path)
+		if value == cleanPrefix {
+			return prefix.allowExact
+		}
+		if strings.HasPrefix(value, cleanPrefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedMountPathPrefixList() string {
+	parts := make([]string, 0, len(allowedMountPathPrefixes))
+	for _, prefix := range allowedMountPathPrefixes {
+		if prefix.allowExact {
+			parts = append(parts, prefix.path)
+			continue
+		}
+		parts = append(parts, prefix.path+"/")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func pathWithinOrEqual(value, parent string) bool {
+	value = path.Clean(value)
+	parent = path.Clean(parent)
+	return value == parent || strings.HasPrefix(value, parent+"/")
+}
+
+func workloadPodSpecDrift(existing, desired *v1.Pod) string {
+	existingContainer, ok := findContainer(existing.Spec.Containers, "main")
+	if !ok {
+		return "existing pod is missing main container"
+	}
+	desiredContainer, ok := findContainer(desired.Spec.Containers, "main")
+	if !ok {
+		return "requested pod is missing main container"
+	}
+
+	if existingContainer.WorkingDir != desiredContainer.WorkingDir {
+		return fmt.Sprintf("working_dir mismatch (existing %q, requested %q)", existingContainer.WorkingDir, desiredContainer.WorkingDir)
+	}
+
+	existingMount, ok := findVolumeMount(existingContainer.VolumeMounts, workspaceVolumeName)
+	if !ok {
+		return "existing pod is missing workspace volume mount"
+	}
+	desiredMount, ok := findVolumeMount(desiredContainer.VolumeMounts, workspaceVolumeName)
+	if !ok {
+		return "requested pod is missing workspace volume mount"
+	}
+	if existingMount.MountPath != desiredMount.MountPath {
+		return fmt.Sprintf("mount_path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
+	}
+	if existingMount.SubPath != desiredMount.SubPath {
+		return fmt.Sprintf("sub_path mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
+	}
+
+	existingClaim := pvcClaimName(existing.Spec.Volumes, workspaceVolumeName)
+	desiredClaim := pvcClaimName(desired.Spec.Volumes, workspaceVolumeName)
+	if existingClaim == "" {
+		return "existing pod is missing workspace PVC volume"
+	}
+	if desiredClaim == "" {
+		return "requested pod is missing workspace PVC volume"
+	}
+	if existingClaim != desiredClaim {
+		return fmt.Sprintf("workspace PVC mismatch (existing %q, requested %q)", existingClaim, desiredClaim)
+	}
+
+	existingEnv := envVarMap(existingContainer.Env)
+	desiredEnv := envVarMap(desiredContainer.Env)
+	for _, key := range []string{"TASK_HOME", "HOME", "WORKSPACE_PATH"} {
+		if existingEnv[key] != desiredEnv[key] {
+			return fmt.Sprintf("%s env mismatch (existing %q, requested %q)", key, existingEnv[key], desiredEnv[key])
+		}
+	}
+
+	if drift := workspaceInitContainerSpecDrift(existing, desired); drift != "" {
+		return drift
+	}
+
+	return ""
+}
+
+func workspaceInitContainerSpecDrift(existing, desired *v1.Pod) string {
+	existingInit, ok := findContainer(existing.Spec.InitContainers, workspaceInitContainerName)
+	if !ok {
+		return "existing pod is missing workspace init container"
+	}
+	desiredInit, ok := findContainer(desired.Spec.InitContainers, workspaceInitContainerName)
+	if !ok {
+		return "requested pod is missing workspace init container"
+	}
+
+	if existingInit.WorkingDir != desiredInit.WorkingDir {
+		return fmt.Sprintf("workspace init working_dir mismatch (existing %q, requested %q)", existingInit.WorkingDir, desiredInit.WorkingDir)
+	}
+
+	existingMount, ok := findVolumeMount(existingInit.VolumeMounts, workspaceVolumeName)
+	if !ok {
+		return "existing pod is missing workspace init volume mount"
+	}
+	desiredMount, ok := findVolumeMount(desiredInit.VolumeMounts, workspaceVolumeName)
+	if !ok {
+		return "requested pod is missing workspace init volume mount"
+	}
+	if existingMount.MountPath != desiredMount.MountPath {
+		return fmt.Sprintf("workspace init mount_path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
+	}
+	if existingMount.SubPath != desiredMount.SubPath {
+		return fmt.Sprintf("workspace init sub_path mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
+	}
+
+	existingEnv := envVarMap(existingInit.Env)
+	desiredEnv := envVarMap(desiredInit.Env)
+	for _, key := range []string{"TASK_HOME", "WORKSPACE_PATH", "ARTIFACTS_PATH"} {
+		if existingEnv[key] != desiredEnv[key] {
+			return fmt.Sprintf("workspace init %s env mismatch (existing %q, requested %q)", key, existingEnv[key], desiredEnv[key])
+		}
+	}
+
+	return ""
+}
+
+func findContainer(containers []v1.Container, name string) (v1.Container, bool) {
+	for _, container := range containers {
+		if container.Name == name {
+			return container, true
+		}
+	}
+	return v1.Container{}, false
+}
+
+func findVolumeMount(mounts []v1.VolumeMount, name string) (v1.VolumeMount, bool) {
+	for _, mount := range mounts {
+		if mount.Name == name {
+			return mount, true
+		}
+	}
+	return v1.VolumeMount{}, false
+}
+
+func pvcClaimName(volumes []v1.Volume, name string) string {
+	for _, volume := range volumes {
+		if volume.Name != name || volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		return volume.PersistentVolumeClaim.ClaimName
+	}
+	return ""
+}
+
+func envVarMap(vars []v1.EnvVar) map[string]string {
+	out := make(map[string]string, len(vars))
+	for _, envVar := range vars {
+		out[envVar.Name] = envVar.Value
+	}
+	return out
 }
 
 func (h *Handler) waitForPodDeletion(ctx context.Context, podName string, timeout time.Duration) {

@@ -68,7 +68,7 @@ current-context: test
 
 	validator, err := auth.NewServiceKeyValidator([]string{"test-key-123"})
 	require.NoError(t, err)
-	handler := workload.NewHandler(client, k8s.NewExecutor(client), "test-pvc", t.TempDir())
+	handler := newTestWorkloadHandler(client)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -140,7 +140,7 @@ current-context: test
 
 	validator, err := auth.NewServiceKeyValidator([]string{serviceKey})
 	require.NoError(t, err)
-	handler := workload.NewHandler(client, k8s.NewExecutor(client), "test-pvc", t.TempDir())
+	handler := newTestWorkloadHandler(client)
 
 	v1Mux := http.NewServeMux()
 	handler.RegisterRoutes(v1Mux)
@@ -157,6 +157,10 @@ current-context: test
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func newTestWorkloadHandler(client *k8s.Client) *workload.Handler {
+	return workload.NewHandler(client, k8s.NewExecutor(client), workload.Options{})
 }
 
 // newAlways404K8s returns a fake K8s server that returns 404 for all requests.
@@ -430,7 +434,7 @@ current-context: test
 	client, err := k8s.NewClient(&k8s.ClientConfig{Namespace: "test-ns"})
 	require.NoError(t, err)
 	validator, _ := auth.NewServiceKeyValidator([]string{"test-key"})
-	handler := workload.NewHandler(client, k8s.NewExecutor(client), "test-pvc", t.TempDir())
+	handler := newTestWorkloadHandler(client)
 
 	v1Mux := http.NewServeMux()
 	handler.RegisterRoutes(v1Mux)
@@ -481,7 +485,7 @@ current-context: test
 	client, err := k8s.NewClient(&k8s.ClientConfig{Namespace: "test-ns"})
 	require.NoError(t, err)
 	validator, _ := auth.NewServiceKeyValidator([]string{"test-key"})
-	handler := workload.NewHandler(client, k8s.NewExecutor(client), "test-pvc", t.TempDir())
+	handler := newTestWorkloadHandler(client)
 
 	v1Mux := http.NewServeMux()
 	handler.RegisterRoutes(v1Mux)
@@ -535,7 +539,7 @@ current-context: test
 	client, err := k8s.NewClient(&k8s.ClientConfig{Namespace: "test-ns"})
 	require.NoError(t, err)
 	validator, _ := auth.NewServiceKeyValidator([]string{"test-key"})
-	handler := workload.NewHandler(client, k8s.NewExecutor(client), "test-pvc", t.TempDir())
+	handler := newTestWorkloadHandler(client)
 
 	metrics := observability.NewMetricsRegistry()
 
@@ -660,7 +664,7 @@ func TestIntegration_FullLifecycle_CreateGetKeepaliveDeleteGet(t *testing.T) {
 	base := srv.URL + "/v1/workspaces/ws/projects/p/workloads/wl1"
 	key := "key"
 
-	createBody := `{"image":"busybox:1.36","idle_timeout_sec":600,"max_runtime_sec":3600}`
+	createBody := `{"image":"busybox:1.36","workspace_binding_id":"flib-demo","mount_path":"/home/task-wl1","sub_path":"agent-tasks/wl1","working_dir":"/home/task-wl1/workspace","idle_timeout_sec":600,"max_lifetime_sec":3600}`
 	req, _ := http.NewRequest(http.MethodPut, base, strings.NewReader(createBody))
 	req.Header.Set("X-Service-Key", key)
 	req.Header.Set("Content-Type", "application/json")
@@ -718,7 +722,7 @@ func TestIntegration_FullLifecycle_GetKeepaliveDeleteGet(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "workload-wl1",
 			CreationTimestamp: metav1.Now(),
-			Annotations:        map[string]string{"workload/maxExpiresAt": "2030-01-01T00:00:00Z"},
+			Annotations:       map[string]string{"workload/maxExpiresAt": "2030-01-01T00:00:00Z"},
 		},
 		Status: v1.PodStatus{Phase: v1.PodRunning},
 	})

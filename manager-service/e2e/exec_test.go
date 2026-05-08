@@ -146,7 +146,7 @@ func TestExec_ShortTimeout(t *testing.T) {
 	assert.Equal(t, 0, er.ExitCode)
 }
 
-// TestExec_WorkingDirectoryIsWorkspace verifies the container working directory is /workspace.
+// TestExec_WorkingDirectoryIsWorkspace verifies the container working directory is task HOME/workspace.
 func TestExec_WorkingDirectoryIsWorkspace(t *testing.T) {
 	wlID := setupRunningWorkload(t, "exec-cwd")
 
@@ -156,8 +156,8 @@ func TestExec_WorkingDirectoryIsWorkspace(t *testing.T) {
 	var er ExecResponse
 	require.NoError(t, resp.DecodeJSON(&er))
 	assert.Equal(t, 0, er.ExitCode)
-	assert.Contains(t, strings.TrimSpace(er.Stdout), "/workspace",
-		"working directory must be /workspace")
+	assert.Equal(t, taskWorkspacePath(wlID), strings.TrimSpace(er.Stdout),
+		"working directory must be task HOME/workspace")
 }
 
 // TestExec_DurationMsIsPopulated verifies duration_ms is always set and non-negative.

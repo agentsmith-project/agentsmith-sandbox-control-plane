@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sandbox/manager/internal/k8s"
+	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -292,7 +293,7 @@ func TestHandleCreatePod_CustomCommandInPodSpec(t *testing.T) {
 	assert.Equal(t, customCmd, capturedCmd)
 }
 
-func TestHandleCreatePod_WorkspacePathAlwaysInjected(t *testing.T) {
+func TestHandleCreatePod_RuntimeEnvAlwaysInjected(t *testing.T) {
 	envCapture := make(chan []v1.EnvVar, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -321,10 +322,16 @@ func TestHandleCreatePod_WorkspacePathAlwaysInjected(t *testing.T) {
 	executor := k8s.NewExecutor(client)
 	h := NewHandler(client, executor)
 
-	// No explicit WORKSPACE_PATH in env – it must still be injected.
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
-		Image: "ubuntu:22.04",
-		Env:   map[string]string{"MY_VAR": "hello"},
+		Image:      "ubuntu:22.04",
+		MountPath:  "/home/task-abc",
+		SubPath:    "agent-tasks/task-abc",
+		WorkingDir: "/home/task-abc/workspace",
+		Env: map[string]string{
+			"HOME":           "/tmp/legacy-home",
+			"WORKSPACE_PATH": "/workspace/legacy",
+			"MY_VAR":         "hello",
+		},
 	}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
@@ -337,7 +344,9 @@ func TestHandleCreatePod_WorkspacePathAlwaysInjected(t *testing.T) {
 		for _, e := range envVars {
 			envMap[e.Name] = e.Value
 		}
-		assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must always be injected")
+		assert.Equal(t, "/home/task-abc", envMap["TASK_HOME"], "TASK_HOME must always be injected")
+		assert.Equal(t, "/home/task-abc", envMap["HOME"], "HOME must match TASK_HOME")
+		assert.Equal(t, "/home/task-abc/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must match working_dir")
 		assert.Equal(t, "hello", envMap["MY_VAR"], "user-provided env must be present")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pod creation")
@@ -353,6 +362,46 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "workload-wl-1",
 			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1.PodSpec{
+			InitContainers: []v1.Container{
+				{
+					Name:       "workspace-init",
+					WorkingDir: "/workspace",
+					Env: []v1.EnvVar{
+						{Name: "ARTIFACTS_PATH", Value: "/workspace/.artifacts"},
+						{Name: "TASK_HOME", Value: "/workspace"},
+						{Name: "WORKSPACE_PATH", Value: "/workspace"},
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{Name: "workspace", MountPath: "/workspace"},
+					},
+				},
+			},
+			Containers: []v1.Container{
+				{
+					Name:       "main",
+					WorkingDir: "/workspace",
+					Env: []v1.EnvVar{
+						{Name: "TASK_HOME", Value: "/workspace"},
+						{Name: "HOME", Value: "/workspace"},
+						{Name: "WORKSPACE_PATH", Value: "/workspace"},
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{Name: "workspace", MountPath: "/workspace"},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "workspace",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"),
+						},
+					},
+				},
+			},
 		},
 		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"},
 	}
@@ -370,6 +419,58 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 	assert.Equal(t, "workload-wl-1", got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "pod already exists", got.Message)
+}
+
+func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
+	existing := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "workload-wl-1",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:       "main",
+					WorkingDir: "/workspace",
+					Env: []v1.EnvVar{
+						{Name: "TASK_HOME", Value: "/workspace"},
+						{Name: "HOME", Value: "/workspace"},
+						{Name: "WORKSPACE_PATH", Value: "/workspace"},
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{Name: "workspace", MountPath: "/workspace"},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: "workspace",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"),
+						},
+					},
+				},
+			},
+		},
+		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"},
+	}
+	h := newHandlerWithRegistry(t, newPodRegistry(existing))
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
+		Image:      "ubuntu:22.04",
+		MountPath:  "/home/task-abc",
+		SubPath:    "agent-tasks/task-abc",
+		WorkingDir: "/home/task-abc/workspace",
+	}))
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Contains(t, body["error"], "existing pod spec drift")
 }
 
 // ---------------------------------------------------------------------------

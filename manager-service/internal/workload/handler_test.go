@@ -700,6 +700,107 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"), vol.PersistentVolumeClaim.ClaimName)
 }
 
+func TestBuildPod_SeparatedWorkloadPaths(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	taskHome := "/home/task-abc"
+	workspacePath := "/home/task-abc/workspace"
+
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+		map[string]string{
+			"API_KEY":        "secret123",
+			"HOME":           "/tmp/legacy-home",
+			"WORKSPACE_PATH": "/workspace/legacy",
+		},
+		validCreateRequest(CreateRequest{
+			Image:      "ubuntu:22.04",
+			MountPath:  taskHome,
+			SubPath:    "agent-tasks/task-abc",
+			WorkingDir: workspacePath,
+		}),
+		now, now.Add(time.Hour),
+	)
+	require.NoError(t, err)
+
+	require.Len(t, pod.Spec.Containers, 1)
+	c := pod.Spec.Containers[0]
+	assert.Equal(t, workspacePath, c.WorkingDir)
+
+	require.Len(t, c.VolumeMounts, 1)
+	vm := c.VolumeMounts[0]
+	assert.Equal(t, "workspace", vm.Name)
+	assert.Equal(t, taskHome, vm.MountPath)
+	assert.Equal(t, "agent-tasks/task-abc", vm.SubPath)
+
+	envMap := make(map[string]string, len(c.Env))
+	for _, e := range c.Env {
+		envMap[e.Name] = e.Value
+	}
+	assert.Equal(t, taskHome, envMap["TASK_HOME"])
+	assert.Equal(t, taskHome, envMap["HOME"])
+	assert.Equal(t, workspacePath, envMap["WORKSPACE_PATH"])
+	assert.Equal(t, "secret123", envMap["API_KEY"])
+}
+
+func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	taskHome := "/home/task-abc"
+	workspacePath := "/home/task-abc/workspace"
+	artifactsPath := "/home/task-abc/workspace/.artifacts"
+
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+		map[string]string{},
+		validCreateRequest(CreateRequest{
+			Image:      "ubuntu:22.04",
+			MountPath:  taskHome,
+			SubPath:    "agent-tasks/task-abc",
+			WorkingDir: workspacePath,
+		}),
+		now, now.Add(time.Hour),
+	)
+	require.NoError(t, err)
+
+	require.Len(t, pod.Spec.InitContainers, 1)
+	init := pod.Spec.InitContainers[0]
+	assert.Equal(t, "workspace-init", init.Name)
+	assert.Equal(t, "ubuntu:22.04", init.Image)
+	assert.Equal(t, taskHome, init.WorkingDir)
+
+	require.Len(t, init.Command, 3)
+	assert.Equal(t, "sh", init.Command[0])
+	assert.Equal(t, "-ceu", init.Command[1])
+	assert.Contains(t, init.Command[2], "mkdir -p")
+	assert.Contains(t, init.Command[2], "$WORKSPACE_PATH")
+	assert.Contains(t, init.Command[2], "$ARTIFACTS_PATH")
+	assert.Contains(t, init.Command[2], "test -w")
+
+	envMap := envVarMap(init.Env)
+	assert.Equal(t, taskHome, envMap["TASK_HOME"])
+	assert.Equal(t, workspacePath, envMap["WORKSPACE_PATH"])
+	assert.Equal(t, artifactsPath, envMap["ARTIFACTS_PATH"])
+
+	require.Len(t, init.VolumeMounts, 1)
+	vm := init.VolumeMounts[0]
+	assert.Equal(t, "workspace", vm.Name)
+	assert.Equal(t, taskHome, vm.MountPath)
+	assert.Equal(t, "agent-tasks/task-abc", vm.SubPath)
+
+	require.NotNil(t, init.SecurityContext)
+	require.NotNil(t, init.SecurityContext.RunAsNonRoot)
+	assert.True(t, *init.SecurityContext.RunAsNonRoot)
+	require.NotNil(t, init.SecurityContext.RunAsUser)
+	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsUser)
+	require.NotNil(t, init.SecurityContext.RunAsGroup)
+	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsGroup)
+	require.NotNil(t, init.SecurityContext.AllowPrivilegeEscalation)
+	assert.False(t, *init.SecurityContext.AllowPrivilegeEscalation)
+	require.NotNil(t, init.SecurityContext.Capabilities)
+	assert.Contains(t, init.SecurityContext.Capabilities.Drop, v1.Capability("ALL"))
+	require.NotNil(t, init.SecurityContext.SeccompProfile)
+	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, init.SecurityContext.SeccompProfile.Type)
+}
+
 func TestBuildPod_CustomCommand(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
@@ -789,7 +890,9 @@ func TestBuildPod_EnvVars(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 
-	assert.Len(t, c.Env, 3)
+	assert.Len(t, c.Env, 5)
+	assert.Equal(t, "/workspace", envMap["TASK_HOME"])
+	assert.Equal(t, "/workspace", envMap["HOME"])
 	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"])
 	assert.Equal(t, "secret123", envMap["API_KEY"])
 	assert.Equal(t, "postgres://localhost", envMap["DB_URL"])
@@ -806,7 +909,14 @@ func TestBuildPod_EmptyEnv(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	assert.Empty(t, pod.Spec.Containers[0].Env)
+	envMap := make(map[string]string, len(pod.Spec.Containers[0].Env))
+	for _, e := range pod.Spec.Containers[0].Env {
+		envMap[e.Name] = e.Value
+	}
+	assert.Len(t, pod.Spec.Containers[0].Env, 3)
+	assert.Equal(t, "/workspace", envMap["TASK_HOME"])
+	assert.Equal(t, "/workspace", envMap["HOME"])
+	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"])
 }
 
 func TestBuildPod_ResourceRequestsOnly(t *testing.T) {
@@ -999,6 +1109,107 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "cpu_request")
 }
 
+func TestBuildPod_InvalidWorkloadPaths(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name    string
+		req     CreateRequest
+		wantErr string
+	}{
+		{
+			name: "mount path must be absolute",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "home/task-abc",
+				WorkingDir: "/home/task-abc/workspace",
+			}),
+			wantErr: "mount_path",
+		},
+		{
+			name: "mount path must use allowed prefix",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "/etc/task-abc",
+				WorkingDir: "/etc/task-abc/workspace",
+			}),
+			wantErr: "allowed prefix",
+		},
+		{
+			name: "sub path rejects absolute paths",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "/home/task-abc",
+				SubPath:    "/agent-tasks/task-abc",
+				WorkingDir: "/home/task-abc/workspace",
+			}),
+			wantErr: "sub_path",
+		},
+		{
+			name: "sub path rejects traversal",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "/home/task-abc",
+				SubPath:    "agent-tasks/../task-abc",
+				WorkingDir: "/home/task-abc/workspace",
+			}),
+			wantErr: "traversal",
+		},
+		{
+			name: "working dir must be absolute",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "/home/task-abc",
+				SubPath:    "agent-tasks/task-abc",
+				WorkingDir: "workspace",
+			}),
+			wantErr: "working_dir",
+		},
+		{
+			name: "working dir must stay inside mount path",
+			req: validCreateRequest(CreateRequest{
+				Image:      "img",
+				MountPath:  "/home/task-abc",
+				SubPath:    "agent-tasks/task-abc",
+				WorkingDir: "/home/other/workspace",
+			}),
+			wantErr: "inside mount_path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+				map[string]string{}, tt.req, now, now.Add(time.Hour))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestWorkloadPodSpecDrift_MissingWorkspaceInitContainer(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	desired, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+		map[string]string{},
+		validCreateRequest(CreateRequest{
+			Image:      "ubuntu:22.04",
+			MountPath:  "/home/task-abc",
+			SubPath:    "agent-tasks/task-abc",
+			WorkingDir: "/home/task-abc/workspace",
+		}),
+		now, now.Add(time.Hour),
+	)
+	require.NoError(t, err)
+
+	existing := desired.DeepCopy()
+	existing.Spec.InitContainers = nil
+
+	drift := workloadPodSpecDrift(existing, desired)
+	assert.Contains(t, drift, "workspace init")
+}
+
 // ---------------------------------------------------------------------------
 // handleCreatePod – workspace binding usage
 // ---------------------------------------------------------------------------
@@ -1178,6 +1389,9 @@ func TestCreateRequest_JSONDeserialization(t *testing.T) {
 		"image": "ubuntu:22.04",
 		"command": ["sh", "-c", "echo hi"],
 		"env": {"FOO": "bar", "BAZ": "qux"},
+		"mount_path": "/home/task-abc",
+		"sub_path": "agent-tasks/task-abc",
+		"working_dir": "/home/task-abc/workspace",
 		"cpu_request": "250m",
 		"cpu_limit": "1",
 		"memory_request": "256Mi",
@@ -1192,6 +1406,9 @@ func TestCreateRequest_JSONDeserialization(t *testing.T) {
 	assert.Equal(t, "ubuntu:22.04", r.Image)
 	assert.Equal(t, []string{"sh", "-c", "echo hi"}, r.Command)
 	assert.Equal(t, map[string]string{"FOO": "bar", "BAZ": "qux"}, r.Env)
+	assert.Equal(t, "/home/task-abc", r.MountPath)
+	assert.Equal(t, "agent-tasks/task-abc", r.SubPath)
+	assert.Equal(t, "/home/task-abc/workspace", r.WorkingDir)
 	assert.Equal(t, "250m", r.CPURequest)
 	assert.Equal(t, "1", r.CPULimit)
 	assert.Equal(t, "256Mi", r.MemoryRequest)
