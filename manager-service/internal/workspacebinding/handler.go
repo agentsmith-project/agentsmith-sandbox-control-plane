@@ -82,6 +82,8 @@ type ResolvedMount struct {
 }
 
 const (
+	labelManagedBy                     = "app.kubernetes.io/managed-by"
+	labelManagedByOwner                = "agentsmith"
 	annotationWorkspaceID              = "mbos.io/workspace-id"
 	annotationProjectID                = "mbos.io/project-id"
 	annotationCreatedAt                = "mbos.io/created-at"
@@ -297,8 +299,8 @@ func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan
 		ObjectMeta: metav1.ObjectMeta{
 			Name: status.PVName,
 			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "mbos-sandbox-v1",
-				"mbos.io/mount-binding-id":     status.MountBindingID,
+				labelManagedBy:             labelManagedByOwner,
+				"mbos.io/mount-binding-id": status.MountBindingID,
 			},
 			Annotations: map[string]string{
 				annotationWorkspaceID:              status.WorkspaceID,
@@ -346,8 +348,8 @@ func (h *Handler) buildPVC(status BindingStatus, plan afscp.OrchestratorMountPla
 			Name:      status.PVCName,
 			Namespace: h.options.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "mbos-sandbox-v1",
-				"mbos.io/mount-binding-id":     status.MountBindingID,
+				labelManagedBy:             labelManagedByOwner,
+				"mbos.io/mount-binding-id": status.MountBindingID,
 			},
 			Annotations: map[string]string{
 				annotationWorkspaceID:              status.WorkspaceID,

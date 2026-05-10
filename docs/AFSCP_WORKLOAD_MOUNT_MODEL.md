@@ -1,6 +1,6 @@
 # AFSCP Workload Mount Plan Model
 
-This document defines the supported persistence model for `mbos-sandbox-v1`.
+This document defines the supported persistence model for AgentSmith Sandbox Manager.
 
 ## Product Truth
 
@@ -12,7 +12,7 @@ This document defines the supported persistence model for `mbos-sandbox-v1`.
 
 ## Platform Boundary
 
-`mbos-sandbox-v1` owns:
+Sandbox Manager owns:
 
 - fetching AFSCP orchestrator mount plans with the sandbox orchestrator identity
 - PV/PVC materialization from plan fields

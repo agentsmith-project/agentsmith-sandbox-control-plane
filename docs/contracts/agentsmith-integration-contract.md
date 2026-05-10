@@ -1,6 +1,6 @@
 # AgentSmith Sandbox Manager Integration Contract
 
-This document defines the current integration contract between AgentSmith and `mbos-sandbox-v1`.
+This document defines the current integration contract between AgentSmith and Sandbox Manager.
 
 ## Product Boundary
 

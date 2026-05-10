@@ -1,10 +1,10 @@
-# mbos-sandbox-v1
+# AgentSmith Sandbox Manager
 
 Kubernetes workload manager for AgentSmith internal agents.
 
 ## Overview
 
-`mbos-sandbox-v1` owns the sandbox-side workload lifecycle:
+Sandbox Manager owns the sandbox-side workload lifecycle:
 
 - workspace binding materialization from an AFSCP workload mount plan
 - workload pod lifecycle

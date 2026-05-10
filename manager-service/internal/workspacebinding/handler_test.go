@@ -124,6 +124,14 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	if client.pv == nil || client.pvc == nil {
 		t.Fatalf("expected pv/pvc to be ensured")
 	}
+	for resourceName, labels := range map[string]map[string]string{
+		"pv":  client.pv.Labels,
+		"pvc": client.pvc.Labels,
+	} {
+		if got := labels["app.kubernetes.io/managed-by"]; got != "agentsmith" {
+			t.Fatalf("expected %s owner label to be agentsmith, got %q", resourceName, got)
+		}
+	}
 	if client.pv.Spec.CSI == nil {
 		t.Fatalf("expected CSI PV")
 	}
@@ -138,6 +146,10 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	}
 	renderedPV, _ := json.Marshal(client.pv)
 	renderedPVC, _ := json.Marshal(client.pvc)
+	legacyOwner := "mbos-sandbox" + "-v1"
+	if strings.Contains(string(renderedPV), legacyOwner) || strings.Contains(string(renderedPVC), legacyOwner) {
+		t.Fatalf("PV/PVC must not retain legacy owner label %q", legacyOwner)
+	}
 	for _, forbidden := range []string{"metadata_url", "metaurl", "bucket", "access-key", "secret-key", "postgres://", "minio"} {
 		if strings.Contains(string(renderedPV), forbidden) || strings.Contains(string(renderedPVC), forbidden) {
 			t.Fatalf("raw storage credential marker %q leaked into PV/PVC", forbidden)

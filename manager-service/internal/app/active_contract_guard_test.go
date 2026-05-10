@@ -20,6 +20,7 @@ func TestActiveSurfaceExposesOnlyAFSCPWorkloadMountContract(t *testing.T) {
 
 	alwaysForbidden := []string{
 		"v2.0.0",
+		"mbos-sandbox" + "-v1",
 		"metadata_url",
 		"filesystem_name",
 		"storage_endpoint",
