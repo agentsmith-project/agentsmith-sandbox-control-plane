@@ -35,6 +35,13 @@ func (c *Client) PodExists(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
+func (c *Client) ListPods(ctx context.Context, namespace string, opts metav1.ListOptions) (*v1.PodList, error) {
+	if namespace == "" {
+		namespace = c.namespace
+	}
+	return c.clientset.CoreV1().Pods(namespace).List(ctx, opts)
+}
+
 // IsPodReady checks if a pod is ready
 func IsPodReady(pod *v1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {

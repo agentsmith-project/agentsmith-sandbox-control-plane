@@ -1,74 +1,61 @@
 # mbos-sandbox-v1
 
-Simplified Kubernetes workload manager for AgentSmith internal agents.
+Kubernetes workload manager for AgentSmith internal agents.
 
 ## Overview
 
-`mbos-sandbox-v1` is the platform-side execution service behind AgentSmith internal agents.
+`mbos-sandbox-v1` owns the sandbox-side workload lifecycle:
 
-It owns:
-
+- workspace binding materialization from an AFSCP workload mount plan
 - workload pod lifecycle
-- JuiceFS CSI workspace binding lifecycle
-- `/workspace` mount delivery inside workload pods
-- exec and keepalive APIs
-- reclaim of expired compute pods
+- K8s PV/PVC and pod mount resources
+- exec, keepalive, release, and reclaim APIs
 
-It does **not** own notebook business logic, file-library selection, or task orchestration. Those remain in `agentsmith`.
+AgentSmith owns workspace/project selection and task orchestration. For storage access, AgentSmith submits only `namespace_id` and `mount_binding_id`; sandbox calls AFSCP as the sandbox orchestrator, reads the current mount plan, and applies that plan to Kubernetes resources.
 
 ## Product Truth
 
-- A workspace file library is the persistent runtime environment
-- Sandbox mounts that environment at `/workspace`
-- Compute pods are ephemeral
-- Workspace data persists through JuiceFS CSI
-- Keepalive and TTL only govern pod lifetime, not workspace lifetime
+- AFSCP is the source of truth for payload location, mount path, read-only mode, CSI secret reference, and security policy.
+- Sandbox does not accept caller-supplied storage backend settings or caller-supplied pod mount paths.
+- Workload pods mount the binding PVC at the AFSCP plan `mount_path`.
+- The container working directory is `<mount_path>/workspace`.
+- PV CSI `subdir` carries the AFSCP `payload_volume_subdir`; workload `VolumeMount.SubPath` is not part of the caller contract.
 
 ## Architecture
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│                        manager-service                        │
-│                                                               │
-│  ┌──────────────┐   ┌──────────────────────────────────────┐  │
-│  │ Service Key  │──▶│ HTTP API                             │  │
-│  │ Auth         │   │ - workspace bindings                 │  │
-│  └──────────────┘   │ - workloads                          │  │
-│                     │ - keepalive / exec / delete          │  │
-│                     └──────────────┬───────────────────────┘  │
-│                                    │                          │
-│                    ┌───────────────▼───────────────┐          │
-│                    │ K8s Client / Executor         │          │
-│                    │ - Secrets / PV / PVC          │          │
-│                    │ - Pods / exec / status        │          │
-│                    └───────────────┬───────────────┘          │
-│                                    │                          │
-│                    ┌───────────────▼───────────────┐          │
-│                    │ JuiceFS CSI                   │          │
-│                    │ - static PV / PVC             │          │
-│                    │ - shared mount via /workspace │          │
-│                    └───────────────────────────────┘          │
-└───────────────────────────────────────────────────────────────┘
+```text
+AgentSmith
+  | namespace_id + mount_binding_id
+  v
+Sandbox Manager
+  | GET AFSCP orchestrator mount plan
+  v
+Kubernetes
+  | PV/PVC from plan, workload Pod from binding id
+  v
+Workload container
+  | TASK_HOME=<mount_path>
+  | WORKSPACE_PATH=<mount_path>/workspace
 ```
 
 See also:
 
-- [docs/JUICEFS_CSI_WORKSPACE_MODEL.md](docs/JUICEFS_CSI_WORKSPACE_MODEL.md)
-- [docs/contracts/agentsmith-integration-contract-v2.md](docs/contracts/agentsmith-integration-contract-v2.md)
-- [docs/api-reference-v2.md](docs/api-reference-v2.md)
+- [docs/AFSCP_WORKLOAD_MOUNT_MODEL.md](docs/AFSCP_WORKLOAD_MOUNT_MODEL.md)
+- [docs/contracts/agentsmith-integration-contract.md](docs/contracts/agentsmith-integration-contract.md)
+- [docs/api-reference.md](docs/api-reference.md)
 - [docs/runbook.md](docs/runbook.md)
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Create or ensure a JuiceFS CSI workspace binding |
-| `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Get workspace binding status |
-| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Delete workspace binding resources |
+| `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Create or ensure a workspace binding from an AFSCP plan |
+| `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Get sanitized workspace binding status |
+| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Delete sandbox-managed PV/PVC resources |
 | `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Create or ensure workload pod |
 | `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Get workload pod status |
-| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Delete workload pod |
-| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/keepalive` | Extend workload expiry |
+| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Delete workload pod and close AFSCP mount lifecycle |
+| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/keepalive` | Heartbeat AFSCP and extend workload expiry |
 | `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/exec` | Execute command in workload pod |
 | `GET` | `/healthz` | Liveness probe |
 | `GET` | `/readyz` | Readiness probe |
@@ -80,56 +67,40 @@ All `/v1/` routes require a valid `X-Service-Key` header. Health, readiness, and
 
 ## Configuration
 
-### Environment Variables
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SERVICE_KEYS` | *(required)* | Comma-separated valid service keys |
 | `K8S_NAMESPACE` | `sandbox-workloads` | Namespace for workspace bindings and workload pods |
-| `JUICEFS_CSI_DRIVER` | `csi.juicefs.com` | CSI driver name |
+| `AFSCP_INTERNAL_BASE_URL` | *(required)* | AFSCP internal API base URL |
+| `AFSCP_ORCHESTRATOR_TOKEN` | *(required)* | Sandbox orchestrator token for AFSCP |
+| `AFSCP_CALLER_SERVICE` | `sandbox-orchestrator` | Caller service header sent to AFSCP |
+| `AFSCP_ACTOR_TYPE` | `system` | Actor type for AFSCP lifecycle calls |
+| `AFSCP_ACTOR_ID` | `sandbox-manager` | Actor id for AFSCP lifecycle calls |
+| `JUICEFS_CSI_DRIVER` | `csi.juicefs.com` | CSI driver name used for plan materialization |
 | `JUICEFS_STORAGE_CAPACITY` | `1Pi` | Requested PVC capacity for each binding |
 | `JUICEFS_STORAGE_CLASS_NAME` | *(unset)* | Optional storage class for binding PV/PVC |
-| `JUICEFS_MOUNT_OPTIONS` | *(unset)* | Comma-separated JuiceFS mount options |
-| `JUICEFS_SUBDIR` | *(unset)* | Optional volume subdir prefix |
-| `JUICEFS_MOUNT_SERVICE_ACCOUNT` | *(unset)* | Optional mount pod service account |
-| `JUICEFS_MOUNT_IMAGE` | *(unset)* | Optional mount pod image override |
-| `JUICEFS_STORAGE_ENDPOINT` | `http://localhost:19000` | Object storage endpoint written into the JuiceFS secret |
-| `JUICEFS_STORAGE_CREDENTIAL_SEED` | `sandbox-juicefs-credential-seed` | Deterministic seed used when generating binding secrets |
 | `CONFIG_PATH` | `/etc/sandbox-manager/manager-config.yaml` | YAML config path |
-
-### YAML Configuration
-
-The YAML config controls server behavior, Kubernetes client tuning, and rate limiting. See [manager-service/manager-config.example.yaml](manager-service/manager-config.example.yaml).
 
 ## Quick Start
 
 ```bash
 cd manager-service
 go build -o bin/manager ./cmd/manager/
-go build -o bin/cleaner ./cmd/cleaner/
 
 export SERVICE_KEYS="my-secret-key"
 export K8S_NAMESPACE="sandbox-workloads"
-export JUICEFS_CSI_DRIVER="csi.juicefs.com"
-export JUICEFS_STORAGE_CAPACITY="1Pi"
+export AFSCP_INTERNAL_BASE_URL="http://localhost:20000"
+export AFSCP_ORCHESTRATOR_TOKEN="sandbox-orchestrator-token"
 
 ./bin/manager
 ```
-
-## How It Works
-
-1. **Ensure workspace binding** — a caller ensures `workspace_binding_id`, which produces the Secret, PV, and PVC needed for a stable JuiceFS CSI mount.
-2. **Create workload** — the caller creates a workload with `workspace_binding_id`; the manager mounts the bound PVC at `/workspace`.
-3. **Exec / keepalive** — AgentSmith runs commands inside the pod and periodically extends `expires_at`.
-4. **Delete workload** — deleting a workload only removes compute. The workspace binding and its JuiceFS-backed data remain until the binding is deleted.
-5. **Cleaner** — removes expired workload pods only. It does not delete workspace bindings.
 
 ## Release Readiness
 
 Before calling the service release-ready, verify:
 
-1. A workspace binding can be ensured and reused for the same file library.
-2. A workload pod mounts `/workspace` from that binding.
-3. Deleting or reclaiming the pod does not remove workspace contents.
-4. AgentSmith internal agents and notebook tasks can reuse the same workspace binding across restarts.
-5. All operational docs describe JuiceFS CSI bindings as the only persistence truth.
+1. Workspace binding ensure fetches the AFSCP plan and creates/reuses PV/PVC.
+2. Workload create accepts `workspace_binding_id` only for mount selection.
+3. Pod mount path, read-only mode, working directory, and runtime env come from the plan.
+4. Keepalive and delete call the AFSCP workload mount lifecycle endpoints.
+5. Docs, tests, and runbooks describe this same AFSCP plan consumer model.

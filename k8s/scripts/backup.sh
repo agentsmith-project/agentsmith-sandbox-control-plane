@@ -16,7 +16,7 @@ mkdir -p "$BACKUP_DIR"
 # 备份 K8s 资源
 echo "备份 K8s 资源..."
 kubectl get all -n sandbox-system -o yaml > "${BACKUP_DIR}/sandbox-system-resources.yaml" 2>/dev/null || true
-kubectl get all -n sandbox -o yaml > "${BACKUP_DIR}/sandbox-resources.yaml" 2>/dev/null || true
+kubectl get all -n sandbox-workloads -o yaml > "${BACKUP_DIR}/sandbox-workloads-resources.yaml" 2>/dev/null || true
 kubectl get configmap -n sandbox-system -o yaml > "${BACKUP_DIR}/sandbox-system-configmaps.yaml" 2>/dev/null || true
 
 # 备份 Kustomize 配置
@@ -30,8 +30,6 @@ cat > "${BACKUP_DIR}/versions.txt" <<EOF
 # 备份时间: $(date)
 
 Manager: $(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
-Runner: $(kubectl get configmap sandbox-config -n sandbox-system -o jsonpath='{.data.runner-image-default}' 2>/dev/null || echo "unknown")
-Cleaner: $(kubectl get cronjob sandbox-cleaner -n sandbox-system -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
 EOF
 
 echo ""

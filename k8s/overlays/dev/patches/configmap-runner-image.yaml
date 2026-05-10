@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sandbox-config
-  namespace: sandbox-system
-data:
-  runner-image-default: sandbox-runner:1.0.0

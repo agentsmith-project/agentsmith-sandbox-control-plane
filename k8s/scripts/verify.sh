@@ -47,10 +47,10 @@ else
     echo "  ✗ Namespace sandbox-system 不存在"
 fi
 
-if kubectl get namespace sandbox &> /dev/null; then
-    echo "  ✓ Namespace sandbox 存在"
+if kubectl get namespace sandbox-workloads &> /dev/null; then
+    echo "  ✓ Namespace sandbox-workloads 存在"
 else
-    echo "  ✗ Namespace sandbox 不存在"
+    echo "  ✗ Namespace sandbox-workloads 不存在"
 fi
 
 # 检查 Manager Deployment
@@ -73,13 +73,6 @@ else
     echo "  ✗ Manager Service 不存在"
 fi
 
-# 检查 Cleaner CronJob
-if kubectl get cronjob sandbox-cleaner -n sandbox-system &> /dev/null; then
-    echo "  ✓ Cleaner CronJob 存在"
-else
-    echo "  ✗ Cleaner CronJob 不存在"
-fi
-
 # 验证镜像版本
 echo ""
 echo "[4/4] 验证镜像版本..."
@@ -88,11 +81,6 @@ if [ -n "$MANAGER_IMAGE" ]; then
     echo "  Manager: $MANAGER_IMAGE"
 else
     echo "  ✗ 无法获取 Manager 镜像"
-fi
-
-RUNNER_IMAGE=$(kubectl get configmap sandbox-config -n sandbox-system -o jsonpath='{.data.runner-image-default}' 2>/dev/null || echo "")
-if [ -n "$RUNNER_IMAGE" ]; then
-    echo "  Runner (default): $RUNNER_IMAGE"
 fi
 
 echo ""

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .PHONY: help test test-unit test-race test-coverage test-integration test-e2e \
-	lint build-manager build-cleaner build-image \
+	lint build-manager build-docker build-image \
 	kind-up kind-down kind-status port-forward smoke \
 	release-gate clean-tools clean-test-deps
 
@@ -33,8 +33,8 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  make build-manager      # build manager image"
-	@echo "  make build-cleaner      # build gc/cleaner image"
-	@echo "  make build-image IMG=.. # build any image (manager|gc)"
+	@echo "  make build-docker       # build manager and runner images"
+	@echo "  make build-image IMG=.. # build one image (manager|runner)"
 	@echo ""
 	@echo "Infrastructure:"
 	@echo "  make kind-up            # create kind cluster + deploy"
@@ -88,18 +88,21 @@ _check-coverage:
 _build-check:
 	@echo "==> Verifying build..."
 	@cd "$(MANAGER_DIR)" && "$(GO)" build ./cmd/manager/
-	@cd "$(MANAGER_DIR)" && "$(GO)" build ./cmd/cleaner/
-	@echo "    All binaries build OK"
+	@echo "    Manager binary builds OK"
 
 build-manager:
 	@$(SBX) images build --only manager
 
-build-cleaner:
-	@$(SBX) images build --only gc
+build-docker:
+	@if [ "$(DRY_RUN)" = "1" ]; then \
+	  echo "$(SBX) images build"; \
+	else \
+	  $(SBX) images build; \
+	fi
 
 build-image:
 	@if [ -z "$(IMG)" ]; then \
-	  echo "IMG is required (manager|gc)"; exit 2; \
+	  echo "IMG is required (manager|runner)"; exit 2; \
 	fi
 	@$(SBX) images build --only "$(IMG)"
 

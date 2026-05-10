@@ -3,14 +3,17 @@ package workspacebinding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/sandbox/manager/internal/afscp"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -21,64 +24,79 @@ type Handler struct {
 }
 
 type k8sClient interface {
-	EnsureSecret(ctx context.Context, namespace string, secret *v1.Secret) error
-	GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error)
-	DeleteSecret(ctx context.Context, namespace, name string) error
 	EnsurePersistentVolume(ctx context.Context, volume *v1.PersistentVolume) error
 	GetPersistentVolume(ctx context.Context, name string) (*v1.PersistentVolume, error)
 	DeletePersistentVolume(ctx context.Context, name string) error
 	EnsurePersistentVolumeClaim(ctx context.Context, namespace string, claim *v1.PersistentVolumeClaim) error
 	GetPersistentVolumeClaim(ctx context.Context, namespace, name string) (*v1.PersistentVolumeClaim, error)
 	DeletePersistentVolumeClaim(ctx context.Context, namespace, name string) error
+	ListPods(ctx context.Context, namespace string, opts metav1.ListOptions) (*v1.PodList, error)
+}
+
+type afscpPlanClient interface {
+	GetOrchestratorMountPlan(ctx context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error)
 }
 
 type Options struct {
-	Namespace           string
-	CSIDriver           string
-	StorageCapacity     string
-	StorageClassName    string
-	MountOptions        []string
-	Subdir              string
-	MountServiceAccount string
-	MountImage          string
-	StorageEndpoint     string
-	StorageAccessKey    string
-	StorageSecretKey    string
+	Namespace        string
+	CSIDriver        string
+	StorageCapacity  string
+	StorageClassName string
+	AFSCPClient      afscpPlanClient
 }
 
 type EnsureRequest struct {
-	FileLibraryID       string   `json:"file_library_id"`
-	FilesystemName      string   `json:"filesystem_name"`
-	MetadataURL         string   `json:"metadata_url"`
-	MountPath           string   `json:"mount_path,omitempty"`
-	StorageEndpoint     string   `json:"storage_endpoint,omitempty"`
-	StorageCapacity     string   `json:"storage_capacity,omitempty"`
-	StorageClassName    string   `json:"storage_class_name,omitempty"`
-	MountOptions        []string `json:"mount_options,omitempty"`
-	Subdir              string   `json:"subdir,omitempty"`
-	MountServiceAccount string   `json:"mount_service_account,omitempty"`
-	MountImage          string   `json:"mount_image,omitempty"`
+	NamespaceID    string `json:"namespace_id"`
+	MountBindingID string `json:"mount_binding_id,omitempty"`
 }
 
 type BindingStatus struct {
-	BindingID        string   `json:"binding_id"`
-	WorkspaceID      string   `json:"workspace_id"`
-	ProjectID        string   `json:"project_id"`
-	FileLibraryID    string   `json:"file_library_id"`
-	Status           string   `json:"status"`
-	Namespace        string   `json:"namespace"`
-	SecretName       string   `json:"secret_name"`
-	PVName           string   `json:"pv_name"`
-	PVCName          string   `json:"pvc_name"`
-	VolumeHandle     string   `json:"volume_handle"`
-	FilesystemName   string   `json:"filesystem_name"`
-	MountPath        string   `json:"mount_path"`
-	StorageClassName string   `json:"storage_class_name,omitempty"`
-	MountOptions     []string `json:"mount_options,omitempty"`
-	Subdir           string   `json:"subdir,omitempty"`
-	CreatedAt        string   `json:"created_at,omitempty"`
-	UpdatedAt        string   `json:"updated_at,omitempty"`
+	BindingID           string `json:"binding_id"`
+	WorkspaceID         string `json:"workspace_id"`
+	ProjectID           string `json:"project_id"`
+	Status              string `json:"status"`
+	Namespace           string `json:"namespace"`
+	PVName              string `json:"pv_name"`
+	PVCName             string `json:"pvc_name"`
+	VolumeHandle        string `json:"volume_handle"`
+	NamespaceID         string `json:"namespace_id"`
+	MountBindingID      string `json:"mount_binding_id"`
+	VolumeID            string `json:"volume_id"`
+	MountPath           string `json:"mount_path"`
+	ReadOnly            bool   `json:"read_only"`
+	PayloadVolumeSubdir string `json:"-"`
+	StorageClassName    string `json:"storage_class_name,omitempty"`
+	CreatedAt           string `json:"created_at,omitempty"`
+	UpdatedAt           string `json:"updated_at,omitempty"`
 }
+
+type ResolvedMount struct {
+	PVCName             string
+	NamespaceID         string
+	MountBindingID      string
+	VolumeID            string
+	MountPath           string
+	ReadOnly            bool
+	PayloadVolumeSubdir string
+	SecurityPolicy      afscp.SecurityPolicy
+}
+
+const (
+	annotationWorkspaceID              = "mbos.io/workspace-id"
+	annotationProjectID                = "mbos.io/project-id"
+	annotationCreatedAt                = "mbos.io/created-at"
+	annotationUpdatedAt                = "mbos.io/updated-at"
+	annotationVolumeHandle             = "mbos.io/volume-handle"
+	annotationAFSCPNamespaceID         = "mbos.io/afscp-namespace-id"
+	annotationAFSCPMountBindingID      = "mbos.io/afscp-mount-binding-id"
+	annotationAFSCPVolumeID            = "mbos.io/afscp-volume-id"
+	annotationPayloadVolumeSubdir      = "mbos.io/payload-volume-subdir"
+	annotationMountPath                = "mbos.io/mount-path"
+	annotationReadOnly                 = "mbos.io/read-only"
+	annotationRunAsNonRoot             = "mbos.io/run-as-non-root"
+	annotationAllowPrivileged          = "mbos.io/allow-privileged"
+	annotationJVSControlOutsidePayload = "mbos.io/jvs-control-outside-payload"
+)
 
 func NewHandler(k8sClient k8sClient, options Options) *Handler {
 	return &Handler{k8sClient: k8sClient, options: options}
@@ -133,60 +151,66 @@ func parseBindingRoute(path string) (workspaceID, projectID, bindingID string, o
 }
 
 func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) {
-	var req EnsureRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodeEnsureRequest(r)
+	if err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if req.FileLibraryID == "" || req.FilesystemName == "" || req.MetadataURL == "" {
-		jsonError(w, http.StatusBadRequest, "file_library_id, filesystem_name, metadata_url are required")
+	if h.options.AFSCPClient == nil {
+		jsonError(w, http.StatusInternalServerError, "afscp client is not configured")
 		return
 	}
-	if req.FileLibraryID != bindingID {
-		jsonError(w, http.StatusBadRequest, "binding_id and file_library_id must match")
+	mountBindingID := firstNonEmpty(req.MountBindingID, bindingID)
+	if err := validateAFSCPNamespaceID(req.NamespaceID); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid namespace_id")
 		return
 	}
-	if firstNonEmpty(req.StorageEndpoint, h.options.StorageEndpoint) == "" {
-		jsonError(w, http.StatusInternalServerError, "storage endpoint is not configured")
+	if err := validateAFSCPMountBindingID(mountBindingID); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid mount_binding_id")
 		return
 	}
-	if strings.TrimSpace(h.options.StorageAccessKey) == "" || strings.TrimSpace(h.options.StorageSecretKey) == "" {
-		jsonError(w, http.StatusInternalServerError, "storage access key and secret key must be configured")
+	if req.MountBindingID != "" && req.MountBindingID != bindingID {
+		jsonError(w, http.StatusBadRequest, "binding_id and mount_binding_id must match")
+		return
+	}
+	plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(r.Context(), req.NamespaceID, mountBindingID, correlationID(r))
+	if err != nil {
+		jsonError(w, http.StatusBadGateway, "get afscp orchestrator mount plan failed: "+err.Error())
+		return
+	}
+	if err := validatePlan(req.NamespaceID, mountBindingID, plan); err != nil {
+		jsonError(w, http.StatusBadGateway, "invalid afscp orchestrator mount plan: "+err.Error())
 		return
 	}
 
 	ctx := r.Context()
 	now := time.Now().UTC().Format(time.RFC3339)
-	secret, pv, pvc := names(workspaceID, projectID, bindingID)
+	pv, pvc := names(workspaceID, projectID, bindingID)
 	status := BindingStatus{
-		BindingID:        bindingID,
-		WorkspaceID:      workspaceID,
-		ProjectID:        projectID,
-		FileLibraryID:    req.FileLibraryID,
-		Status:           "ready",
-		Namespace:        h.options.Namespace,
-		SecretName:       secret,
-		PVName:           pv,
-		PVCName:          pvc,
-		VolumeHandle:     volumeHandle(workspaceID, projectID, bindingID),
-		FilesystemName:   req.FilesystemName,
-		MountPath:        firstNonEmpty(req.MountPath, "/workspace"),
-		StorageClassName: firstNonEmpty(req.StorageClassName, h.options.StorageClassName),
-		MountOptions:     firstSlice(req.MountOptions, h.options.MountOptions),
-		Subdir:           firstNonEmpty(req.Subdir, h.options.Subdir),
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		BindingID:           bindingID,
+		WorkspaceID:         workspaceID,
+		ProjectID:           projectID,
+		Status:              "ready",
+		Namespace:           h.options.Namespace,
+		PVName:              pv,
+		PVCName:             pvc,
+		VolumeHandle:        volumeHandle(workspaceID, projectID, bindingID),
+		NamespaceID:         req.NamespaceID,
+		MountBindingID:      plan.MountBindingID,
+		VolumeID:            plan.VolumeID,
+		MountPath:           plan.MountPath,
+		ReadOnly:            plan.ReadOnly,
+		PayloadVolumeSubdir: plan.PayloadVolumeSubdir,
+		StorageClassName:    h.options.StorageClassName,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 
-	if err := h.k8sClient.EnsureSecret(ctx, h.options.Namespace, h.buildSecret(status, req)); err != nil {
-		jsonError(w, http.StatusInternalServerError, "ensure secret failed: "+err.Error())
-		return
-	}
-	if err := h.k8sClient.EnsurePersistentVolume(ctx, h.buildPV(status, req)); err != nil {
+	if err := h.k8sClient.EnsurePersistentVolume(ctx, h.buildPV(status, plan)); err != nil {
 		jsonError(w, http.StatusInternalServerError, "ensure persistent volume failed: "+err.Error())
 		return
 	}
-	if err := h.k8sClient.EnsurePersistentVolumeClaim(ctx, h.options.Namespace, h.buildPVC(status, req)); err != nil {
+	if err := h.k8sClient.EnsurePersistentVolumeClaim(ctx, h.options.Namespace, h.buildPVC(status, plan)); err != nil {
 		jsonError(w, http.StatusInternalServerError, "ensure persistent volume claim failed: "+err.Error())
 		return
 	}
@@ -195,19 +219,10 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) {
 	ctx := r.Context()
-	secretName, pvName, pvcName := names(workspaceID, projectID, bindingID)
-	secret, err := h.k8sClient.GetSecret(ctx, h.options.Namespace, secretName)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	pvName, pvcName := names(workspaceID, projectID, bindingID)
 	pv, err := h.k8sClient.GetPersistentVolume(ctx, pvName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -216,95 +231,90 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 	}
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.options.Namespace, pvcName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	status := BindingStatus{
-		BindingID:        bindingID,
-		WorkspaceID:      workspaceID,
-		ProjectID:        projectID,
-		FileLibraryID:    valueOr(annotation(secret, "mbos.io/file-library-id"), label(secret, "mbos.io/file-library-id")),
-		Status:           "ready",
-		Namespace:        h.options.Namespace,
-		SecretName:       secretName,
-		PVName:           pvName,
-		PVCName:          pvcName,
-		VolumeHandle:     valueOr(annotation(pv, "mbos.io/volume-handle"), volumeHandle(workspaceID, projectID, bindingID)),
-		FilesystemName:   secretString(secret, "name"),
-		MountPath:        firstNonEmpty(annotation(secret, "mbos.io/mount-path"), "/workspace"),
-		StorageClassName: derefString(pvc.Spec.StorageClassName),
-		MountOptions:     pv.Spec.MountOptions,
-		Subdir:           pv.Spec.CSI.VolumeAttributes["subdir"],
-		CreatedAt:        annotation(secret, "mbos.io/created-at"),
-		UpdatedAt:        annotation(secret, "mbos.io/updated-at"),
+	status, err := bindingStatusFromObjects(workspaceID, projectID, bindingID, h.options.Namespace, pv, pvc)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	jsonResponse(w, http.StatusOK, status)
 }
 
 func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) {
 	ctx := r.Context()
-	secretName, pvName, pvcName := names(workspaceID, projectID, bindingID)
-	_ = h.k8sClient.DeletePersistentVolumeClaim(ctx, h.options.Namespace, pvcName)
-	_ = h.k8sClient.DeletePersistentVolume(ctx, pvName)
-	_ = h.k8sClient.DeleteSecret(ctx, h.options.Namespace, secretName)
+	pvName, pvcName := names(workspaceID, projectID, bindingID)
+	active, err := h.activeWorkloadsForBinding(ctx, workspaceID, projectID, bindingID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "check active workloads failed: "+err.Error())
+		return
+	}
+	if len(active) > 0 {
+		jsonError(w, http.StatusConflict, "workspace binding has active workloads; delete workloads first: "+strings.Join(active, ","))
+		return
+	}
+	if err := h.k8sClient.DeletePersistentVolumeClaim(ctx, h.options.Namespace, pvcName); err != nil {
+		jsonError(w, http.StatusInternalServerError, "delete persistent volume claim failed: "+err.Error())
+		return
+	}
+	if err := h.k8sClient.DeletePersistentVolume(ctx, pvName); err != nil {
+		jsonError(w, http.StatusInternalServerError, "delete persistent volume failed: "+err.Error())
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]string{"message": "binding deleted"})
 }
 
-func (h *Handler) buildSecret(status BindingStatus, req EnsureRequest) *v1.Secret {
-	storageEndpoint := firstNonEmpty(req.StorageEndpoint, h.options.StorageEndpoint)
-	return &v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      status.SecretName,
-			Namespace: h.options.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "mbos-sandbox-v1",
-				"mbos.io/file-library-id":      status.FileLibraryID,
-			},
-			Annotations: map[string]string{
-				"mbos.io/workspace-id": workspaceID(status),
-				"mbos.io/project-id":   projectID(status),
-				"mbos.io/mount-path":   status.MountPath,
-				"mbos.io/created-at":   status.CreatedAt,
-				"mbos.io/updated-at":   status.UpdatedAt,
-			},
-		},
-		Type: "Opaque",
-		StringData: map[string]string{
-			"name":       req.FilesystemName,
-			"metaurl":    req.MetadataURL,
-			"storage":    "s3",
-			"bucket":     strings.TrimRight(storageEndpoint, "/") + "/" + deterministicBucket(status.FileLibraryID),
-			"access-key": strings.TrimSpace(h.options.StorageAccessKey),
-			"secret-key": strings.TrimSpace(h.options.StorageSecretKey),
-		},
+func (h *Handler) activeWorkloadsForBinding(ctx context.Context, workspaceID, projectID, bindingID string) ([]string, error) {
+	pods, err := h.k8sClient.ListPods(ctx, h.options.Namespace, metav1.ListOptions{LabelSelector: "app=managed-workload"})
+	if err != nil {
+		return nil, err
 	}
+	var active []string
+	for _, pod := range pods.Items {
+		if pod.Annotations[annotationAFSCPMountBindingID] != bindingID {
+			continue
+		}
+		if pod.Labels["workspace_id"] != "" && pod.Labels["workspace_id"] != workspaceID {
+			continue
+		}
+		if pod.Labels["project_id"] != "" && pod.Labels["project_id"] != projectID {
+			continue
+		}
+		active = append(active, pod.Name)
+	}
+	return active, nil
 }
 
-func (h *Handler) buildPV(status BindingStatus, req EnsureRequest) *v1.PersistentVolume {
-	capacity := firstNonEmpty(req.StorageCapacity, h.options.StorageCapacity, "1Pi")
-	attrs := map[string]string{}
-	if status.Subdir != "" {
-		attrs["subdir"] = status.Subdir
-	}
-	if value := firstNonEmpty(req.MountServiceAccount, h.options.MountServiceAccount); value != "" {
-		attrs["juicefs/mount-service-account"] = value
-	}
-	if value := firstNonEmpty(req.MountImage, h.options.MountImage); value != "" {
-		attrs["juicefs/mount-image"] = value
-	}
+func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan) *v1.PersistentVolume {
+	capacity := firstNonEmpty(h.options.StorageCapacity, "1Pi")
+	attrs := map[string]string{"subdir": plan.PayloadVolumeSubdir}
 	return &v1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: status.PVName,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "mbos-sandbox-v1",
-				"mbos.io/file-library-id":      status.FileLibraryID,
+				"mbos.io/mount-binding-id":     status.MountBindingID,
 			},
 			Annotations: map[string]string{
-				"mbos.io/volume-handle": status.VolumeHandle,
+				annotationWorkspaceID:              status.WorkspaceID,
+				annotationProjectID:                status.ProjectID,
+				annotationVolumeHandle:             status.VolumeHandle,
+				annotationAFSCPNamespaceID:         status.NamespaceID,
+				annotationAFSCPMountBindingID:      status.MountBindingID,
+				annotationAFSCPVolumeID:            status.VolumeID,
+				annotationPayloadVolumeSubdir:      status.PayloadVolumeSubdir,
+				annotationMountPath:                status.MountPath,
+				annotationReadOnly:                 boolString(status.ReadOnly),
+				annotationRunAsNonRoot:             boolString(plan.SecurityPolicy.RunAsNonRoot),
+				annotationAllowPrivileged:          boolString(plan.SecurityPolicy.AllowPrivileged),
+				annotationJVSControlOutsidePayload: boolString(plan.SecurityPolicy.JVSControlOutsidePayload),
+				annotationCreatedAt:                status.CreatedAt,
+				annotationUpdatedAt:                status.UpdatedAt,
 			},
 		},
 		Spec: v1.PersistentVolumeSpec{
@@ -313,7 +323,6 @@ func (h *Handler) buildPV(status BindingStatus, req EnsureRequest) *v1.Persisten
 			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimRetain,
 			VolumeMode:                    func() *v1.PersistentVolumeMode { m := v1.PersistentVolumeFilesystem; return &m }(),
 			StorageClassName:              status.StorageClassName,
-			MountOptions:                  status.MountOptions,
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
 					Driver:           firstNonEmpty(h.options.CSIDriver, "csi.juicefs.com"),
@@ -321,8 +330,8 @@ func (h *Handler) buildPV(status BindingStatus, req EnsureRequest) *v1.Persisten
 					FSType:           "juicefs",
 					VolumeAttributes: attrs,
 					NodePublishSecretRef: &v1.SecretReference{
-						Name:      status.SecretName,
-						Namespace: h.options.Namespace,
+						Name:      plan.SecretRef.Name,
+						Namespace: plan.SecretRef.Namespace,
 					},
 				},
 			},
@@ -330,15 +339,31 @@ func (h *Handler) buildPV(status BindingStatus, req EnsureRequest) *v1.Persisten
 	}
 }
 
-func (h *Handler) buildPVC(status BindingStatus, req EnsureRequest) *v1.PersistentVolumeClaim {
-	capacity := firstNonEmpty(req.StorageCapacity, h.options.StorageCapacity, "1Pi")
+func (h *Handler) buildPVC(status BindingStatus, plan afscp.OrchestratorMountPlan) *v1.PersistentVolumeClaim {
+	capacity := firstNonEmpty(h.options.StorageCapacity, "1Pi")
 	return &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      status.PVCName,
 			Namespace: h.options.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "mbos-sandbox-v1",
-				"mbos.io/file-library-id":      status.FileLibraryID,
+				"mbos.io/mount-binding-id":     status.MountBindingID,
+			},
+			Annotations: map[string]string{
+				annotationWorkspaceID:              status.WorkspaceID,
+				annotationProjectID:                status.ProjectID,
+				annotationVolumeHandle:             status.VolumeHandle,
+				annotationAFSCPNamespaceID:         status.NamespaceID,
+				annotationAFSCPMountBindingID:      status.MountBindingID,
+				annotationAFSCPVolumeID:            status.VolumeID,
+				annotationPayloadVolumeSubdir:      status.PayloadVolumeSubdir,
+				annotationMountPath:                status.MountPath,
+				annotationReadOnly:                 boolString(status.ReadOnly),
+				annotationRunAsNonRoot:             boolString(plan.SecurityPolicy.RunAsNonRoot),
+				annotationAllowPrivileged:          boolString(plan.SecurityPolicy.AllowPrivileged),
+				annotationJVSControlOutsidePayload: boolString(plan.SecurityPolicy.JVSControlOutsidePayload),
+				annotationCreatedAt:                status.CreatedAt,
+				annotationUpdatedAt:                status.UpdatedAt,
 			},
 		},
 		Spec: v1.PersistentVolumeClaimSpec{
@@ -355,7 +380,10 @@ func (h *Handler) buildPVC(status BindingStatus, req EnsureRequest) *v1.Persiste
 	}
 }
 
-var validNameRegex = regexp.MustCompile(`^[a-z0-9_-]{1,63}$`)
+var validNameRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
+var validNamespaceIDRegex = regexp.MustCompile(`^ns_[A-Za-z0-9][A-Za-z0-9_-]{1,62}$`)
+var validMountBindingIDRegex = regexp.MustCompile(`^wmb_[A-Za-z0-9][A-Za-z0-9_-]{1,62}$`)
+var validVolumeIDRegex = regexp.MustCompile(`^vol_[A-Za-z0-9][A-Za-z0-9_-]{1,62}$`)
 
 func isValidName(value string) bool {
 	return validNameRegex.MatchString(value)
@@ -375,22 +403,18 @@ func sanitizeK8sName(value string, fallback string) string {
 	return normalized
 }
 
-func names(workspaceID, projectID, bindingID string) (secretName, pvName, pvcName string) {
+func names(workspaceID, projectID, bindingID string) (pvName, pvcName string) {
 	suffix := sanitizeK8sName(fmt.Sprintf("%s-%s-%s", workspaceID, projectID, bindingID), "binding")
-	return "juicefs-secret-" + suffix, "juicefs-pv-" + suffix, "juicefs-pvc-" + suffix
+	return "juicefs-pv-" + suffix, "juicefs-pvc-" + suffix
 }
 
 func PVCName(workspaceID, projectID, bindingID string) string {
-	_, _, pvcName := names(workspaceID, projectID, bindingID)
+	_, pvcName := names(workspaceID, projectID, bindingID)
 	return pvcName
 }
 
 func volumeHandle(workspaceID, projectID, bindingID string) string {
 	return sanitizeK8sName(fmt.Sprintf("juicefs-%s-%s-%s", workspaceID, projectID, bindingID), "juicefs-volume")
-}
-
-func deterministicBucket(fileLibraryID string) string {
-	return sanitizeK8sName("jfs-lib-"+strings.ReplaceAll(fileLibraryID, "_", "-"), "jfs-lib")
 }
 
 func firstNonEmpty(values ...string) string {
@@ -402,43 +426,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func firstSlice(a []string, b []string) []string {
-	if len(a) > 0 {
-		return compact(a)
-	}
-	return compact(b)
-}
-
-func compact(values []string) []string {
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
-}
-
 func annotation[T interface{ GetAnnotations() map[string]string }](obj T, key string) string {
 	return obj.GetAnnotations()[key]
-}
-
-func label[T interface{ GetLabels() map[string]string }](obj T, key string) string {
-	return obj.GetLabels()[key]
-}
-
-func secretString(secret *v1.Secret, key string) string {
-	return string(secret.Data[key])
-}
-
-func workspaceID(status BindingStatus) string { return status.WorkspaceID }
-func projectID(status BindingStatus) string   { return status.ProjectID }
-
-func valueOr(value string, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
 }
 
 func derefString(value *string) string {
@@ -456,4 +445,221 @@ func jsonResponse(w http.ResponseWriter, status int, payload any) {
 
 func jsonError(w http.ResponseWriter, status int, message string) {
 	jsonResponse(w, status, map[string]string{"error": message})
+}
+
+func decodeEnsureRequest(r *http.Request) (EnsureRequest, error) {
+	var req EnsureRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return req, err
+	}
+	return req, nil
+}
+
+func validatePlan(namespaceID, mountBindingID string, plan afscp.OrchestratorMountPlan) error {
+	if plan.MountBindingID != mountBindingID {
+		return fmt.Errorf("mount binding id mismatch")
+	}
+	if err := validateAFSCPNamespaceID(namespaceID); err != nil {
+		return err
+	}
+	if err := validateAFSCPMountBindingID(plan.MountBindingID); err != nil {
+		return err
+	}
+	if !validVolumeIDRegex.MatchString(plan.VolumeID) {
+		return fmt.Errorf("invalid volume id")
+	}
+	if err := validateMountPath(plan.MountPath); err != nil {
+		return err
+	}
+	if err := validatePayloadVolumeSubdir(plan.PayloadVolumeSubdir); err != nil {
+		return err
+	}
+	if err := validateSecretRef(plan.SecretRef); err != nil {
+		return err
+	}
+	if !plan.SecurityPolicy.RunAsNonRoot || !plan.SecurityPolicy.JVSControlOutsidePayload {
+		return fmt.Errorf("security policy does not satisfy sandbox workload requirements")
+	}
+	if plan.SecurityPolicy.AllowPrivileged {
+		return fmt.Errorf("privileged workload mounts are not supported")
+	}
+	return nil
+}
+
+func validateAFSCPNamespaceID(value string) error {
+	if !validNamespaceIDRegex.MatchString(strings.TrimSpace(value)) {
+		return fmt.Errorf("invalid namespace id")
+	}
+	return nil
+}
+
+func validateAFSCPMountBindingID(value string) error {
+	if !validMountBindingIDRegex.MatchString(strings.TrimSpace(value)) {
+		return fmt.Errorf("invalid mount binding id")
+	}
+	return nil
+}
+
+func validateMountPath(value string) error {
+	if value == "" || strings.TrimSpace(value) != value || !path.IsAbs(value) || value == "/" {
+		return fmt.Errorf("mount_path must be a non-root absolute container path")
+	}
+	if strings.Contains(value, "\\") {
+		return fmt.Errorf("mount_path must not contain backslashes")
+	}
+	for _, part := range strings.Split(value, "/")[1:] {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("mount_path must be clean")
+		}
+	}
+	cleaned := path.Clean(value)
+	if cleaned != value {
+		return fmt.Errorf("mount_path must be clean")
+	}
+	for _, reserved := range []string{"/proc", "/sys", "/dev", "/run/secrets", "/var/run/secrets"} {
+		if value == reserved || strings.HasPrefix(value, reserved+"/") {
+			return fmt.Errorf("mount_path uses a runtime reserved path")
+		}
+	}
+	return nil
+}
+
+func validatePayloadVolumeSubdir(value string) error {
+	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return fmt.Errorf("payload_volume_subdir must be relative")
+	}
+	if !strings.HasPrefix(value, "afscp/") || !strings.HasSuffix(value, "/payload") {
+		return fmt.Errorf("payload_volume_subdir must use afscp payload root")
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("payload_volume_subdir must be clean")
+		}
+	}
+	return nil
+}
+
+func validateSecretRef(ref afscp.SecretRef) error {
+	if !validDNSLabel(ref.Namespace, 63) || !validDNSSubdomain(ref.Name, 253) {
+		return fmt.Errorf("invalid secret_ref")
+	}
+	return nil
+}
+
+func validDNSSubdomain(value string, maxLen int) bool {
+	if strings.TrimSpace(value) == "" || len(value) > maxLen {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if !validDNSLabel(part, 63) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDNSLabel(value string, maxLen int) bool {
+	if value == "" || len(value) > maxLen {
+		return false
+	}
+	for idx, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-' && idx > 0 && idx < len(value)-1:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func bindingStatusFromObjects(workspaceID, projectID, bindingID, namespace string, pv *v1.PersistentVolume, pvc *v1.PersistentVolumeClaim) (BindingStatus, error) {
+	resolved, err := ResolvedMountFromPVC(pvc)
+	if err != nil {
+		return BindingStatus{}, err
+	}
+	pvName, pvcName := names(workspaceID, projectID, bindingID)
+	if pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.VolumeAttributes != nil {
+		if subdir := pv.Spec.CSI.VolumeAttributes["subdir"]; subdir != "" && subdir != resolved.PayloadVolumeSubdir {
+			return BindingStatus{}, fmt.Errorf("pv payload subdir does not match pvc annotation")
+		}
+	}
+	return BindingStatus{
+		BindingID:           bindingID,
+		WorkspaceID:         workspaceID,
+		ProjectID:           projectID,
+		Status:              "ready",
+		Namespace:           namespace,
+		PVName:              pvName,
+		PVCName:             pvcName,
+		VolumeHandle:        firstNonEmpty(annotation(pvc, annotationVolumeHandle), annotation(pv, annotationVolumeHandle), volumeHandle(workspaceID, projectID, bindingID)),
+		NamespaceID:         resolved.NamespaceID,
+		MountBindingID:      resolved.MountBindingID,
+		VolumeID:            resolved.VolumeID,
+		MountPath:           resolved.MountPath,
+		ReadOnly:            resolved.ReadOnly,
+		PayloadVolumeSubdir: resolved.PayloadVolumeSubdir,
+		StorageClassName:    derefString(pvc.Spec.StorageClassName),
+		CreatedAt:           annotation(pvc, annotationCreatedAt),
+		UpdatedAt:           annotation(pvc, annotationUpdatedAt),
+	}, nil
+}
+
+func ResolvedMountFromPVC(pvc *v1.PersistentVolumeClaim) (ResolvedMount, error) {
+	if pvc == nil {
+		return ResolvedMount{}, errors.New("workspace binding pvc is required")
+	}
+	annotations := pvc.GetAnnotations()
+	resolved := ResolvedMount{
+		PVCName:             pvc.GetName(),
+		NamespaceID:         annotations[annotationAFSCPNamespaceID],
+		MountBindingID:      annotations[annotationAFSCPMountBindingID],
+		VolumeID:            annotations[annotationAFSCPVolumeID],
+		MountPath:           annotations[annotationMountPath],
+		ReadOnly:            annotations[annotationReadOnly] == "true",
+		PayloadVolumeSubdir: annotations[annotationPayloadVolumeSubdir],
+		SecurityPolicy: afscp.SecurityPolicy{
+			RunAsNonRoot:             annotations[annotationRunAsNonRoot] == "true",
+			AllowPrivileged:          annotations[annotationAllowPrivileged] == "true",
+			JVSControlOutsidePayload: annotations[annotationJVSControlOutsidePayload] == "true",
+		},
+	}
+	if err := validateAFSCPNamespaceID(resolved.NamespaceID); err != nil {
+		return ResolvedMount{}, fmt.Errorf("invalid binding namespace_id annotation")
+	}
+	if err := validateAFSCPMountBindingID(resolved.MountBindingID); err != nil {
+		return ResolvedMount{}, fmt.Errorf("invalid binding mount_binding_id annotation")
+	}
+	if !validVolumeIDRegex.MatchString(resolved.VolumeID) {
+		return ResolvedMount{}, fmt.Errorf("invalid binding volume_id annotation")
+	}
+	if err := validateMountPath(resolved.MountPath); err != nil {
+		return ResolvedMount{}, err
+	}
+	if err := validatePayloadVolumeSubdir(resolved.PayloadVolumeSubdir); err != nil {
+		return ResolvedMount{}, err
+	}
+	if !resolved.SecurityPolicy.RunAsNonRoot || resolved.SecurityPolicy.AllowPrivileged || !resolved.SecurityPolicy.JVSControlOutsidePayload {
+		return ResolvedMount{}, fmt.Errorf("binding security policy is not allowed")
+	}
+	return resolved, nil
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func correlationID(r *http.Request) string {
+	for _, header := range []string{"X-Correlation-Id", "X-Request-Id", "X-Request-ID", "Request-Id"} {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			return value
+		}
+	}
+	return "sandbox-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 }

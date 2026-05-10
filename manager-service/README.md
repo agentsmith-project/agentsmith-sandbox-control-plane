@@ -5,7 +5,7 @@
 Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HTTP API：
 - 创建和管理 workload Pod（工作区目录由 manager 分配）
 - 在 Pod 中执行命令（exec）
-- 客户端 keepalive 续期（超时未收到 keepalive 则由 cleaner 回收 Pod）
+- 客户端 keepalive 续期（过期回收必须走 manager workload delete API）
 
 ## 快速开始
 
@@ -59,7 +59,7 @@ export SERVICE_KEYS="test-key-123"
 
 ## API 文档
 
-详细 API 文档请参考项目根目录 `docs/api-reference-v2.md`。
+详细 API 文档请参考项目根目录 `docs/api-reference.md`。
 
 ## 版本管理
 

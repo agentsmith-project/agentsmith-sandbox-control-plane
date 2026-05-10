@@ -85,7 +85,7 @@ log_info "当前上下文: $CURRENT_CONTEXT"
 
 # Verify namespaces exist or create them
 log_info "验证命名空间..."
-for ns in sandbox-system sandbox; do
+for ns in sandbox-system sandbox-workloads; do
     if ! kubectl get namespace "$ns" &>/dev/null; then
         log_info "创建命名空间: $ns"
         if ! kubectl create namespace "$ns"; then
@@ -124,7 +124,7 @@ log_success "=== 部署完成 ==="
 echo ""
 log_info "检查部署状态:"
 kubectl get pods -n sandbox-system
-kubectl get pods -n sandbox
+kubectl get pods -n sandbox-workloads
 
 echo ""
 log_info "访问 Manager:"

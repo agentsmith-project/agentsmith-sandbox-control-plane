@@ -87,7 +87,6 @@ images_build() {
   log_info "Built images:"
   echo "  $tag_manager"
   echo "  $tag_runner"
-  echo "  (cleaner is built into manager image)"
 }
 
 images_push_harbor() {

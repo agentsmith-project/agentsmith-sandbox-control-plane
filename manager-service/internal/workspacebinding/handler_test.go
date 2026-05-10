@@ -3,11 +3,13 @@ package workspacebinding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/sandbox/manager/internal/afscp"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,32 +17,14 @@ import (
 )
 
 type fakeK8sClient struct {
-	secret *v1.Secret
-	pv     *v1.PersistentVolume
-	pvc    *v1.PersistentVolumeClaim
+	pv           *v1.PersistentVolume
+	pvc          *v1.PersistentVolumeClaim
+	pods         []v1.Pod
+	listPodsErr  error
+	deletePVErr  error
+	deletePVCErr error
 }
 
-func (f *fakeK8sClient) EnsureSecret(_ context.Context, _ string, secret *v1.Secret) error {
-	if len(secret.StringData) > 0 {
-		secret.Data = make(map[string][]byte, len(secret.StringData))
-		for key, value := range secret.StringData {
-			secret.Data[key] = []byte(value)
-		}
-		secret.StringData = nil
-	}
-	f.secret = secret
-	return nil
-}
-func (f *fakeK8sClient) GetSecret(_ context.Context, _ string, _ string) (*v1.Secret, error) {
-	if f.secret == nil {
-		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "missing")
-	}
-	return f.secret, nil
-}
-func (f *fakeK8sClient) DeleteSecret(_ context.Context, _ string, _ string) error {
-	f.secret = nil
-	return nil
-}
 func (f *fakeK8sClient) EnsurePersistentVolume(_ context.Context, volume *v1.PersistentVolume) error {
 	f.pv = volume
 	return nil
@@ -52,6 +36,9 @@ func (f *fakeK8sClient) GetPersistentVolume(_ context.Context, _ string) (*v1.Pe
 	return f.pv, nil
 }
 func (f *fakeK8sClient) DeletePersistentVolume(_ context.Context, _ string) error {
+	if f.deletePVErr != nil {
+		return f.deletePVErr
+	}
 	f.pv = nil
 	return nil
 }
@@ -66,44 +53,97 @@ func (f *fakeK8sClient) GetPersistentVolumeClaim(_ context.Context, _ string, _ 
 	return f.pvc, nil
 }
 func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string, _ string) error {
+	if f.deletePVCErr != nil {
+		return f.deletePVCErr
+	}
 	f.pvc = nil
 	return nil
 }
+func (f *fakeK8sClient) ListPods(_ context.Context, _ string, _ metav1.ListOptions) (*v1.PodList, error) {
+	if f.listPodsErr != nil {
+		return nil, f.listPodsErr
+	}
+	return &v1.PodList{Items: append([]v1.Pod(nil), f.pods...)}, nil
+}
 
-func TestEnsureAndGetBinding(t *testing.T) {
+type fakeAFSCPClient struct {
+	plan           afscp.OrchestratorMountPlan
+	err            error
+	namespaceID    string
+	mountBindingID string
+	correlationID  string
+	calls          int
+}
+
+func (f *fakeAFSCPClient) GetOrchestratorMountPlan(_ context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error) {
+	f.calls++
+	f.namespaceID = namespaceID
+	f.mountBindingID = mountBindingID
+	f.correlationID = correlationID
+	if f.err != nil {
+		return afscp.OrchestratorMountPlan{}, f.err
+	}
+	return f.plan, nil
+}
+
+func validPlan() afscp.OrchestratorMountPlan {
+	return afscp.OrchestratorMountPlan{
+		MountBindingID:      "wmb_demo",
+		VolumeID:            "vol_demo",
+		PayloadVolumeSubdir: "afscp/ns_demo/repos/repo_demo/payload",
+		MountPath:           "/home/task-demo",
+		ReadOnly:            true,
+		SecretRef:           afscp.SecretRef{Namespace: "afscp-mounts", Name: "juicefs-vol-demo"},
+		SecurityPolicy:      afscp.SecurityPolicy{RunAsNonRoot: true, AllowPrivileged: false, JVSControlOutsidePayload: true},
+	}
+}
+
+func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	client := &fakeK8sClient{}
+	afscpClient := &fakeAFSCPClient{plan: validPlan()}
 	handler := NewHandler(client, Options{
 		Namespace:        "sandbox-workloads",
 		CSIDriver:        "csi.juicefs.com",
 		StorageCapacity:  "1Pi",
 		StorageClassName: "juicefs-static",
-		MountOptions:     []string{"writeback_cache"},
-		StorageEndpoint:  "http://minio.internal:19000",
-		StorageAccessKey: "minio-access",
-		StorageSecretKey: "minio-secret",
+		AFSCPClient:      afscpClient,
 	})
 
-	payload := `{"file_library_id":"flib_demo","filesystem_name":"jfs_demo","metadata_url":"postgres://juicefs:secret@pg:5432/jfs_demo","subdir":"/workspaces/ws/flib_demo"}`
-	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/flib_demo", strings.NewReader(payload))
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	req.Header.Set("X-Correlation-Id", "corr-test")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if client.secret == nil || client.pv == nil || client.pvc == nil {
-		t.Fatalf("expected secret/pv/pvc to be ensured")
+	if afscpClient.calls != 1 || afscpClient.namespaceID != "ns_demo" || afscpClient.mountBindingID != "wmb_demo" || afscpClient.correlationID != "corr-test" {
+		t.Fatalf("unexpected afscp call: %#v", afscpClient)
 	}
-	if got := string(client.secret.Data["access-key"]); got != "minio-access" {
-		t.Fatalf("expected access key to be propagated, got %q", got)
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("expected pv/pvc to be ensured")
 	}
-	if got := string(client.secret.Data["secret-key"]); got != "minio-secret" {
-		t.Fatalf("expected secret key to be propagated, got %q", got)
+	if client.pv.Spec.CSI == nil {
+		t.Fatalf("expected CSI PV")
 	}
-	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "/workspaces/ws/flib_demo" {
-		t.Fatalf("expected subdir to be propagated, got %q", got)
+	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "afscp/ns_demo/repos/repo_demo/payload" {
+		t.Fatalf("expected payload subdir from AFSCP plan, got %q", got)
 	}
-	getReq := httptest.NewRequest(http.MethodGet, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/flib_demo", nil)
+	if got := client.pv.Spec.CSI.NodePublishSecretRef; got == nil || got.Namespace != "afscp-mounts" || got.Name != "juicefs-vol-demo" {
+		t.Fatalf("expected secret_ref from AFSCP plan, got %#v", got)
+	}
+	if _, ok := client.pvc.Annotations[annotationMountPath]; !ok {
+		t.Fatalf("expected pvc plan annotations, got %#v", client.pvc.Annotations)
+	}
+	renderedPV, _ := json.Marshal(client.pv)
+	renderedPVC, _ := json.Marshal(client.pvc)
+	for _, forbidden := range []string{"metadata_url", "metaurl", "bucket", "access-key", "secret-key", "postgres://", "minio"} {
+		if strings.Contains(string(renderedPV), forbidden) || strings.Contains(string(renderedPVC), forbidden) {
+			t.Fatalf("raw storage credential marker %q leaked into PV/PVC", forbidden)
+		}
+	}
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	getRec := httptest.NewRecorder()
 	handler.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {
@@ -113,25 +153,137 @@ func TestEnsureAndGetBinding(t *testing.T) {
 	if err := json.Unmarshal(getRec.Body.Bytes(), &status); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if status.PVCName == "" || status.FileLibraryID != "flib_demo" || status.MountPath != "/workspace" {
+	if status.PVCName == "" || status.MountBindingID != "wmb_demo" || status.NamespaceID != "ns_demo" || status.MountPath != "/home/task-demo" || !status.ReadOnly {
 		t.Fatalf("unexpected binding status: %+v", status)
+	}
+	if strings.Contains(getRec.Body.String(), "payload_volume_subdir") || strings.Contains(getRec.Body.String(), "secret_ref") || strings.Contains(getRec.Body.String(), "juicefs-vol-demo") {
+		t.Fatalf("binding status leaked orchestrator-only fields: %s", getRec.Body.String())
+	}
+}
+
+func TestEnsureBindingRejectsRawJuiceFSFields(t *testing.T) {
+	handler := NewHandler(&fakeK8sClient{}, Options{
+		Namespace:   "sandbox-workloads",
+		AFSCPClient: &fakeAFSCPClient{plan: validPlan()},
+	})
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo","metadata_url":"postgres://juicefs:secret@pg/jfs","storage_endpoint":"http://minio:9000","bucket":"raw"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEnsureBindingFailsClosedWhenAFSCPPlanUnavailable(t *testing.T) {
+	client := &fakeK8sClient{}
+	handler := NewHandler(client, Options{
+		Namespace:   "sandbox-workloads",
+		AFSCPClient: &fakeAFSCPClient{plan: validPlan(), err: errors.New("afscp down")},
+	})
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.pv != nil || client.pvc != nil {
+		t.Fatalf("expected no k8s resources when AFSCP plan is unavailable")
 	}
 }
 
 func TestDeleteBinding(t *testing.T) {
 	client := &fakeK8sClient{
-		secret: &v1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s"}},
-		pv:     &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
-		pvc:    &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
 	}
 	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
-	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/flib_demo", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if client.secret != nil || client.pv != nil || client.pvc != nil {
+	if client.pv != nil || client.pvc != nil {
 		t.Fatalf("expected resources to be deleted")
+	}
+}
+
+func TestDeleteBindingRejectsActiveWorkload(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		pods: []v1.Pod{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "workload-active",
+					Labels: map[string]string{
+						"app":          "managed-workload",
+						"workspace_id": "ws_demo",
+						"project_id":   "proj_demo",
+					},
+					Annotations: map[string]string{
+						annotationAFSCPMountBindingID: "wmb_demo",
+					},
+				},
+			},
+		},
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("active workload must block PV/PVC deletion")
+	}
+}
+
+func TestDeleteBindingReturnsErrorWhenPVCDeleteFails(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:           &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc:          &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		deletePVCErr: errors.New("pvc delete failed"),
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "pvc delete failed") {
+		t.Fatalf("expected pvc delete error in response, got %s", rec.Body.String())
+	}
+}
+
+func TestDeleteBindingReturnsErrorWhenPVDeleteFails(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:          &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc:         &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		deletePVErr: errors.New("pv delete failed"),
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "pv delete failed") {
+		t.Fatalf("expected pv delete error in response, got %s", rec.Body.String())
 	}
 }

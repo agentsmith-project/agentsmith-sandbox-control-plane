@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox/manager/internal/afscp"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
@@ -81,8 +82,115 @@ func newTestHandler(t *testing.T) *Handler {
 }
 
 func validCreateRequest(req CreateRequest) CreateRequest {
-	req.WorkspaceBindingID = "flib-demo"
+	req.WorkspaceBindingID = "wmb_demo"
+	mount := validResolvedMount(req.WorkspaceBindingID)
+	req.resolvedMount = &mount
 	return req
+}
+
+func validResolvedMount(bindingID string) workspacebinding.ResolvedMount {
+	return workspacebinding.ResolvedMount{
+		PVCName:             workspacebinding.PVCName("ws-1", "proj-1", bindingID),
+		NamespaceID:         "ns_demo",
+		MountBindingID:      bindingID,
+		VolumeID:            "vol_demo",
+		MountPath:           "/home/task-plan",
+		ReadOnly:            false,
+		PayloadVolumeSubdir: "afscp/ns_demo/repos/repo_demo/payload",
+		SecurityPolicy:      validResolvedMountSecurityPolicy(),
+	}
+}
+
+func validResolvedMountSecurityPolicy() afscp.SecurityPolicy {
+	return afscp.SecurityPolicy{
+		RunAsNonRoot:             true,
+		AllowPrivileged:          false,
+		JVSControlOutsidePayload: true,
+	}
+}
+
+func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolumeClaim {
+	pvName := testBindingPVName(workspaceID, projectID, bindingID)
+	return &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"mbos.io/afscp-namespace-id":          "ns_demo",
+				"mbos.io/afscp-mount-binding-id":      bindingID,
+				"mbos.io/afscp-volume-id":             "vol_demo",
+				"mbos.io/payload-volume-subdir":       "afscp/ns_demo/repos/repo_demo/payload",
+				"mbos.io/mount-path":                  "/home/task-plan",
+				"mbos.io/read-only":                   "true",
+				"mbos.io/run-as-non-root":             "true",
+				"mbos.io/allow-privileged":            "false",
+				"mbos.io/jvs-control-outside-payload": "true",
+			},
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			VolumeName: pvName,
+		},
+	}
+}
+
+func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolume {
+	return &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testBindingPVName(workspaceID, projectID, bindingID),
+			Annotations: map[string]string{
+				"mbos.io/afscp-namespace-id":          "ns_demo",
+				"mbos.io/afscp-mount-binding-id":      bindingID,
+				"mbos.io/afscp-volume-id":             "vol_demo",
+				"mbos.io/payload-volume-subdir":       "afscp/ns_demo/repos/repo_demo/payload",
+				"mbos.io/mount-path":                  "/home/task-plan",
+				"mbos.io/read-only":                   "true",
+				"mbos.io/run-as-non-root":             "true",
+				"mbos.io/allow-privileged":            "false",
+				"mbos.io/jvs-control-outside-payload": "true",
+			},
+		},
+		Spec: v1.PersistentVolumeSpec{
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					VolumeAttributes: map[string]string{
+						"subdir": "afscp/ns_demo/repos/repo_demo/payload",
+					},
+					NodePublishSecretRef: &v1.SecretReference{
+						Namespace: "afscp-mounts",
+						Name:      "juicefs-vol-demo",
+					},
+				},
+			},
+		},
+	}
+}
+
+func testBindingPVName(workspaceID, projectID, bindingID string) string {
+	return strings.Replace(workspacebinding.PVCName(workspaceID, projectID, bindingID), "juicefs-pvc-", "juicefs-pv-", 1)
+}
+
+func writeTestBindingPVCIfRequested(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) bool {
+	return writeTestBindingResourceIfRequested(w, r, nil, nil, workspaceID, projectID, bindingID)
+}
+
+func writeTestBindingResourceIfRequested(w http.ResponseWriter, r *http.Request, pvc *v1.PersistentVolumeClaim, pv *v1.PersistentVolume, workspaceID, projectID, bindingID string) bool {
+	if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/persistentvolumeclaims/") {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/persistentvolumes/") {
+			w.Header().Set("Content-Type", "application/json")
+			if pv == nil {
+				pv = testBindingPV(workspaceID, projectID, bindingID)
+			}
+			_ = json.NewEncoder(w).Encode(pv)
+			return true
+		}
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if pvc == nil {
+		pvc = testBindingPVC(workspaceID, projectID, bindingID)
+	}
+	_ = json.NewEncoder(w).Encode(pvc)
+	return true
 }
 
 func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
@@ -467,6 +575,21 @@ func TestHandleCreatePod_MissingImage(t *testing.T) {
 	assert.Equal(t, "image is required", body["error"])
 }
 
+func TestHandleCreatePodRejectsFieldsOutsideContract(t *testing.T) {
+	h := &Handler{}
+	tests := []string{
+		`{"image":"img","workspace_binding_id":"wmb_demo","mount_path":"/home/task","sub_path":"agent-tasks/task","working_dir":"/home/task/workspace"}`,
+		`{"image":"img","workspace_binding_id":"wmb_demo","metadata_url":"postgres://raw","bucket":"raw"}`,
+	}
+
+	for _, payload := range tests {
+		req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleExec – validation
 // ---------------------------------------------------------------------------
@@ -676,7 +799,7 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	c := pod.Spec.Containers[0]
 	assert.Equal(t, "main", c.Name)
 	assert.Equal(t, "ubuntu:22.04", c.Image)
-	assert.Equal(t, "/workspace", c.WorkingDir)
+	assert.Equal(t, "/home/task-plan/workspace", c.WorkingDir)
 	assert.Nil(t, c.Command)
 
 	require.NotNil(t, c.SecurityContext)
@@ -690,34 +813,31 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	require.Len(t, c.VolumeMounts, 1)
 	vm := c.VolumeMounts[0]
 	assert.Equal(t, "workspace", vm.Name)
-	assert.Equal(t, "/workspace", vm.MountPath)
+	assert.Equal(t, "/home/task-plan", vm.MountPath)
 	assert.Empty(t, vm.SubPath)
+	assert.False(t, vm.ReadOnly)
 
 	require.Len(t, pod.Spec.Volumes, 1)
 	vol := pod.Spec.Volumes[0]
 	assert.Equal(t, "workspace", vol.Name)
 	require.NotNil(t, vol.PersistentVolumeClaim)
-	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"), vol.PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"), vol.PersistentVolumeClaim.ClaimName)
+	assert.False(t, vol.PersistentVolumeClaim.ReadOnly)
 }
 
-func TestBuildPod_SeparatedWorkloadPaths(t *testing.T) {
+func TestBuildPod_UsesAFSCPPlanPaths(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
-	taskHome := "/home/task-abc"
-	workspacePath := "/home/task-abc/workspace"
+	taskHome := "/home/task-plan"
+	workspacePath := "/home/task-plan/workspace"
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{
 			"API_KEY":        "secret123",
-			"HOME":           "/tmp/legacy-home",
-			"WORKSPACE_PATH": "/workspace/legacy",
+			"HOME":           "/tmp/caller-home",
+			"WORKSPACE_PATH": "/workspace/caller",
 		},
-		validCreateRequest(CreateRequest{
-			Image:      "ubuntu:22.04",
-			MountPath:  taskHome,
-			SubPath:    "agent-tasks/task-abc",
-			WorkingDir: workspacePath,
-		}),
+		validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -730,7 +850,8 @@ func TestBuildPod_SeparatedWorkloadPaths(t *testing.T) {
 	vm := c.VolumeMounts[0]
 	assert.Equal(t, "workspace", vm.Name)
 	assert.Equal(t, taskHome, vm.MountPath)
-	assert.Equal(t, "agent-tasks/task-abc", vm.SubPath)
+	assert.Empty(t, vm.SubPath)
+	assert.False(t, vm.ReadOnly)
 
 	envMap := make(map[string]string, len(c.Env))
 	for _, e := range c.Env {
@@ -745,18 +866,13 @@ func TestBuildPod_SeparatedWorkloadPaths(t *testing.T) {
 func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
-	taskHome := "/home/task-abc"
-	workspacePath := "/home/task-abc/workspace"
-	artifactsPath := "/home/task-abc/workspace/.artifacts"
+	taskHome := "/home/task-plan"
+	workspacePath := "/home/task-plan/workspace"
+	artifactsPath := "/home/task-plan/workspace/.artifacts"
 
 	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		validCreateRequest(CreateRequest{
-			Image:      "ubuntu:22.04",
-			MountPath:  taskHome,
-			SubPath:    "agent-tasks/task-abc",
-			WorkingDir: workspacePath,
-		}),
+		validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -784,7 +900,8 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	vm := init.VolumeMounts[0]
 	assert.Equal(t, "workspace", vm.Name)
 	assert.Equal(t, taskHome, vm.MountPath)
-	assert.Equal(t, "agent-tasks/task-abc", vm.SubPath)
+	assert.Empty(t, vm.SubPath)
+	assert.False(t, vm.ReadOnly)
 
 	require.NotNil(t, init.SecurityContext)
 	require.NotNil(t, init.SecurityContext.RunAsNonRoot)
@@ -799,6 +916,30 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	assert.Contains(t, init.SecurityContext.Capabilities.Drop, v1.Capability("ALL"))
 	require.NotNil(t, init.SecurityContext.SeccompProfile)
 	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, init.SecurityContext.SeccompProfile.Type)
+}
+
+func TestBuildPod_ReadOnlyAFSCPPlanDoesNotPrepareWritableDirs(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	req := validCreateRequest(CreateRequest{Image: "ubuntu:22.04"})
+	req.resolvedMount.ReadOnly = true
+
+	pod, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+		map[string]string{},
+		req,
+		now, now.Add(time.Hour),
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, pod.Spec.InitContainers, "read-only AFSCP mounts must not run init that writes or requires writable workspace paths")
+
+	require.Len(t, pod.Spec.Containers, 1)
+	require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
+	assert.True(t, pod.Spec.Containers[0].VolumeMounts[0].ReadOnly)
+
+	require.Len(t, pod.Spec.Volumes, 1)
+	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.True(t, pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly)
 }
 
 func TestBuildPod_CustomCommand(t *testing.T) {
@@ -891,9 +1032,9 @@ func TestBuildPod_EnvVars(t *testing.T) {
 	}
 
 	assert.Len(t, c.Env, 5)
-	assert.Equal(t, "/workspace", envMap["TASK_HOME"])
-	assert.Equal(t, "/workspace", envMap["HOME"])
-	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"])
+	assert.Equal(t, "/home/task-plan", envMap["TASK_HOME"])
+	assert.Equal(t, "/home/task-plan", envMap["HOME"])
+	assert.Equal(t, "/home/task-plan/workspace", envMap["WORKSPACE_PATH"])
 	assert.Equal(t, "secret123", envMap["API_KEY"])
 	assert.Equal(t, "postgres://localhost", envMap["DB_URL"])
 }
@@ -914,9 +1055,9 @@ func TestBuildPod_EmptyEnv(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	assert.Len(t, pod.Spec.Containers[0].Env, 3)
-	assert.Equal(t, "/workspace", envMap["TASK_HOME"])
-	assert.Equal(t, "/workspace", envMap["HOME"])
-	assert.Equal(t, "/workspace", envMap["WORKSPACE_PATH"])
+	assert.Equal(t, "/home/task-plan", envMap["TASK_HOME"])
+	assert.Equal(t, "/home/task-plan", envMap["HOME"])
+	assert.Equal(t, "/home/task-plan/workspace", envMap["WORKSPACE_PATH"])
 }
 
 func TestBuildPod_ResourceRequestsOnly(t *testing.T) {
@@ -1056,7 +1197,7 @@ func TestBuildPod_PVCName(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, pod.Spec.Volumes, 1)
-	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }
 
 func TestBuildPod_AnnotationTimestamps(t *testing.T) {
@@ -1074,8 +1215,12 @@ func TestBuildPod_AnnotationTimestamps(t *testing.T) {
 	a := pod.Annotations
 	assert.Equal(t, "2025-03-01T12:30:00Z", a["last_activity_at"])
 	assert.Equal(t, "2025-03-02T12:30:00Z", a["expires_at"])
-
-	assert.Equal(t, 5, len(a), "should have exactly 5 annotations (last_activity_at, expires_at, idleTimeoutSec, maxLifetimeSec, maxExpiresAt)")
+	assert.Equal(t, "ns_demo", a["mbos.io/afscp-namespace-id"])
+	assert.Equal(t, "wmb_demo", a["mbos.io/afscp-mount-binding-id"])
+	assert.Equal(t, "vol_demo", a["mbos.io/afscp-volume-id"])
+	assert.Equal(t, "afscp/ns_demo/repos/repo_demo/payload", a["mbos.io/payload-volume-subdir"])
+	assert.Equal(t, "/home/task-plan", a["mbos.io/mount-path"])
+	assert.Equal(t, "false", a["mbos.io/read-only"])
 }
 
 func TestParseResourceRequirements_Invalid(t *testing.T) {
@@ -1109,79 +1254,56 @@ func TestBuildPod_InvalidResourceReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "cpu_request")
 }
 
-func TestBuildPod_InvalidWorkloadPaths(t *testing.T) {
+func TestBuildPod_RequiresAFSCPPlan(t *testing.T) {
+	h := newTestHandler(t)
+	now := time.Now().UTC()
+
+	_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
+		map[string]string{},
+		CreateRequest{Image: "img", WorkspaceBindingID: "wmb_demo"},
+		now, now.Add(time.Hour),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AFSCP workload mount plan")
+}
+
+func TestBuildPod_InvalidAFSCPMountPath(t *testing.T) {
 	h := newTestHandler(t)
 	now := time.Now().UTC()
 
 	tests := []struct {
 		name    string
-		req     CreateRequest
+		path    string
 		wantErr string
 	}{
 		{
-			name: "mount path must be absolute",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "home/task-abc",
-				WorkingDir: "/home/task-abc/workspace",
-			}),
-			wantErr: "mount_path",
+			name:    "must be absolute",
+			path:    "home/task-abc",
+			wantErr: "AFSCP mount_path",
 		},
 		{
-			name: "mount path must use allowed prefix",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "/etc/task-abc",
-				WorkingDir: "/etc/task-abc/workspace",
-			}),
-			wantErr: "allowed prefix",
+			name:    "must be clean",
+			path:    "/home/task-abc/../other",
+			wantErr: "AFSCP mount_path",
 		},
 		{
-			name: "sub path rejects absolute paths",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "/home/task-abc",
-				SubPath:    "/agent-tasks/task-abc",
-				WorkingDir: "/home/task-abc/workspace",
-			}),
-			wantErr: "sub_path",
+			name:    "must not be root",
+			path:    "/",
+			wantErr: "AFSCP mount_path",
 		},
 		{
-			name: "sub path rejects traversal",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "/home/task-abc",
-				SubPath:    "agent-tasks/../task-abc",
-				WorkingDir: "/home/task-abc/workspace",
-			}),
-			wantErr: "traversal",
-		},
-		{
-			name: "working dir must be absolute",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "/home/task-abc",
-				SubPath:    "agent-tasks/task-abc",
-				WorkingDir: "workspace",
-			}),
-			wantErr: "working_dir",
-		},
-		{
-			name: "working dir must stay inside mount path",
-			req: validCreateRequest(CreateRequest{
-				Image:      "img",
-				MountPath:  "/home/task-abc",
-				SubPath:    "agent-tasks/task-abc",
-				WorkingDir: "/home/other/workspace",
-			}),
-			wantErr: "inside mount_path",
+			name:    "must not contain backslashes",
+			path:    "/home\\task",
+			wantErr: "AFSCP mount_path",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			req := validCreateRequest(CreateRequest{Image: "img"})
+			req.resolvedMount.MountPath = tt.path
 			_, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
-				map[string]string{}, tt.req, now, now.Add(time.Hour))
+				map[string]string{}, req, now, now.Add(time.Hour))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -1193,12 +1315,7 @@ func TestWorkloadPodSpecDrift_MissingWorkspaceInitContainer(t *testing.T) {
 	now := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
 	desired, err := h.buildPod("ws-1", "proj-1", "wl-1", "workload-wl-1",
 		map[string]string{},
-		validCreateRequest(CreateRequest{
-			Image:      "ubuntu:22.04",
-			MountPath:  "/home/task-abc",
-			SubPath:    "agent-tasks/task-abc",
-			WorkingDir: "/home/task-abc/workspace",
-		}),
+		validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}),
 		now, now.Add(time.Hour),
 	)
 	require.NoError(t, err)
@@ -1215,12 +1332,24 @@ func TestWorkloadPodSpecDrift_MissingWorkspaceInitContainer(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleCreatePod_UsesBindingPVC(t *testing.T) {
-	podSpec := make(chan string, 1)
+	type capturedMount struct {
+		claimName string
+		mountPath string
+		readOnly  bool
+	}
+	podSpec := make(chan capturedMount, 1)
 	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeTestBindingPVCIfRequested(w, r, "ws-abc", "proj-123", "wmb_demo") {
+			return
+		}
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pods") {
 			var pod v1.Pod
 			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Volumes) > 0 && pod.Spec.Volumes[0].PersistentVolumeClaim != nil {
-				podSpec <- pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
+				podSpec <- capturedMount{
+					claimName: pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName,
+					mountPath: pod.Spec.Containers[0].VolumeMounts[0].MountPath,
+					readOnly:  pod.Spec.Containers[0].VolumeMounts[0].ReadOnly && pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly,
+				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
@@ -1248,8 +1377,10 @@ func TestHandleCreatePod_UsesBindingPVC(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-abc", "proj-123", "wl-test")
 
 	select {
-	case claimName := <-podSpec:
-		assert.Equal(t, workspacebinding.PVCName("ws-abc", "proj-123", "flib-demo"), claimName)
+	case got := <-podSpec:
+		assert.Equal(t, workspacebinding.PVCName("ws-abc", "proj-123", "wmb_demo"), got.claimName)
+		assert.Equal(t, "/home/task-plan", got.mountPath)
+		assert.True(t, got.readOnly)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pod creation")
 	}
@@ -1389,9 +1520,7 @@ func TestCreateRequest_JSONDeserialization(t *testing.T) {
 		"image": "ubuntu:22.04",
 		"command": ["sh", "-c", "echo hi"],
 		"env": {"FOO": "bar", "BAZ": "qux"},
-		"mount_path": "/home/task-abc",
-		"sub_path": "agent-tasks/task-abc",
-		"working_dir": "/home/task-abc/workspace",
+		"workspace_binding_id": "wmb_demo",
 		"cpu_request": "250m",
 		"cpu_limit": "1",
 		"memory_request": "256Mi",
@@ -1406,9 +1535,7 @@ func TestCreateRequest_JSONDeserialization(t *testing.T) {
 	assert.Equal(t, "ubuntu:22.04", r.Image)
 	assert.Equal(t, []string{"sh", "-c", "echo hi"}, r.Command)
 	assert.Equal(t, map[string]string{"FOO": "bar", "BAZ": "qux"}, r.Env)
-	assert.Equal(t, "/home/task-abc", r.MountPath)
-	assert.Equal(t, "agent-tasks/task-abc", r.SubPath)
-	assert.Equal(t, "/home/task-abc/workspace", r.WorkingDir)
+	assert.Equal(t, "wmb_demo", r.WorkspaceBindingID)
 	assert.Equal(t, "250m", r.CPURequest)
 	assert.Equal(t, "1", r.CPULimit)
 	assert.Equal(t, "256Mi", r.MemoryRequest)

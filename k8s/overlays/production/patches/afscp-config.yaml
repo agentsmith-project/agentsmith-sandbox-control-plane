@@ -4,4 +4,4 @@ metadata:
   name: sandbox-config
   namespace: sandbox-system
 data:
-  runner-image-default: localhost:5001/sandbox-runner:1.0.0
+  afscp-internal-base-url: "http://afscp-api.agentsmith-system.svc.cluster.local:8080"

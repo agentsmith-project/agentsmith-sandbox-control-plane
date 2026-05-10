@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox/manager/internal/afscp"
 	"github.com/sandbox/manager/internal/k8s"
 	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
@@ -31,12 +33,130 @@ import (
 // podRegistry simulates the Kubernetes pod API surface used by the handler:
 // POST .../pods, GET .../pods/{name}, DELETE .../pods/{name}, PATCH .../pods/{name}.
 type podRegistry struct {
-	mu   sync.Mutex
-	pods map[string]*v1.Pod
+	mu         sync.Mutex
+	pods       map[string]*v1.Pod
+	events     *eventRecorder
+	bindingPVC *v1.PersistentVolumeClaim
+	bindingPV  *v1.PersistentVolume
 	// Optional: return 500 for GET/DELETE/PATCH for this pod name (for error-path tests).
 	forceGetErrorFor    string
 	forceDeleteErrorFor string
 	forcePatchErrorFor  string
+}
+
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *eventRecorder) append(event string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *eventRecorder) snapshot() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+type fakeMountLifecycleClient struct {
+	events                  *eventRecorder
+	planNamespaceID         string
+	planMountBindingID      string
+	planCorrelationID       string
+	plan                    afscp.OrchestratorMountPlan
+	planErr                 error
+	heartbeatNamespaceID    string
+	heartbeatMountBindingID string
+	heartbeatCorrelationID  string
+	heartbeatIdempotencyKey string
+	heartbeatErr            error
+	releaseNamespaceID      string
+	releaseMountBindingID   string
+	releaseCorrelationID    string
+	releaseIdempotencyKey   string
+	releaseErr              error
+	statusNamespaceID       string
+	statusMountBindingID    string
+	statusValue             string
+	statusReason            string
+	statusCorrelationID     string
+	statusIdempotencyKey    string
+	statusErr               error
+}
+
+func (f *fakeMountLifecycleClient) GetOrchestratorMountPlan(_ context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error) {
+	f.planNamespaceID = namespaceID
+	f.planMountBindingID = mountBindingID
+	f.planCorrelationID = correlationID
+	if f.planErr != nil {
+		return afscp.OrchestratorMountPlan{}, f.planErr
+	}
+	if f.plan.MountBindingID != "" {
+		return f.plan, nil
+	}
+	return validAFSCPMountPlan(mountBindingID), nil
+}
+
+func (f *fakeMountLifecycleClient) HeartbeatWorkloadMountBinding(_ context.Context, namespaceID, mountBindingID, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
+	f.heartbeatNamespaceID = namespaceID
+	f.heartbeatMountBindingID = mountBindingID
+	f.heartbeatCorrelationID = correlationID
+	f.heartbeatIdempotencyKey = idempotencyKey
+	if f.heartbeatErr != nil {
+		return afscp.OperationEnvelope{}, f.heartbeatErr
+	}
+	return afscp.OperationEnvelope{OperationID: "op_heartbeat", OperationState: "queued"}, nil
+}
+
+func (f *fakeMountLifecycleClient) ReleaseWorkloadMountBinding(_ context.Context, namespaceID, mountBindingID, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
+	f.events.append("release")
+	f.releaseNamespaceID = namespaceID
+	f.releaseMountBindingID = mountBindingID
+	f.releaseCorrelationID = correlationID
+	f.releaseIdempotencyKey = idempotencyKey
+	if f.releaseErr != nil {
+		return afscp.OperationEnvelope{}, f.releaseErr
+	}
+	return afscp.OperationEnvelope{OperationID: "op_release", OperationState: "queued"}, nil
+}
+
+func (f *fakeMountLifecycleClient) UpdateWorkloadMountStatus(_ context.Context, namespaceID, mountBindingID, status, reason string, _ time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
+	f.events.append("status-" + status)
+	f.statusNamespaceID = namespaceID
+	f.statusMountBindingID = mountBindingID
+	f.statusValue = status
+	f.statusReason = reason
+	f.statusCorrelationID = correlationID
+	f.statusIdempotencyKey = idempotencyKey
+	if f.statusErr != nil {
+		return afscp.OperationEnvelope{}, f.statusErr
+	}
+	return afscp.OperationEnvelope{OperationID: "op_status", OperationState: "queued"}, nil
+}
+
+func validAFSCPMountPlan(bindingID string) afscp.OrchestratorMountPlan {
+	return afscp.OrchestratorMountPlan{
+		MountBindingID:      bindingID,
+		VolumeID:            "vol_demo",
+		PayloadVolumeSubdir: "afscp/ns_demo/repos/repo_demo/payload",
+		MountPath:           "/home/task-plan",
+		ReadOnly:            true,
+		SecretRef:           afscp.SecretRef{Namespace: "afscp-mounts", Name: "juicefs-vol-demo"},
+		SecurityPolicy: afscp.SecurityPolicy{
+			RunAsNonRoot:             true,
+			AllowPrivileged:          false,
+			JVSControlOutsidePayload: true,
+		},
+	}
 }
 
 func newPodRegistry(initial ...*v1.Pod) *podRegistry {
@@ -61,6 +181,10 @@ func (r *podRegistry) makeServer(t *testing.T) *httptest.Server {
 func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := req.URL.Path
+
+	if writeTestBindingResourceIfRequested(w, req, r.bindingPVC, r.bindingPV, "ws-1", "proj-1", "wmb_demo") {
+		return
+	}
 
 	// POST .../pods – create
 	if req.Method == http.MethodPost && strings.HasSuffix(path, "/pods") {
@@ -132,6 +256,7 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:
 		if pod == nil {
+			r.events.append("confirm-pod-gone")
 			r.writeNotFound(w)
 			return
 		}
@@ -142,6 +267,7 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			r.writeNotFound(w)
 			return
 		}
+		r.events.append("delete-pod")
 		r.mu.Lock()
 		delete(r.pods, name)
 		r.mu.Unlock()
@@ -194,9 +320,34 @@ func newHandlerWithRegistry(t *testing.T, reg *podRegistry) *Handler {
 	return NewHandler(client, executor)
 }
 
+func newHandlerWithRegistryAndOptions(t *testing.T, reg *podRegistry, options Options) *Handler {
+	t.Helper()
+	srv := reg.makeServer(t)
+	client := newTestK8sClient(t, srv.URL)
+	executor := k8s.NewExecutor(client)
+	return NewHandler(client, executor, options)
+}
+
 func validCreateRequestK8s(req CreateRequest) CreateRequest {
-	req.WorkspaceBindingID = "flib-demo"
+	req.WorkspaceBindingID = "wmb_demo"
 	return req
+}
+
+func workloadPodWithMountAnnotations(name string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"workload/idleTimeoutSec":        "1800",
+				"workload/maxLifetimeSec":        "86400",
+				"workload/maxExpiresAt":          time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+				"mbos.io/afscp-namespace-id":     "ns_demo",
+				"mbos.io/afscp-mount-binding-id": "wmb_demo",
+			},
+		},
+		Status: v1.PodStatus{Phase: v1.PodRunning},
+	}
 }
 
 // shortCtx returns a context that expires quickly so that WaitForPodReady
@@ -258,6 +409,9 @@ func TestHandleCreatePod_CustomCommandInPodSpec(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeTestBindingPVCIfRequested(w, r, "ws-1", "proj-1", "wmb_demo") {
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pods") {
 			var pod v1.Pod
 			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Containers) > 0 {
@@ -298,6 +452,9 @@ func TestHandleCreatePod_RuntimeEnvAlwaysInjected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if writeTestBindingPVCIfRequested(w, r, "ws-1", "proj-1", "wmb_demo") {
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pods") {
 			var pod v1.Pod
 			if err := json.NewDecoder(r.Body).Decode(&pod); err == nil && len(pod.Spec.Containers) > 0 {
@@ -323,13 +480,10 @@ func TestHandleCreatePod_RuntimeEnvAlwaysInjected(t *testing.T) {
 	h := NewHandler(client, executor)
 
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
-		Image:      "ubuntu:22.04",
-		MountPath:  "/home/task-abc",
-		SubPath:    "agent-tasks/task-abc",
-		WorkingDir: "/home/task-abc/workspace",
+		Image: "ubuntu:22.04",
 		Env: map[string]string{
-			"HOME":           "/tmp/legacy-home",
-			"WORKSPACE_PATH": "/workspace/legacy",
+			"HOME":           "/tmp/caller-home",
+			"WORKSPACE_PATH": "/workspace/caller",
 			"MY_VAR":         "hello",
 		},
 	}))
@@ -344,13 +498,116 @@ func TestHandleCreatePod_RuntimeEnvAlwaysInjected(t *testing.T) {
 		for _, e := range envVars {
 			envMap[e.Name] = e.Value
 		}
-		assert.Equal(t, "/home/task-abc", envMap["TASK_HOME"], "TASK_HOME must always be injected")
-		assert.Equal(t, "/home/task-abc", envMap["HOME"], "HOME must match TASK_HOME")
-		assert.Equal(t, "/home/task-abc/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must match working_dir")
+		assert.Equal(t, "/home/task-plan", envMap["TASK_HOME"], "TASK_HOME must always come from AFSCP plan")
+		assert.Equal(t, "/home/task-plan", envMap["HOME"], "HOME must match TASK_HOME")
+		assert.Equal(t, "/home/task-plan/workspace", envMap["WORKSPACE_PATH"], "WORKSPACE_PATH must derive from AFSCP mount_path")
 		assert.Equal(t, "hello", envMap["MY_VAR"], "user-provided env must be present")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pod creation")
 	}
+}
+
+func TestHandleCreatePod_VerifiesBindingStillActiveBeforeCreate(t *testing.T) {
+	lifecycle := &fakeMountLifecycleClient{}
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(), Options{AFSCPClient: lifecycle})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	req.Header.Set("X-Correlation-Id", "corr-create")
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, "ns_demo", lifecycle.planNamespaceID)
+	assert.Equal(t, "wmb_demo", lifecycle.planMountBindingID)
+	assert.Equal(t, "corr-create", lifecycle.planCorrelationID)
+}
+
+func TestHandleCreatePod_RejectsStaleBindingBeforeCreate(t *testing.T) {
+	reg := newPodRegistry()
+	stalePlan := validAFSCPMountPlan("wmb_demo")
+	stalePlan.VolumeID = "vol_changed"
+	lifecycle := &fakeMountLifecycleClient{plan: stalePlan}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "workspace binding is stale")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "stale AFSCP plan must fail before pod creation")
+}
+
+func TestHandleCreatePod_RejectsAFSCPSecretRefDriftBeforeCreate(t *testing.T) {
+	reg := newPodRegistry()
+	stalePlan := validAFSCPMountPlan("wmb_demo")
+	stalePlan.SecretRef = afscp.SecretRef{Namespace: "afscp-mounts", Name: "juicefs-rotated"}
+	lifecycle := &fakeMountLifecycleClient{plan: stalePlan}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "workspace binding is stale")
+	assert.Contains(t, rec.Body.String(), "secret_ref")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "secret_ref drift must fail before pod creation")
+}
+
+func TestHandleCreatePod_RejectsPVPlanDriftBeforeCreate(t *testing.T) {
+	currentPlan := validAFSCPMountPlan("wmb_demo")
+	currentPlan.PayloadVolumeSubdir = "afscp/ns_demo/repos/repo_current/payload"
+	pvc := testBindingPVC("ws-1", "proj-1", "wmb_demo")
+	pvc.Annotations["mbos.io/payload-volume-subdir"] = currentPlan.PayloadVolumeSubdir
+	pv := testBindingPV("ws-1", "proj-1", "wmb_demo")
+	pv.Spec.CSI.VolumeAttributes["subdir"] = "afscp/ns_demo/repos/repo_old/payload"
+
+	reg := newPodRegistry()
+	reg.bindingPVC = pvc
+	reg.bindingPV = pv
+	lifecycle := &fakeMountLifecycleClient{plan: currentPlan}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "persistent volume")
+	assert.Contains(t, rec.Body.String(), "payload_volume_subdir")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "PV/plan drift must fail before pod creation")
+}
+
+func TestHandleCreatePod_FailsClosedWhenBindingActiveCheckUnavailable(t *testing.T) {
+	reg := newPodRegistry()
+	lifecycle := &fakeMountLifecycleClient{planErr: errors.New("afscp unavailable")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "workspace binding active check failed")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "AFSCP active check failures must fail closed before pod creation")
 }
 
 // ---------------------------------------------------------------------------
@@ -364,31 +621,17 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 			CreationTimestamp: metav1.Now(),
 		},
 		Spec: v1.PodSpec{
-			InitContainers: []v1.Container{
-				{
-					Name:       "workspace-init",
-					WorkingDir: "/workspace",
-					Env: []v1.EnvVar{
-						{Name: "ARTIFACTS_PATH", Value: "/workspace/.artifacts"},
-						{Name: "TASK_HOME", Value: "/workspace"},
-						{Name: "WORKSPACE_PATH", Value: "/workspace"},
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{Name: "workspace", MountPath: "/workspace"},
-					},
-				},
-			},
 			Containers: []v1.Container{
 				{
 					Name:       "main",
-					WorkingDir: "/workspace",
+					WorkingDir: "/home/task-plan/workspace",
 					Env: []v1.EnvVar{
-						{Name: "TASK_HOME", Value: "/workspace"},
-						{Name: "HOME", Value: "/workspace"},
-						{Name: "WORKSPACE_PATH", Value: "/workspace"},
+						{Name: "TASK_HOME", Value: "/home/task-plan"},
+						{Name: "HOME", Value: "/home/task-plan"},
+						{Name: "WORKSPACE_PATH", Value: "/home/task-plan/workspace"},
 					},
 					VolumeMounts: []v1.VolumeMount{
-						{Name: "workspace", MountPath: "/workspace"},
+						{Name: "workspace", MountPath: "/home/task-plan", ReadOnly: true},
 					},
 				},
 			},
@@ -397,7 +640,8 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 					Name: "workspace",
 					VolumeSource: v1.VolumeSource{
 						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"),
+							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
+							ReadOnly:  true,
 						},
 					},
 				},
@@ -447,7 +691,7 @@ func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
 					Name: "workspace",
 					VolumeSource: v1.VolumeSource{
 						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "flib-demo"),
+							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
 						},
 					},
 				},
@@ -457,12 +701,7 @@ func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
 	}
 	h := newHandlerWithRegistry(t, newPodRegistry(existing))
 
-	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
-		Image:      "ubuntu:22.04",
-		MountPath:  "/home/task-abc",
-		SubPath:    "agent-tasks/task-abc",
-		WorkingDir: "/home/task-abc/workspace",
-	}))
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -614,6 +853,70 @@ func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
 	assert.Equal(t, "pod deleted", got.Message)
 }
 
+func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
+	events := &eventRecorder{}
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg.events = events
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ns_demo", lifecycle.releaseNamespaceID)
+	assert.Equal(t, "wmb_demo", lifecycle.releaseMountBindingID)
+	assert.Equal(t, "corr-delete", lifecycle.releaseCorrelationID)
+	assert.Contains(t, lifecycle.releaseIdempotencyKey, "release")
+	assert.Equal(t, "ns_demo", lifecycle.statusNamespaceID)
+	assert.Equal(t, "wmb_demo", lifecycle.statusMountBindingID)
+	assert.Equal(t, "released", lifecycle.statusValue)
+	assert.Equal(t, "workload pod deleted", lifecycle.statusReason)
+	assert.Equal(t, "corr-delete", lifecycle.statusCorrelationID)
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+}
+
+func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "release failed")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods["workload-wl-1"], "pod annotations must remain available so DELETE can retry AFSCP release")
+}
+
+func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
+	events := &eventRecorder{}
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "status failed")
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Nil(t, reg.pods["workload-wl-1"], "released status must only be attempted after the pod is gone")
+}
+
 func TestHandleDeletePod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"}})
 	reg.setForceGetErrorFor("workload-wl-1")
@@ -637,6 +940,29 @@ func TestHandleDeletePod_DeletePodFails_Returns500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "pod deletion failed")
+}
+
+func TestHandleDeletePod_DeletePodFailsDoesNotPatchReleasedAndKeepsPodForRetry(t *testing.T) {
+	events := &eventRecorder{}
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg.events = events
+	reg.setForceDeleteErrorFor("workload-wl-1")
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "pod deletion failed")
+	assert.Equal(t, []string{"release"}, events.snapshot())
+	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when pod deletion fails")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods["workload-wl-1"], "failed pod deletion must leave pod available for retry")
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +1028,22 @@ func TestHandleKeepalive_ReturnsExpiresAt(t *testing.T) {
 	// With default idle timeout (30 min), expires_at ≈ now + 30min.
 	expected := time.Now().UTC().Add(DefaultIdleTimeout)
 	assert.WithinDuration(t, expected, expiresAt, 10*time.Second)
+}
+
+func TestHandleKeepaliveHeartbeatsAFSCPMount(t *testing.T) {
+	lifecycle := &fakeMountLifecycleClient{}
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-heartbeat")
+	rec := httptest.NewRecorder()
+	h.handleKeepalive(rec, req, "wl-1")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ns_demo", lifecycle.heartbeatNamespaceID)
+	assert.Equal(t, "wmb_demo", lifecycle.heartbeatMountBindingID)
+	assert.Equal(t, "corr-heartbeat", lifecycle.heartbeatCorrelationID)
+	assert.Contains(t, lifecycle.heartbeatIdempotencyKey, "heartbeat")
 }
 
 func TestHandleKeepalive_UsesCustomIdleTimeoutFromAnnotation(t *testing.T) {

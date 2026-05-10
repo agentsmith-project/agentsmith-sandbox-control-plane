@@ -10,21 +10,20 @@ resources:
   - resource-quota.yaml
   - configmap.yaml
   - manager-configmap.yaml
-  - minio-secret.yaml
-  - juicefs-pvc.yaml
   - rbac-manager.yaml
   - workload-rbac.yaml
   - manager-deployment.yaml
   - manager-service.yaml
-  - network-policy.yaml
   - workload-networkpolicy.yaml
-  - cleaner-cronjob-sandbox.yaml
 
-# 通用标签
-commonLabels:
-  app.kubernetes.io/name: sandbox
-  app.kubernetes.io/component: sandbox-system
-  app.kubernetes.io/managed-by: kustomize
+# 通用标签。不要写入 selectors：workload pods 由 manager 动态创建，
+# selector 必须只匹配 runtime 真实写入的 label。
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: sandbox
+      app.kubernetes.io/component: sandbox-system
+      app.kubernetes.io/managed-by: kustomize
 
 # 镜像替换（在 overlays 中覆盖）
 # Base 中只定义镜像名称，不包含 registry，由 overlays 指定完整路径

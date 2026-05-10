@@ -53,27 +53,6 @@ deploy_to_environment() {
     return 0
 }
 
-# Clean up old pods
-cleanup_old_pods() {
-    local namespace="${1:-sandbox}"
-    local label_selector="${2:-}"
-    
-    log_info "清理旧的 pods (namespace: $namespace)"
-    
-    local delete_cmd="kubectl delete pods -n $namespace"
-    if [ -n "$label_selector" ]; then
-        delete_cmd="$delete_cmd -l $label_selector"
-    else
-        delete_cmd="$delete_cmd --all"
-    fi
-    
-    $delete_cmd --force --grace-period=0 2>&1 | grep -v "Warning" || {
-        log_info "没有 pod 需要删除"
-    }
-    
-    log_success "清理完成"
-}
-
 # Clean up old images in kind cluster
 cleanup_kind_images() {
     local cluster_name="${1:-sandbox-cluster}"

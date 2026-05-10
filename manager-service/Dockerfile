@@ -22,10 +22,7 @@ COPY . .
 RUN VERSION="$(cat VERSION 2>/dev/null || echo dev)" && \
     CGO_ENABLED=0 GOOS=linux go build \
       -ldflags "-X github.com/sandbox/manager/internal/app.version=${VERSION}" \
-      -o manager ./cmd/manager && \
-    CGO_ENABLED=0 GOOS=linux go build \
-      -ldflags "-X github.com/sandbox/manager/internal/app.version=${VERSION}" \
-      -o cleaner ./cmd/cleaner
+      -o manager ./cmd/manager
 
 FROM ${RUNTIME_BASE_IMAGE}
 
@@ -51,10 +48,6 @@ RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy main restricted
 
 WORKDIR /app
 COPY --from=builder /build/manager .
-COPY --from=builder /build/cleaner .
-
-# Create symlink for cleaner binary at root for CronJob usage
-RUN ln -s /app/cleaner /cleaner
 
 # 创建非 root 用户（数字 UID）
 RUN groupadd -g 10001 manager && useradd -u 10001 -g 10001 -s /bin/false manager && \

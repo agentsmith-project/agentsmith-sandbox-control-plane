@@ -1,6 +1,10 @@
 package workload
 
-import "time"
+import (
+	"time"
+
+	"github.com/sandbox/manager/internal/workspacebinding"
+)
 
 // CreateRequest is the request body for PUT /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}.
 // workspace_id and project_id come from URL path, not from body.
@@ -15,9 +19,8 @@ type CreateRequest struct {
 	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
 	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
 	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
-	MountPath          string            `json:"mount_path,omitempty"`
-	SubPath            string            `json:"sub_path,omitempty"`
-	WorkingDir         string            `json:"working_dir,omitempty"`
+
+	resolvedMount *workspacebinding.ResolvedMount
 }
 
 // ExecRequest is the request body for POST .../exec.
@@ -51,7 +54,7 @@ type DeleteResponse struct {
 }
 
 // KeepaliveResponse is the response for POST .../keepalive.
-// Client must send keepalive periodically; if no keepalive for idle_timeout_sec, the pod is reclaimed by the cleaner.
+// Client must send keepalive periodically; expired workloads must be released through the manager delete API.
 type KeepaliveResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }

@@ -1,4 +1,6 @@
 # Sandbox Manager Documentation
 
-- [API Reference (v2)](api-reference-v2.md) — REST API endpoints and schemas
-- [AgentSmith Integration Contract (v2)](contracts/agentsmith-integration-contract-v2.md) — Integration protocol
+- [API Reference](api-reference.md) - REST API endpoints and schemas
+- [AgentSmith Integration Contract](contracts/agentsmith-integration-contract.md) - Integration protocol
+- [AFSCP Workload Mount Model](AFSCP_WORKLOAD_MOUNT_MODEL.md) - Current workload mount boundary
+- [Runbook](runbook.md) - Operational checks

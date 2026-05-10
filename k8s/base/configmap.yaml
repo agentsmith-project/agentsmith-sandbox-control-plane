@@ -4,13 +4,11 @@ metadata:
   name: sandbox-config
   namespace: sandbox-system
 data:
-  sandbox-namespace: "sandbox"
-  # Runner 镜像（只包含镜像名称和默认版本，由 overlay 覆盖为完整路径）
-  runner-image-default: "sandbox-runner:1.0.0"
-  ttl-seconds-default: "900"
-  pod-cpu-limit-default: "1"
-  pod-mem-limit-default: "1Gi"
-  pod-ephemeral-limit-default: "2Gi"
-  # GC 配置
-  gc-schedule: "*/1 * * * *"
-  gc-skew-seconds: "5"
+  workload-namespace: "sandbox-workloads"
+  afscp-internal-base-url: "http://afscp-api.agentsmith-system.svc.cluster.local:8080"
+  afscp-caller-service: "sandbox-orchestrator"
+  afscp-actor-type: "system"
+  afscp-actor-id: "sandbox-manager"
+  juicefs-csi-driver: "csi.juicefs.com"
+  juicefs-storage-capacity: "1Pi"
+  juicefs-storage-class-name: ""

@@ -10,8 +10,6 @@ images:
   newName: sandbox-runner
   newTag: 1.0.0
 patches:
+- path: patches/afscp-config.yaml
 - path: patches/manager-replicas.yaml
 - path: patches/resource-limits.yaml
-- path: patches/configmap-ttl.yaml
-- path: patches/configmap-runner-image-full.yaml
-- path: patches/configmap-runner-image.yaml

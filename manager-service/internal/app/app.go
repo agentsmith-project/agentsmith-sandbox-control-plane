@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sandbox/manager/internal/afscp"
 	"github.com/sandbox/manager/internal/auth"
 	"github.com/sandbox/manager/internal/config"
 	"github.com/sandbox/manager/internal/k8s"
@@ -97,25 +98,31 @@ func mainImpl() {
 	}
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
+	afscpClient, err := afscp.NewClient(afscp.ClientConfig{
+		BaseURL:       os.Getenv("AFSCP_INTERNAL_BASE_URL"),
+		Token:         os.Getenv("AFSCP_ORCHESTRATOR_TOKEN"),
+		CallerService: getEnvOrDefault("AFSCP_CALLER_SERVICE", "sandbox-orchestrator"),
+		ActorType:     getEnvOrDefault("AFSCP_ACTOR_TYPE", "system"),
+		ActorID:       getEnvOrDefault("AFSCP_ACTOR_ID", "sandbox-manager"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize AFSCP client: %v", err)
+	}
+
 	workloadOptions := workload.Options{
 		DefaultNodeSelector: mustParseStringMapEnv("WORKLOAD_NODE_SELECTOR_JSON"),
 		DefaultTolerations:  mustParseTolerationsEnv("WORKLOAD_TOLERATIONS_JSON"),
+		AFSCPClient:         afscpClient,
 	}
 	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, workloadOptions)
 	workspaceBindingHandler := workspacebinding.NewHandler(k8sClient, workspacebinding.Options{
-		Namespace:           k8sNamespace,
-		CSIDriver:           getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
-		StorageCapacity:     getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
-		StorageClassName:    os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
-		MountOptions:        parseMountOptions(os.Getenv("JUICEFS_MOUNT_OPTIONS")),
-		Subdir:              os.Getenv("JUICEFS_SUBDIR"),
-		MountServiceAccount: os.Getenv("JUICEFS_MOUNT_SERVICE_ACCOUNT"),
-		MountImage:          os.Getenv("JUICEFS_MOUNT_IMAGE"),
-		StorageEndpoint:     getEnvOrDefault("JUICEFS_STORAGE_ENDPOINT", "http://localhost:19000"),
-		StorageAccessKey:    os.Getenv("JUICEFS_STORAGE_ACCESS_KEY"),
-		StorageSecretKey:    os.Getenv("JUICEFS_STORAGE_SECRET_KEY"),
+		Namespace:        k8sNamespace,
+		CSIDriver:        getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
+		StorageCapacity:  getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
+		StorageClassName: os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
+		AFSCPClient:      afscpClient,
 	})
-	log.Printf("Workload handler initialized with workspace binding model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
+	log.Printf("Workload handler initialized with AFSCP workload mount plan model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
 
 	rateLimitCfg := ratelimit.ConfigFromRequestsPerMinute(cfg.RateLimit.RequestsPerMinute)
 	rateLimiter := ratelimit.NewLimiter(rateLimitCfg)
@@ -297,20 +304,4 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return v
 	}
 	return defaultValue
-}
-
-func parseMountOptions(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == '\n'
-	})
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if trimmed := strings.TrimSpace(part); trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
 }

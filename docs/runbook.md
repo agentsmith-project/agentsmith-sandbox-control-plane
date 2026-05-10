@@ -3,8 +3,8 @@
 This runbook covers the current production path only:
 
 - workspace bindings backed by JuiceFS CSI
-- workload pods mounted with task HOME subPath semantics
-- keepalive-driven workload reclaim
+- workload pods mounted from AFSCP workload mount plans
+- keepalive-driven AFSCP heartbeat and workload reclaim
 
 ## Health and readiness
 
@@ -18,13 +18,13 @@ This runbook covers the current production path only:
 
 ```bash
 curl -s -X PUT \
-  http://localhost:8080/v1/workspaces/ws_001/projects/proj_001/workspace-bindings/flib_demo \
+  http://localhost:8080/v1/workspaces/ws_001/projects/proj_001/workspace-bindings/wmb_demo \
   -H "X-Service-Key: $SERVICE_KEY" \
+  -H "X-Correlation-Id: corr-runbook" \
   -H "Content-Type: application/json" \
   -d '{
-    "file_library_id": "flib_demo",
-    "filesystem_name": "agentsmith-workspace",
-    "metadata_url": "postgres://postgres:postgres@db:5432/juicefs?sslmode=disable"
+    "namespace_id": "ns_demo",
+    "mount_binding_id": "wmb_demo"
   }' | jq .
 ```
 
@@ -32,6 +32,7 @@ Check:
 
 - binding returns `status=ready`
 - `pvc_name` is present
+- response omits `secret_ref` and `payload_volume_subdir`
 - binding can be fetched again with `GET`
 
 ### 2. Verify workload mount
@@ -39,9 +40,10 @@ Check:
 Create a workload with `workspace_binding_id`, then check:
 
 - pod reaches `Running`
-- pod mounts `sub_path=agent-tasks/<task_home_segment>` at `mount_path=/home/<task_home_segment>`
-- container `workingDir` is `/home/<task_home_segment>/workspace`
-- env includes `TASK_HOME=/home/<task_home_segment>`, `HOME=/home/<task_home_segment>`, `WORKSPACE_PATH=/home/<task_home_segment>/workspace`
+- pod mounts the binding PVC at AFSCP plan `mount_path`
+- container `workingDir` is `<mount_path>/workspace`
+- env includes `TASK_HOME=<mount_path>`, `HOME=<mount_path>`, `WORKSPACE_PATH=<mount_path>/workspace`
+- keepalive produces an AFSCP heartbeat
 - pod can write and read under `$WORKSPACE_PATH`
 
 ### 3. Verify reclaim behavior
@@ -51,22 +53,18 @@ Create a workload with `workspace_binding_id`, then check:
 - recreate the workload with the same `workspace_binding_id`
 - confirm files under the same task `WORKSPACE_PATH` are still present
 
-## Cleaner
+## Reclaim
 
-The cleaner only deletes expired workload pods. It must not delete workspace bindings.
-
-Useful checks:
-
-```bash
-kubectl -n sandbox-system get cronjob sandbox-cleaner
-kubectl -n sandbox-system logs -l app=sandbox-cleaner --tail=100
-```
+Active Kubernetes deployment has no separate pod-deleting reclaim path. Reclaim
+must go through the manager workload delete path so AFSCP release runs before
+pod deletion and terminal `released` status is written only after the pod is
+confirmed gone.
 
 If pods are not reclaimed:
 
 1. Check `expires_at`
 2. Check keepalive traffic
-3. Check cleaner namespace and `--dry-run`
+3. Call `DELETE /workloads/{wlId}` through the manager
 4. Check RBAC and namespace wiring
 
 ## Release checks
@@ -74,8 +72,8 @@ If pods are not reclaimed:
 Before release:
 
 1. `git status` clean
-2. manager and cleaner tests pass
+2. manager tests pass
 3. workspace binding ensure/get/delete works
 4. workload create/get/delete/keepalive/exec works
-5. deleting a workload does not delete workspace contents
-6. docs and API reference match the current binding + JuiceFS CSI model
+5. deleting a workload calls AFSCP release, removes the pod, then reports `released`
+6. docs and API reference match the current AFSCP plan consumer model

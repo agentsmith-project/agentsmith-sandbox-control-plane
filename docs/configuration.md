@@ -37,29 +37,24 @@ Schema version: `version: 1`
 | `SERVICE_KEYS` | *(required)* | Comma-separated valid `X-Service-Key` values |
 | `K8S_NAMESPACE` | `sandbox-workloads` | Namespace for bindings and workloads |
 | `KUBECONFIG` | *(auto)* | Kubeconfig path when running out of cluster |
+| `AFSCP_INTERNAL_BASE_URL` | *(required)* | AFSCP internal API base URL |
+| `AFSCP_ORCHESTRATOR_TOKEN` | *(required)* | Sandbox orchestrator service token for AFSCP |
+| `AFSCP_CALLER_SERVICE` | `sandbox-orchestrator` | Caller service header sent to AFSCP |
+| `AFSCP_ACTOR_TYPE` | `system` | Actor type for mutating AFSCP lifecycle calls |
+| `AFSCP_ACTOR_ID` | `sandbox-manager` | Actor id for mutating AFSCP lifecycle calls |
 | `JUICEFS_CSI_DRIVER` | `csi.juicefs.com` | JuiceFS CSI driver name |
 | `JUICEFS_STORAGE_CAPACITY` | `1Pi` | Default binding PVC capacity |
 | `JUICEFS_STORAGE_CLASS_NAME` | *(unset)* | Optional binding storage class |
-| `JUICEFS_MOUNT_OPTIONS` | *(unset)* | Comma-separated mount options |
-| `JUICEFS_SUBDIR` | *(unset)* | Optional CSI subdir prefix |
-| `JUICEFS_MOUNT_SERVICE_ACCOUNT` | *(unset)* | Optional mount pod service account |
-| `JUICEFS_MOUNT_IMAGE` | *(unset)* | Optional mount pod image override |
-| `JUICEFS_STORAGE_ENDPOINT` | `http://localhost:19000` | Object storage endpoint written into JuiceFS secrets |
-| `JUICEFS_STORAGE_CREDENTIAL_SEED` | `sandbox-juicefs-credential-seed` | Deterministic secret seed |
 | `DEBUG` | `false` | Verbose logs |
 | `LOG_LEVEL` | *(unset)* | When set to `debug`, enables verbose structured logs |
 
-## Cleaner
+Kubernetes overlays set `AFSCP_INTERNAL_BASE_URL` to the AFSCP internal API
+service, for example `http://afscp-api.agentsmith-system.svc.cluster.local:8080`.
+Do not point sandbox at the AgentSmith API service for AFSCP lifecycle calls.
 
-The cleaner binary is configured by command-line flags and environment variables, not by the manager YAML.
+## Reclaim
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--namespace` | `default` | Namespace to scan for expired workload pods |
-| `--dry-run` | `true` | Log-only when true |
-| `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
-
-The cleaner only deletes expired workload pods. It does not delete workspace bindings or JuiceFS data.
+Expired workload reclaim must enter through the manager workload delete API. That path owns AFSCP release before pod deletion and writes `released` only after the pod is confirmed gone.
 
 ## Example YAML
 

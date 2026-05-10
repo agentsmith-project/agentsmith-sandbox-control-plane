@@ -6,22 +6,19 @@
 //
 //	kubectl-accessible Kubernetes cluster (kind or real)
 //	Manager binary built at ../bin/manager  (run `make build` first)
-//	Cleaner binary built at ../bin/cleaner
 //
 // Environment variables (all optional, see defaults below):
 //
 //	E2E_MANAGER_URL        URL of a pre-running manager (skip auto-start if set)
 //	E2E_MANAGER_BIN        Path to manager binary             (default: ../bin/manager)
-//	E2E_CLEANER_BIN        Path to cleaner binary             (default: ../bin/cleaner)
 //	E2E_SERVICE_KEY        Service key for auth               (default: e2e-test-key)
 //	E2E_NAMESPACE          Workload K8s namespace             (default: sandbox-workloads)
-//	E2E_METADATA_URL       JuiceFS metadata URL               (default: postgres://postgres:postgres@localhost:5432/juicefs?sslmode=disable)
-//	E2E_STORAGE_ENDPOINT   Object storage endpoint            (default: http://localhost:9000)
-//	E2E_FILESYSTEM_NAME    JuiceFS filesystem name            (default: agentsmith-workspace)
+//	E2E_AFSCP_INTERNAL_BASE_URL AFSCP test double or real internal API base URL
+//	E2E_AFSCP_ORCHESTRATOR_TOKEN Sandbox orchestrator token   (default: e2e-afscp-token)
+//	E2E_AFSCP_NAMESPACE_ID AFSCP namespace id                 (default: ns_e2e)
+//	E2E_AFSCP_SECRET_NAMESPACE K8s namespace for plan secret refs (default: afscp-mounts)
 //	E2E_STORAGE_CAPACITY   Binding storage capacity           (default: 1Pi)
 //	E2E_STORAGE_CLASS      Binding storage class              (default: "")
-//	E2E_MOUNT_OPTIONS      Comma-separated mount options      (default: "")
-//	E2E_SUBDIR             Binding subdir prefix              (default: "")
 //	E2E_IMAGE              Container image for workloads      (default: ubuntu:22.04)
 //	E2E_JUICEFS            "true" → enable file-persistence tests that require JuiceFS
 //	E2E_MANAGER_PORT       TCP port when auto-starting manager (default: 18080)
@@ -43,6 +40,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,20 +71,19 @@ type SuiteConfig struct {
 	ManagerURL       string
 	ServiceKey       string
 	Namespace        string
-	MetadataURL      string
-	StorageEndpoint  string
-	FilesystemName   string
+	AFSCPBaseURL     string
+	AFSCPToken       string
+	AFSCPNamespaceID string
+	AFSCPSecretNS    string
 	StorageCapacity  string
 	StorageClassName string
-	MountOptions     []string
-	Subdir           string
 	Image            string
-	CleanerBin       string
 	ManagerBin       string
 	JuiceFSEnabled   bool // true → file-persistence tests are enabled
 
 	managerCmd *exec.Cmd // non-nil when we started the manager
 	managerLog *os.File
+	afscpSrv   *httptest.Server
 }
 
 // ---------------------------------------------------------------------------
@@ -98,15 +95,13 @@ func TestMain(m *testing.M) {
 		ManagerURL:       envOr("E2E_MANAGER_URL", ""),
 		ServiceKey:       envOr("E2E_SERVICE_KEY", "e2e-test-key"),
 		Namespace:        envOr("E2E_NAMESPACE", "sandbox-workloads"),
-		MetadataURL:      envOr("E2E_METADATA_URL", "postgres://postgres:postgres@localhost:5432/juicefs?sslmode=disable"),
-		StorageEndpoint:  envOr("E2E_STORAGE_ENDPOINT", "http://localhost:9000"),
-		FilesystemName:   envOr("E2E_FILESYSTEM_NAME", "agentsmith-workspace"),
+		AFSCPBaseURL:     envOr("E2E_AFSCP_INTERNAL_BASE_URL", ""),
+		AFSCPToken:       envOr("E2E_AFSCP_ORCHESTRATOR_TOKEN", "e2e-afscp-token"),
+		AFSCPNamespaceID: envOr("E2E_AFSCP_NAMESPACE_ID", "ns_e2e"),
+		AFSCPSecretNS:    envOr("E2E_AFSCP_SECRET_NAMESPACE", "afscp-mounts"),
 		StorageCapacity:  envOr("E2E_STORAGE_CAPACITY", "1Pi"),
 		StorageClassName: envOr("E2E_STORAGE_CLASS", ""),
-		MountOptions:     splitCSV(os.Getenv("E2E_MOUNT_OPTIONS")),
-		Subdir:           envOr("E2E_SUBDIR", ""),
 		Image:            envOr("E2E_IMAGE", "ubuntu:22.04"),
-		CleanerBin:       absPath(envOr("E2E_CLEANER_BIN", "../bin/cleaner")),
 		ManagerBin:       absPath(envOr("E2E_MANAGER_BIN", "../bin/manager")),
 		JuiceFSEnabled:   os.Getenv("E2E_JUICEFS") == "true",
 	}
@@ -124,6 +119,9 @@ func TestMain(m *testing.M) {
 
 	// ── Manager ────────────────────────────────────────────────────────────
 	if c.ManagerURL == "" {
+		if c.AFSCPBaseURL == "" {
+			startFakeAFSCP(c)
+		}
 		if _, err := os.Stat(c.ManagerBin); err != nil {
 			log.Fatalf("E2E: manager binary not found at %s\n  hint: run `make build` first", c.ManagerBin)
 		}
@@ -141,8 +139,9 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// ── Teardown ───────────────────────────────────────────────────────────
+	purgeTestWorkloads(cli, c.Namespace)
 	c.stopManager()
-	purgeTestPods(cli, c.Namespace)
+	c.stopAFSCP()
 
 	os.Exit(code)
 }
@@ -204,12 +203,11 @@ kubernetes:
 		"CONFIG_PATH="+cfgPath,
 		"SERVICE_KEYS="+c.ServiceKey,
 		"K8S_NAMESPACE="+c.Namespace,
+		"AFSCP_INTERNAL_BASE_URL="+c.AFSCPBaseURL,
+		"AFSCP_ORCHESTRATOR_TOKEN="+c.AFSCPToken,
 		"JUICEFS_CSI_DRIVER="+envOr("E2E_CSI_DRIVER", "csi.juicefs.com"),
 		"JUICEFS_STORAGE_CAPACITY="+c.StorageCapacity,
 		"JUICEFS_STORAGE_CLASS_NAME="+c.StorageClassName,
-		"JUICEFS_MOUNT_OPTIONS="+strings.Join(c.MountOptions, ","),
-		"JUICEFS_SUBDIR="+c.Subdir,
-		"JUICEFS_STORAGE_ENDPOINT="+c.StorageEndpoint,
 		"LOG_LEVEL=info",
 	)
 	if kubeconfig != "" {
@@ -271,6 +269,68 @@ func (c *SuiteConfig) stopManager() {
 	}
 }
 
+func startFakeAFSCP(c *SuiteConfig) {
+	c.afscpSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+c.AFSCPToken; got != want {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		namespaceID := strings.TrimSpace(r.Header.Get("X-AFSCP-Namespace-Id"))
+		if namespaceID == "" {
+			http.Error(w, "missing namespace", http.StatusBadRequest)
+			return
+		}
+
+		const prefix = "/internal/v1/workload-mount-bindings/"
+		if !strings.HasPrefix(r.URL.Path, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+		suffix := strings.TrimPrefix(r.URL.Path, prefix)
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method == http.MethodGet && strings.HasSuffix(suffix, "/orchestrator-plan") {
+			mountBindingID := strings.TrimSuffix(suffix, "/orchestrator-plan")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"mount_binding_id":      mountBindingID,
+				"volume_id":             "vol_" + mountBindingID,
+				"payload_volume_subdir": "afscp/" + namespaceID + "/bindings/" + mountBindingID + "/payload",
+				"mount_path":            taskHomePath(strings.TrimPrefix(mountBindingID, "wmb_")),
+				"read_only":             false,
+				"secret_ref": map[string]string{
+					"namespace": c.AFSCPSecretNS,
+					"name":      "juicefs-" + dnsLabel(mountBindingID),
+				},
+				"security_policy": map[string]bool{
+					"run_as_non_root":             true,
+					"allow_privileged":            false,
+					"jvs_control_outside_payload": true,
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodPost || r.Method == http.MethodPatch {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"operation_id":    "op_e2e",
+				"operation_state": "queued",
+			})
+			return
+		}
+
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}))
+	c.AFSCPBaseURL = c.afscpSrv.URL
+	log.Printf("E2E: started AFSCP test double at %s", c.AFSCPBaseURL)
+}
+
+func (c *SuiteConfig) stopAFSCP() {
+	if c.afscpSrv != nil {
+		c.afscpSrv.Close()
+		c.afscpSrv = nil
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Kubernetes helpers
 // ---------------------------------------------------------------------------
@@ -299,14 +359,40 @@ func ensureNamespace(cli *kubernetes.Clientset, ns string) {
 	}
 }
 
-// purgeTestPods deletes all pods bearing the "e2e=true" label in ns.
-func purgeTestPods(cli *kubernetes.Clientset, ns string) {
+func purgeTestWorkloads(cli *kubernetes.Clientset, ns string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_ = cli.CoreV1().Pods(ns).DeleteCollection(ctx,
-		metav1.DeleteOptions{},
-		metav1.ListOptions{LabelSelector: "e2e=true"},
-	)
+	pods, err := cli.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=managed-workload"})
+	if err != nil {
+		log.Printf("E2E: warning – could not list workloads for cleanup: %v", err)
+		return
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	for _, pod := range pods.Items {
+		wsID := strings.TrimSpace(pod.Labels["workspace_id"])
+		projID := strings.TrimSpace(pod.Labels["project_id"])
+		wlID := strings.TrimSpace(pod.Labels["workload_id"])
+		if wsID == "" || projID == "" || wlID == "" {
+			continue
+		}
+		url := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s", suite.ManagerURL, wsID, projID, wlID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+		if err != nil {
+			log.Printf("E2E: warning – build workload cleanup request for %s: %v", pod.Name, err)
+			continue
+		}
+		req.Header.Set("X-Service-Key", suite.ServiceKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("E2E: warning – cleanup workload %s via manager failed: %v", pod.Name, err)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+			log.Printf("E2E: warning – cleanup workload %s returned status %d", pod.Name, resp.StatusCode)
+		}
+	}
 }
 
 // waitPodPhase polls until the named pod reaches the given phase.
@@ -363,9 +449,7 @@ func podAnnotations(t *testing.T, ns, podName string) map[string]string {
 	return pod.Annotations
 }
 
-// sweepExpiredWorkloads mimics the cleaner CronJob: finds workload pods whose
-// expires_at annotation is in the past and deletes them. Returns count deleted.
-func sweepExpiredWorkloads(t *testing.T, ns string) int {
+func releaseExpiredWorkloadsViaManager(t *testing.T, ns string) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -374,7 +458,7 @@ func sweepExpiredWorkloads(t *testing.T, ns string) int {
 		LabelSelector: "app=managed-workload",
 	})
 	if err != nil {
-		t.Logf("sweepExpiredWorkloads: list error: %v", err)
+		t.Logf("releaseExpiredWorkloadsViaManager: list error: %v", err)
 		return 0
 	}
 
@@ -389,10 +473,17 @@ func sweepExpiredWorkloads(t *testing.T, ns string) int {
 		if err != nil || !now.After(exp) {
 			continue
 		}
-		t.Logf("GC: deleting expired pod %s (expired %s ago)", pod.Name, now.Sub(exp).Round(time.Second))
-		grace := int64(0)
-		_ = k8sCli.CoreV1().Pods(ns).Delete(ctx, pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
-		deleted++
+		wsID := strings.TrimSpace(pod.Labels["workspace_id"])
+		projID := strings.TrimSpace(pod.Labels["project_id"])
+		wlID := strings.TrimSpace(pod.Labels["workload_id"])
+		if wsID == "" || projID == "" || wlID == "" {
+			continue
+		}
+		t.Logf("releasing expired workload %s (expired %s ago)", pod.Name, now.Sub(exp).Round(time.Second))
+		resp := newClient().DeleteWorkload(t, wsID, projID, wlID)
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+			deleted++
+		}
 	}
 	return deleted
 }
@@ -446,6 +537,28 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return values
+}
+
+func dnsLabel(value string) string {
+	value = strings.ToLower(value)
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		default:
+			return '-'
+		}
+	}, value)
+	value = strings.Trim(value, "-")
+	if len(value) > 63 {
+		value = strings.Trim(value[:63], "-")
+	}
+	if value == "" {
+		return "mount"
+	}
+	return value
 }
 
 // uniqueID returns a K8s-safe unique workload ID for use in a single test.

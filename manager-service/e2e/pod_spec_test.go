@@ -9,8 +9,8 @@ package e2e_test
 //   - Annotations carry the lifecycle metadata (expires_at, last_activity_at, timeouts)
 //   - Pod-level SecurityContext enforces non-root execution with correct UID/GID
 //   - Container-level SecurityContext complies with K8s "restricted" PSS
-//   - PVC volume mount uses mount_path plus sub_path for the task HOME subtree
-//   - Container working directory is /home/<task>/workspace
+//   - PVC volume mount uses the mount path from the AFSCP plan
+//   - Container working directory is the plan mount path plus /workspace
 //   - RestartPolicy=Never and AutomountServiceAccountToken=false are set
 //   - Environment variables include TASK_HOME, HOME, WORKSPACE_PATH + user-supplied vars
 //   - Resource requests/limits are applied exactly as requested
@@ -183,7 +183,7 @@ func TestPodSpec_ContainerSecurityContext(t *testing.T) {
 
 // TestPodSpec_WorkspaceVolumeMount verifies the workspace PVC is mounted correctly:
 //   - volume name "workspace" backed by the expected binding PVC
-//   - task HOME subtree is mounted at mount_path via sub_path
+//   - binding PVC is mounted at the AFSCP plan mount path
 func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	const wsID = "ws-spec-vol"
 	wlID := uniqueID("spec-vol")
@@ -208,8 +208,8 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	require.Len(t, vms, 1, "must have exactly one volume mount")
 	vm := vms[0]
 	assert.Equal(t, "workspace", vm.Name)
-	assert.Equal(t, taskHomePath(wlID), vm.MountPath, "task HOME subtree must be mounted at mount_path")
-	assert.Equal(t, taskSubPath(wlID), vm.SubPath, "task HOME subtree must use sub_path")
+	assert.Equal(t, taskHomePath(wlID), vm.MountPath, "workspace PVC must be mounted at the AFSCP plan mount path")
+	assert.Empty(t, vm.SubPath, "payload subdir is carried by the PV CSI plan")
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ func TestPodSpec_RuntimeEnvVarsInjected(t *testing.T) {
 	assert.Equal(t, taskHomePath(wlID), envMap["HOME"],
 		"HOME must match TASK_HOME")
 	assert.Equal(t, taskWorkspacePath(wlID), envMap["WORKSPACE_PATH"],
-		"WORKSPACE_PATH must match working_dir")
+		"WORKSPACE_PATH must match the plan-derived workspace path")
 }
 
 // TestPodSpec_UserEnvVarsInjected verifies caller-supplied env vars are forwarded

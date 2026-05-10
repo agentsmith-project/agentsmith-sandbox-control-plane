@@ -39,66 +39,19 @@ echo ""
 # Read versions from VERSION files
 MANAGER_VERSION=$(read_version "${PROJECT_ROOT}/manager-service/VERSION")
 RUNNER_VERSION=$(read_version "${PROJECT_ROOT}/images/runner/VERSION")
-GC_VERSION=$(read_version "${PROJECT_ROOT}/images/gc/VERSION")
 
 # Use defaults if versions are empty
 MANAGER_VERSION="${MANAGER_VERSION:-1.0.0}"
 RUNNER_VERSION="${RUNNER_VERSION:-1.0.0}"
-GC_VERSION="${GC_VERSION:-1.0.0}"
 
 log_info "镜像版本:"
 echo "  Manager: $MANAGER_VERSION"
 echo "  Runner: $RUNNER_VERSION"
-echo "  GC: $GC_VERSION"
 echo ""
 
 # Build full image paths
 MANAGER_IMAGE="${FULL_REGISTRY}/sandbox-manager:${MANAGER_VERSION}"
 RUNNER_IMAGE="${FULL_REGISTRY}/sandbox-runner:${RUNNER_VERSION}"
-GC_IMAGE="${FULL_REGISTRY}/sandbox-gc:${GC_VERSION}"
-
-# Function to update ConfigMap patch for runner image
-update_configmap_runner_image() {
-    local overlay_dir="$1"
-    local runner_image="$2"
-    local patch_file="${overlay_dir}/patches/configmap-runner-image.yaml"
-    
-    if [ ! -f "$patch_file" ]; then
-        log_warning "ConfigMap patch 不存在，创建: $patch_file"
-        mkdir -p "${overlay_dir}/patches"
-        cat > "$patch_file" <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sandbox-config
-  namespace: sandbox-system
-data:
-  runner-image-default: "${runner_image}"
-EOF
-    else
-        # Update existing patch file
-        if command -v python3 &> /dev/null; then
-            python3 <<EOF
-import yaml
-import sys
-
-with open('${patch_file}', 'r') as f:
-    data = yaml.safe_load(f)
-
-if 'data' not in data:
-    data['data'] = {}
-
-data['data']['runner-image-default'] = '${runner_image}'
-
-with open('${patch_file}', 'w') as f:
-    yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-EOF
-        else
-            # Fallback to sed
-            sed -i "s|runner-image-default:.*|runner-image-default: \"${runner_image}\"|g" "$patch_file"
-        fi
-    fi
-}
 
 # For dev overlay with local registry, use short image names so Kind uses locally loaded images
 use_short_names_for_dev() {
@@ -129,48 +82,11 @@ for overlay in dev staging production; do
     # Update kustomization.yaml images
     if update_kustomization_images "$overlay_dir" "$manager_img" "$runner_img"; then
         log_success "Kustomization 镜像已更新"
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
         log_error "Kustomization 镜像更新失败"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         continue
-    fi
-    
-    # Update ConfigMap patch for runner image
-    if update_configmap_runner_image "$overlay_dir" "$runner_img"; then
-        log_success "ConfigMap runner 镜像已更新"
-        
-        # Ensure patch is included in kustomization.yaml
-        if ! grep -q "configmap-runner-image.yaml" "${overlay_dir}/kustomization.yaml" 2>/dev/null; then
-            log_warning "添加 configmap-runner-image.yaml 到 kustomization.yaml"
-            if command -v python3 &> /dev/null; then
-                python3 <<EOF
-import yaml
-
-with open('${overlay_dir}/kustomization.yaml', 'r') as f:
-    data = yaml.safe_load(f)
-
-if 'patches' not in data:
-    data['patches'] = []
-
-patch_path = 'patches/configmap-runner-image.yaml'
-if patch_path not in data['patches']:
-    # Insert after configmap-ttl.yaml if exists
-    if 'patches/configmap-ttl.yaml' in data['patches']:
-        idx = data['patches'].index('patches/configmap-ttl.yaml')
-        data['patches'].insert(idx + 1, patch_path)
-    else:
-        data['patches'].append(patch_path)
-
-with open('${overlay_dir}/kustomization.yaml', 'w') as f:
-    yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-EOF
-            fi
-        fi
-        
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-        log_error "ConfigMap runner 镜像更新失败"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 done
 

@@ -30,45 +30,68 @@ spec:
         - name: http
           containerPort: 8080
         env:
-        # Boot configuration (not hot-reloadable)
+        # Boot configuration
         - name: CONFIG_PATH
           value: "/etc/sandbox-manager/manager-config.yaml"
-        - name: CONFIG_RELOAD_DEBOUNCE
-          value: "300ms"
-        - name: CONFIG_RELOAD_MIN_INTERVAL
-          value: "1s"
-        - name: CONFIG_RELOAD_BACKOFF_MAX
-          value: "30s"
-        - name: STRICT_CONFIG_RELOAD
-          value: "false"
         - name: DEBUG
           value: "false"
-        - name: RUNNER_IMAGE_DEFAULT
+        - name: SERVICE_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: sandbox-manager-secrets
+              key: service-keys
+        - name: K8S_NAMESPACE
           valueFrom:
             configMapKeyRef:
               name: sandbox-config
-              key: runner-image-default
-        # Storage configuration
-        # Option 1: Use credentials from mounted Secret (recommended for production)
-        - name: STORAGE_CREDENTIALS_PATH
-          value: "/etc/secrets/minio"
-        # Option 2: Use environment variables (fallback for local development)
-        # STORAGE_ENDPOINT: overridden per overlay (dev, staging, production)
-        - name: STORAGE_ENDPOINT
-          value: "minio.sandbox-system.svc.cluster.local:9000"
-        - name: STORAGE_BUCKET
-          value: "sandboxes"
-        - name: STORAGE_USE_SSL
-          value: "false"
+              key: workload-namespace
+        # AFSCP workload mount plan client
+        - name: AFSCP_INTERNAL_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: afscp-internal-base-url
+        - name: AFSCP_ORCHESTRATOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sandbox-manager-secrets
+              key: afscp-orchestrator-token
+        - name: AFSCP_CALLER_SERVICE
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: afscp-caller-service
+        - name: AFSCP_ACTOR_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: afscp-actor-type
+        - name: AFSCP_ACTOR_ID
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: afscp-actor-id
+        # CSI materialization knobs; backend auth and payload subdir come only from AFSCP plans.
+        - name: JUICEFS_CSI_DRIVER
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: juicefs-csi-driver
+        - name: JUICEFS_STORAGE_CAPACITY
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: juicefs-storage-capacity
+        - name: JUICEFS_STORAGE_CLASS_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: sandbox-config
+              key: juicefs-storage-class-name
         # Mount config file
         volumeMounts:
         - name: manager-config
           mountPath: /etc/sandbox-manager/manager-config.yaml
           subPath: manager-config.yaml
-          readOnly: true
-        # Mount MinIO credentials (Secret volume)
-        - name: minio-credentials
-          mountPath: /etc/secrets/minio
           readOnly: true
         # Probes
         readinessProbe:
@@ -107,7 +130,3 @@ spec:
       - name: manager-config
         configMap:
           name: sandbox-manager-config
-      - name: minio-credentials
-        secret:
-          secretName: minio-credentials
-          defaultMode: 0400  # Read-only, owner only

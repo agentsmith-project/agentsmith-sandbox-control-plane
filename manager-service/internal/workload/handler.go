@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,9 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox/manager/internal/afscp"
 	"github.com/sandbox/manager/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -31,26 +33,22 @@ var k8sRetryConfig = retryutil.RetryConfig{
 }
 
 const (
-	defaultWorkspacePath        = "/workspace"
 	workspaceVolumeName         = "workspace"
 	workspaceInitContainerName  = "workspace-init"
 	workspaceArtifactsDirectory = ".artifacts"
 )
 
-var allowedMountPathPrefixes = []mountPathPrefix{
-	{path: defaultWorkspacePath, allowExact: true},
-	{path: "/home", allowExact: false},
-}
-
-type mountPathPrefix struct {
-	path       string
-	allowExact bool
-}
-
 type workloadPaths struct {
 	mountPath  string
-	subPath    string
 	workingDir string
+	readOnly   bool
+}
+
+type mountLifecycleClient interface {
+	GetOrchestratorMountPlan(ctx context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error)
+	HeartbeatWorkloadMountBinding(ctx context.Context, namespaceID, mountBindingID, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error)
+	ReleaseWorkloadMountBinding(ctx context.Context, namespaceID, mountBindingID, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error)
+	UpdateWorkloadMountStatus(ctx context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error)
 }
 
 // Handler provides REST endpoints for managed workload pod lifecycle.
@@ -63,6 +61,16 @@ type Handler struct {
 type Options struct {
 	DefaultNodeSelector map[string]string
 	DefaultTolerations  []v1.Toleration
+	AFSCPClient         mountLifecycleClient
+}
+
+type responseStatusError struct {
+	status  int
+	message string
+}
+
+func (e responseStatusError) Error() string {
+	return e.message
 }
 
 // NewHandler creates a new workload handler.
@@ -145,7 +153,7 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeCreateRequest(r, &req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -158,8 +166,18 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		jsonError(w, http.StatusBadRequest, "workspace_binding_id is required")
 		return
 	}
+	if _, err := parseResourceRequirements(req); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	ctx := r.Context()
+	mount, err := h.resolveWorkspaceMount(ctx, r, workspaceID, projectID, req.WorkspaceBindingID)
+	if err != nil {
+		jsonError(w, statusCodeForError(err, http.StatusBadRequest), err.Error())
+		return
+	}
+	req.resolvedMount = &mount
 
 	idleTimeout := DefaultIdleTimeout
 	if req.IdleTimeoutSec > 0 {
@@ -192,7 +210,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 
 	createdPod, err := h.k8sClient.Clientset().CoreV1().Pods(h.k8sClient.Namespace()).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			existingPod, getErr := h.k8sClient.GetPod(ctx, podName)
 			if getErr == nil {
 				if drift := workloadPodSpecDrift(existingPod, pod); drift != "" {
@@ -237,17 +255,28 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	jsonResponse(w, http.StatusCreated, status)
 }
 
+func decodeCreateRequest(r *http.Request, req *CreateRequest) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(req)
+}
+
 func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
 	podName := PodName(workloadID)
 
-	_, err := h.k8sClient.GetPod(ctx, podName)
+	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			jsonError(w, http.StatusNotFound, "pod not found")
 			return
 		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if err := h.releaseWorkloadMount(ctx, r, pod); err != nil {
+		jsonError(w, http.StatusBadGateway, "afscp workload mount release failed: "+err.Error())
 		return
 	}
 
@@ -259,7 +288,15 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 
-	h.waitForPodDeletion(ctx, podName, 30*time.Second)
+	if err := h.waitForPodDeletion(ctx, podName, 30*time.Second); err != nil {
+		jsonError(w, http.StatusInternalServerError, "pod deletion not confirmed: "+err.Error())
+		return
+	}
+
+	if err := h.markWorkloadMountReleased(ctx, r, pod); err != nil {
+		jsonError(w, http.StatusBadGateway, "afscp workload mount released status failed: "+err.Error())
+		return
+	}
 
 	observability.GetMetrics().RecordWorkloadDelete()
 	jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
@@ -271,7 +308,7 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			jsonResponse(w, http.StatusOK, PodStatus{Phase: "offline"})
 			return
 		}
@@ -296,14 +333,14 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 }
 
 // handleKeepalive updates the pod's last-activity and expires_at. Clients must send keepalive
-// periodically; if no keepalive is received for idle_timeout_sec, the cleaner will reclaim the pod.
+// periodically; expired workloads must be released through the manager delete API.
 func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, workloadID string) {
 	ctx := r.Context()
 	podName := PodName(workloadID)
 
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			jsonError(w, http.StatusNotFound, "pod not found")
 			return
 		}
@@ -325,6 +362,11 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 		if maxT, err := time.Parse(time.RFC3339, v); err == nil && newExpires.After(maxT) {
 			newExpires = maxT
 		}
+	}
+
+	if err := h.heartbeatWorkloadMount(ctx, r, pod); err != nil {
+		jsonError(w, http.StatusBadGateway, "afscp workload mount heartbeat failed: "+err.Error())
+		return
 	}
 
 	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
@@ -470,6 +512,14 @@ func (h *Handler) buildPod(
 	if err != nil {
 		return nil, err
 	}
+	if req.resolvedMount != nil {
+		annotations["mbos.io/afscp-namespace-id"] = req.resolvedMount.NamespaceID
+		annotations["mbos.io/afscp-mount-binding-id"] = req.resolvedMount.MountBindingID
+		annotations["mbos.io/afscp-volume-id"] = req.resolvedMount.VolumeID
+		annotations["mbos.io/payload-volume-subdir"] = req.resolvedMount.PayloadVolumeSubdir
+		annotations["mbos.io/mount-path"] = req.resolvedMount.MountPath
+		annotations["mbos.io/read-only"] = boolString(req.resolvedMount.ReadOnly)
+	}
 	envVars := buildRuntimeEnvVars(env, paths)
 
 	var command []string
@@ -509,9 +559,6 @@ func (h *Handler) buildPod(
 				FSGroup:             &fsGroup,
 				FSGroupChangePolicy: &fsGroupPolicy,
 			},
-			InitContainers: []v1.Container{
-				buildWorkspaceInitContainer(req.Image, paths),
-			},
 			Containers: []v1.Container{
 				{
 					Name:       "main",
@@ -539,6 +586,7 @@ func (h *Handler) buildPod(
 					VolumeSource: v1.VolumeSource{
 						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
 							ClaimName: workspacebinding.PVCName(workspaceID, projectID, req.WorkspaceBindingID),
+							ReadOnly:  paths.readOnly,
 						},
 					},
 				},
@@ -548,6 +596,11 @@ func (h *Handler) buildPod(
 
 	if len(command) > 0 {
 		pod.Spec.Containers[0].Command = command
+	}
+	if !paths.readOnly {
+		pod.Spec.InitContainers = []v1.Container{
+			buildWorkspaceInitContainer(req.Image, paths),
+		}
 	}
 
 	return pod, nil
@@ -598,64 +651,149 @@ func workspaceVolumeMount(paths workloadPaths) v1.VolumeMount {
 	return v1.VolumeMount{
 		Name:      workspaceVolumeName,
 		MountPath: paths.mountPath,
-		SubPath:   paths.subPath,
+		ReadOnly:  paths.readOnly,
 	}
 }
 
 func resolveWorkloadPaths(req CreateRequest) (workloadPaths, error) {
-	mountPath := strings.TrimSpace(req.MountPath)
-	if mountPath == "" {
-		mountPath = defaultWorkspacePath
-	}
-	if !path.IsAbs(mountPath) {
-		return workloadPaths{}, fmt.Errorf("mount_path must be an absolute path")
-	}
-	if containsParentPathSegment(mountPath) {
-		return workloadPaths{}, fmt.Errorf("mount_path must not contain path traversal")
-	}
-	mountPath = path.Clean(mountPath)
-	if !hasAllowedMountPathPrefix(mountPath) {
-		return workloadPaths{}, fmt.Errorf("mount_path must use an allowed prefix: %s", allowedMountPathPrefixList())
+	if req.resolvedMount == nil {
+		return workloadPaths{}, fmt.Errorf("AFSCP workload mount plan is required")
 	}
 
-	subPath := strings.TrimSpace(req.SubPath)
-	if subPath != "" {
-		if path.IsAbs(subPath) {
-			return workloadPaths{}, fmt.Errorf("sub_path must be a relative path")
-		}
-		if containsParentPathSegment(subPath) {
-			return workloadPaths{}, fmt.Errorf("sub_path must not contain path traversal")
-		}
-		subPath = path.Clean(subPath)
-		if subPath == "." || subPath == "" {
-			return workloadPaths{}, fmt.Errorf("sub_path must not be empty when provided")
-		}
+	mountPath := strings.TrimSpace(req.resolvedMount.MountPath)
+	if mountPath == "" || !path.IsAbs(mountPath) || mountPath == "/" || containsParentPathSegment(mountPath) || path.Clean(mountPath) != mountPath {
+		return workloadPaths{}, fmt.Errorf("AFSCP mount_path is invalid")
 	}
-
-	workingDir := strings.TrimSpace(req.WorkingDir)
-	if workingDir == "" {
-		if mountPath == defaultWorkspacePath {
-			workingDir = defaultWorkspacePath
-		} else {
-			workingDir = path.Join(mountPath, "workspace")
-		}
-	}
-	if !path.IsAbs(workingDir) {
-		return workloadPaths{}, fmt.Errorf("working_dir must be an absolute path")
-	}
-	if containsParentPathSegment(workingDir) {
-		return workloadPaths{}, fmt.Errorf("working_dir must not contain path traversal")
-	}
-	workingDir = path.Clean(workingDir)
-	if !pathWithinOrEqual(workingDir, mountPath) {
-		return workloadPaths{}, fmt.Errorf("working_dir must be inside mount_path")
+	if strings.Contains(mountPath, "\\") {
+		return workloadPaths{}, fmt.Errorf("AFSCP mount_path is invalid")
 	}
 
 	return workloadPaths{
 		mountPath:  mountPath,
-		subPath:    subPath,
-		workingDir: workingDir,
+		workingDir: path.Join(mountPath, "workspace"),
+		readOnly:   req.resolvedMount.ReadOnly,
 	}, nil
+}
+
+func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, workspaceID, projectID, bindingID string) (workspacebinding.ResolvedMount, error) {
+	pvcName := workspacebinding.PVCName(workspaceID, projectID, bindingID)
+	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.k8sClient.Namespace(), pvcName)
+	if err != nil {
+		return workspacebinding.ResolvedMount{}, fmt.Errorf("workspace binding is not ready: %w", err)
+	}
+	mount, err := workspacebinding.ResolvedMountFromPVC(pvc)
+	if err != nil {
+		return workspacebinding.ResolvedMount{}, fmt.Errorf("workspace binding mount plan is invalid: %w", err)
+	}
+	pvName := strings.TrimSpace(pvc.Spec.VolumeName)
+	if pvName == "" {
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: persistent volume is not bound; re-ensure workspace binding",
+		}
+	}
+	pv, err := h.k8sClient.GetPersistentVolume(ctx, pvName)
+	if err != nil {
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: persistent volume is not ready: " + err.Error() + "; re-ensure workspace binding",
+		}
+	}
+	if err := ensurePersistentVolumeMatchesResolvedMount(pv, mount); err != nil {
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: " + err.Error() + "; re-ensure workspace binding",
+		}
+	}
+	if h.options.AFSCPClient != nil {
+		plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(ctx, mount.NamespaceID, mount.MountBindingID, requestCorrelationID(r))
+		if err != nil {
+			return workspacebinding.ResolvedMount{}, responseStatusError{
+				status:  http.StatusBadGateway,
+				message: "workspace binding active check failed: " + err.Error(),
+			}
+		}
+		if err := ensureResolvedMountMatchesPlan(mount, plan); err != nil {
+			return workspacebinding.ResolvedMount{}, responseStatusError{
+				status:  http.StatusConflict,
+				message: "workspace binding is stale: " + err.Error() + "; re-ensure workspace binding",
+			}
+		}
+		if err := ensurePersistentVolumeMatchesPlan(pv, plan); err != nil {
+			return workspacebinding.ResolvedMount{}, responseStatusError{
+				status:  http.StatusConflict,
+				message: "workspace binding is stale: " + err.Error() + "; re-ensure workspace binding",
+			}
+		}
+	}
+	return mount, nil
+}
+
+func ensureResolvedMountMatchesPlan(mount workspacebinding.ResolvedMount, plan afscp.OrchestratorMountPlan) error {
+	checks := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "mount_binding_id", got: mount.MountBindingID, want: plan.MountBindingID},
+		{name: "volume_id", got: mount.VolumeID, want: plan.VolumeID},
+		{name: "payload_volume_subdir", got: mount.PayloadVolumeSubdir, want: plan.PayloadVolumeSubdir},
+		{name: "mount_path", got: mount.MountPath, want: plan.MountPath},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
+			return fmt.Errorf("%s changed", check.name)
+		}
+	}
+	if mount.ReadOnly != plan.ReadOnly {
+		return fmt.Errorf("read_only changed")
+	}
+	if mount.SecurityPolicy.RunAsNonRoot != plan.SecurityPolicy.RunAsNonRoot ||
+		mount.SecurityPolicy.AllowPrivileged != plan.SecurityPolicy.AllowPrivileged ||
+		mount.SecurityPolicy.JVSControlOutsidePayload != plan.SecurityPolicy.JVSControlOutsidePayload {
+		return fmt.Errorf("security_policy changed")
+	}
+	return nil
+}
+
+func ensurePersistentVolumeMatchesResolvedMount(pv *v1.PersistentVolume, mount workspacebinding.ResolvedMount) error {
+	if pv == nil {
+		return fmt.Errorf("persistent volume is required")
+	}
+	if pv.Spec.CSI == nil {
+		return fmt.Errorf("persistent volume is not CSI-backed")
+	}
+	if got := strings.TrimSpace(pv.Spec.CSI.VolumeAttributes["subdir"]); got != strings.TrimSpace(mount.PayloadVolumeSubdir) {
+		return fmt.Errorf("persistent volume payload_volume_subdir changed")
+	}
+	return nil
+}
+
+func ensurePersistentVolumeMatchesPlan(pv *v1.PersistentVolume, plan afscp.OrchestratorMountPlan) error {
+	if pv == nil {
+		return fmt.Errorf("persistent volume is required")
+	}
+	if pv.Spec.CSI == nil {
+		return fmt.Errorf("persistent volume is not CSI-backed")
+	}
+	if got := strings.TrimSpace(pv.Spec.CSI.VolumeAttributes["subdir"]); got != strings.TrimSpace(plan.PayloadVolumeSubdir) {
+		return fmt.Errorf("persistent volume payload_volume_subdir changed")
+	}
+	ref := pv.Spec.CSI.NodePublishSecretRef
+	if ref == nil ||
+		strings.TrimSpace(ref.Namespace) != strings.TrimSpace(plan.SecretRef.Namespace) ||
+		strings.TrimSpace(ref.Name) != strings.TrimSpace(plan.SecretRef.Name) {
+		return fmt.Errorf("persistent volume secret_ref changed")
+	}
+	return nil
+}
+
+func statusCodeForError(err error, fallback int) int {
+	var statusErr responseStatusError
+	if stderrors.As(err, &statusErr) {
+		return statusErr.status
+	}
+	return fallback
 }
 
 func buildRuntimeEnvVars(env map[string]string, paths workloadPaths) []v1.EnvVar {
@@ -689,37 +827,6 @@ func containsParentPathSegment(value string) bool {
 	return false
 }
 
-func hasAllowedMountPathPrefix(value string) bool {
-	for _, prefix := range allowedMountPathPrefixes {
-		cleanPrefix := path.Clean(prefix.path)
-		if value == cleanPrefix {
-			return prefix.allowExact
-		}
-		if strings.HasPrefix(value, cleanPrefix+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-func allowedMountPathPrefixList() string {
-	parts := make([]string, 0, len(allowedMountPathPrefixes))
-	for _, prefix := range allowedMountPathPrefixes {
-		if prefix.allowExact {
-			parts = append(parts, prefix.path)
-			continue
-		}
-		parts = append(parts, prefix.path+"/")
-	}
-	return strings.Join(parts, ", ")
-}
-
-func pathWithinOrEqual(value, parent string) bool {
-	value = path.Clean(value)
-	parent = path.Clean(parent)
-	return value == parent || strings.HasPrefix(value, parent+"/")
-}
-
 func workloadPodSpecDrift(existing, desired *v1.Pod) string {
 	existingContainer, ok := findContainer(existing.Spec.Containers, "main")
 	if !ok {
@@ -731,7 +838,7 @@ func workloadPodSpecDrift(existing, desired *v1.Pod) string {
 	}
 
 	if existingContainer.WorkingDir != desiredContainer.WorkingDir {
-		return fmt.Sprintf("working_dir mismatch (existing %q, requested %q)", existingContainer.WorkingDir, desiredContainer.WorkingDir)
+		return fmt.Sprintf("working directory mismatch (existing %q, requested %q)", existingContainer.WorkingDir, desiredContainer.WorkingDir)
 	}
 
 	existingMount, ok := findVolumeMount(existingContainer.VolumeMounts, workspaceVolumeName)
@@ -743,10 +850,10 @@ func workloadPodSpecDrift(existing, desired *v1.Pod) string {
 		return "requested pod is missing workspace volume mount"
 	}
 	if existingMount.MountPath != desiredMount.MountPath {
-		return fmt.Sprintf("mount_path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
+		return fmt.Sprintf("mount path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
 	}
 	if existingMount.SubPath != desiredMount.SubPath {
-		return fmt.Sprintf("sub_path mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
+		return fmt.Sprintf("workspace volume subpath mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
 	}
 
 	existingClaim := pvcClaimName(existing.Spec.Volumes, workspaceVolumeName)
@@ -778,16 +885,19 @@ func workloadPodSpecDrift(existing, desired *v1.Pod) string {
 
 func workspaceInitContainerSpecDrift(existing, desired *v1.Pod) string {
 	existingInit, ok := findContainer(existing.Spec.InitContainers, workspaceInitContainerName)
+	desiredInit, desiredOK := findContainer(desired.Spec.InitContainers, workspaceInitContainerName)
+	if !desiredOK {
+		if ok {
+			return "existing pod has workspace init container but requested read-only plan does not"
+		}
+		return ""
+	}
 	if !ok {
 		return "existing pod is missing workspace init container"
 	}
-	desiredInit, ok := findContainer(desired.Spec.InitContainers, workspaceInitContainerName)
-	if !ok {
-		return "requested pod is missing workspace init container"
-	}
 
 	if existingInit.WorkingDir != desiredInit.WorkingDir {
-		return fmt.Sprintf("workspace init working_dir mismatch (existing %q, requested %q)", existingInit.WorkingDir, desiredInit.WorkingDir)
+		return fmt.Sprintf("workspace init working directory mismatch (existing %q, requested %q)", existingInit.WorkingDir, desiredInit.WorkingDir)
 	}
 
 	existingMount, ok := findVolumeMount(existingInit.VolumeMounts, workspaceVolumeName)
@@ -799,10 +909,10 @@ func workspaceInitContainerSpecDrift(existing, desired *v1.Pod) string {
 		return "requested pod is missing workspace init volume mount"
 	}
 	if existingMount.MountPath != desiredMount.MountPath {
-		return fmt.Sprintf("workspace init mount_path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
+		return fmt.Sprintf("workspace init mount path mismatch (existing %q, requested %q)", existingMount.MountPath, desiredMount.MountPath)
 	}
 	if existingMount.SubPath != desiredMount.SubPath {
-		return fmt.Sprintf("workspace init sub_path mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
+		return fmt.Sprintf("workspace init volume subpath mismatch (existing %q, requested %q)", existingMount.SubPath, desiredMount.SubPath)
 	}
 
 	existingEnv := envVarMap(existingInit.Env)
@@ -852,15 +962,140 @@ func envVarMap(vars []v1.EnvVar) map[string]string {
 	return out
 }
 
-func (h *Handler) waitForPodDeletion(ctx context.Context, podName string, timeout time.Duration) {
+type workloadMountRef struct {
+	namespaceID    string
+	mountBindingID string
+}
+
+func (h *Handler) heartbeatWorkloadMount(ctx context.Context, r *http.Request, pod *v1.Pod) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	ref, ok := workloadMountRefFromPod(pod)
+	if !ok {
+		return fmt.Errorf("pod is missing AFSCP workload mount annotations")
+	}
+	correlationID := requestCorrelationID(r)
+	_, err := h.options.AFSCPClient.HeartbeatWorkloadMountBinding(ctx, ref.namespaceID, ref.mountBindingID, correlationID, idempotencyKey("heartbeat", pod.Name, correlationID))
+	return err
+}
+
+func (h *Handler) releaseWorkloadMount(ctx context.Context, r *http.Request, pod *v1.Pod) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	ref, ok := workloadMountRefFromPod(pod)
+	if !ok {
+		return fmt.Errorf("pod is missing AFSCP workload mount annotations")
+	}
+	correlationID := requestCorrelationID(r)
+	if _, err := h.options.AFSCPClient.ReleaseWorkloadMountBinding(ctx, ref.namespaceID, ref.mountBindingID, correlationID, podLifecycleIdempotencyKey("release", pod)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) markWorkloadMountReleased(ctx context.Context, r *http.Request, pod *v1.Pod) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	ref, ok := workloadMountRefFromPod(pod)
+	if !ok {
+		return fmt.Errorf("pod is missing AFSCP workload mount annotations")
+	}
+	correlationID := requestCorrelationID(r)
+	_, err := h.options.AFSCPClient.UpdateWorkloadMountStatus(ctx, ref.namespaceID, ref.mountBindingID, "released", "workload pod deleted", time.Now().UTC(), correlationID, podLifecycleIdempotencyKey("status-released", pod))
+	return err
+}
+
+func workloadMountRefFromPod(pod *v1.Pod) (workloadMountRef, bool) {
+	if pod == nil || pod.Annotations == nil {
+		return workloadMountRef{}, false
+	}
+	namespaceID := strings.TrimSpace(pod.Annotations["mbos.io/afscp-namespace-id"])
+	mountBindingID := strings.TrimSpace(pod.Annotations["mbos.io/afscp-mount-binding-id"])
+	if namespaceID == "" || mountBindingID == "" {
+		return workloadMountRef{}, false
+	}
+	return workloadMountRef{namespaceID: namespaceID, mountBindingID: mountBindingID}, true
+}
+
+func requestCorrelationID(r *http.Request) string {
+	for _, header := range []string{"X-Correlation-Id", "X-Request-Id", "X-Request-ID", "Request-Id"} {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			return value
+		}
+	}
+	return "sandbox-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+}
+
+func idempotencyKey(action, podName, correlationID string) string {
+	return sanitizeIdempotencyKey("sandbox", action, podName, correlationID)
+}
+
+func podLifecycleIdempotencyKey(action string, pod *v1.Pod) string {
+	name := ""
+	uid := ""
+	if pod != nil {
+		name = pod.GetName()
+		uid = string(pod.UID)
+	}
+	return sanitizeIdempotencyKey("sandbox", action, name, uid)
+}
+
+func sanitizeIdempotencyKey(parts ...string) string {
+	compactParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			compactParts = append(compactParts, trimmed)
+		}
+	}
+	value := strings.Join(compactParts, "-")
+	value = strings.ToLower(value)
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, value)
+	if len(value) > 180 {
+		return value[:180]
+	}
+	return value
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func (h *Handler) waitForPodDeletion(ctx context.Context, podName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		exists, err := h.k8sClient.PodExists(ctx, podName)
-		if err != nil || !exists {
-			return
+		if err != nil {
+			lastErr = err
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		if !exists {
+			return nil
 		}
 		time.Sleep(1 * time.Second)
 	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("pod %s still exists", podName)
 }
 
 // PodName returns the pod name for a workload.

@@ -28,7 +28,8 @@ echo "Cleaning up sandbox ${SANDBOX_ID} (pod: ${pod_name})..."
 # 1. Delete sandbox via API
 echo "  Deleting sandbox via API..."
 if ! delete_sandbox "${MANAGER_URL}" "${SANDBOX_ID}"; then
-    echo -e "${COLOR_YELLOW}⊘ API delete failed, continuing with pod cleanup${COLOR_NC}"
+    echo -e "${COLOR_RED}✗ API delete failed${COLOR_NC}"
+    exit 1
 fi
 
 echo -e "  ${COLOR_GREEN}Sandbox deleted${COLOR_NC}"
@@ -43,11 +44,6 @@ for i in {1..30}; do
         break
     fi
 
-    if [ $i -eq 30 ]; then
-        echo -e "${COLOR_YELLOW}⊘ Pod still exists after 30s, forcing deletion${COLOR_NC}"
-        kubectl delete pod "${pod_name}" -n "${SANDBOX_NAMESPACE}" --force --grace-period=0 &> /dev/null || true
-    fi
-
     sleep 1
 done
 
@@ -55,7 +51,8 @@ done
 echo "  Verifying cleanup..."
 kubectl get pod "${pod_name}" -n "${SANDBOX_NAMESPACE}" &> /dev/null
 if [ $? -eq 0 ]; then
-    echo -e "${COLOR_YELLOW}⊘ Pod still exists after cleanup${COLOR_NC}"
+    echo -e "${COLOR_RED}✗ Pod still exists after manager cleanup${COLOR_NC}"
+    exit 1
 else
     echo -e "  ${COLOR_GREEN}Cleanup verified${COLOR_NC}"
 fi

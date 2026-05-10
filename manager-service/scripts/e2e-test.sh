@@ -1,5 +1,5 @@
 #!/bin/bash
-# E2E Test Suite for Sandbox Manager v2.0.0
+# E2E Test Suite for Sandbox Manager
 # This script performs comprehensive end-to-end testing
 
 # Don't exit on error - we want to run all tests
@@ -21,7 +21,7 @@ NAMESPACE="${NAMESPACE:-sandbox-workloads}"
 LOG_FILE="${LOG_FILE:-/tmp/e2e-test.log}"
 MANAGER_PID=""
 
-# Workload path components for v2 API
+# Workload route path components
 WS_ID="ws-1"
 PROJ_ID="proj-1"
 
@@ -103,7 +103,7 @@ assert_http_status() {
 start_manager() {
     log_info "Starting manager service..."
 
-    # Create config file (minimal v2 schema)
+    # Create config file for the current manager schema
     cat > "$CONFIG_FILE" <<EOF
 version: 1
 server:
@@ -160,11 +160,6 @@ stop_manager() {
 cleanup() {
     log_info "Cleaning up..."
     stop_manager
-
-    # Clean up test pods
-    if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-        kubectl delete pods -n "$NAMESPACE" -l e2e=true --ignore-not-found=true >/dev/null 2>&1 || true
-    fi
 
     # Clean up config file
     rm -f "$CONFIG_FILE"
@@ -270,7 +265,7 @@ test_03_metrics_no_auth() {
     assert_contains "$body" "http_request_total" "metrics should contain http_request_total" || return 1
 }
 
-# Debug config endpoint removed in v2 - no /debug/config
+# Debug config endpoint is not part of the active API.
 
 test_05_auth_no_key() {
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
@@ -436,7 +431,7 @@ test_14_exec_invalid_timeout() {
     assert_http_status 504 "$status" "should return 504 for invalid timeout" || return 1
 }
 
-# File upload/download and symlink tests removed - v2 API does not have file endpoints
+# File upload/download and symlink endpoints are not part of the active API.
 
 test_19_delete_workload() {
     local wl_id="e2e-delete-$$"
@@ -489,7 +484,7 @@ test_21_metrics_increments() {
     return 0
 }
 
-# Config hash test removed - /debug/config endpoint not in v2
+# Config hash test removed because /debug/config is not part of the active API.
 
 # Integration test with actual pod (requires K8s cluster and image)
 test_30_create_and_exec_pod() {
@@ -541,7 +536,7 @@ test_30_create_and_exec_pod() {
 # ============================================================
 
 main() {
-    print_header "Sandbox Manager E2E Test Suite v2.0.0"
+    print_header "Sandbox Manager E2E Test Suite"
 
     # Setup
     trap cleanup EXIT

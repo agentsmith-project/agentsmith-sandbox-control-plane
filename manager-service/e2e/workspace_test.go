@@ -21,34 +21,28 @@ import (
 //
 // These tests validate the current workspace lifecycle managed by the sandbox manager:
 //   - a workload uses a stable workspace binding
-//   - the pod mounts the binding PVC task subtree at /home/<task>
+//   - the pod mounts the binding PVC at the AFSCP plan mount path
 //   - files written to /home/<task>/workspace persist across pod restarts
 // ---------------------------------------------------------------------------
 
-// TestWorkspace_BindingCreatedOnCreate verifies a workload ensure also ensures its binding.
+// TestWorkspace_BindingCreatedOnCreate verifies a workload uses a current AFSCP-backed binding.
 func TestWorkspace_BindingCreatedOnCreate(t *testing.T) {
 	wlID := uniqueID("ws-mkdir")
-	bindingID := "binding-" + wlID
+	bindingID := bindingIDForWorkload(wlID)
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
 	resp := newClient().EnsureWorkspaceBinding(t, testWS, testProj, bindingID, WorkspaceBindingRequest{
-		FileLibraryID:    bindingID,
-		FilesystemName:   suite.FilesystemName,
-		MetadataURL:      suite.MetadataURL,
-		StorageEndpoint:  suite.StorageEndpoint,
-		StorageCapacity:  suite.StorageCapacity,
-		StorageClassName: suite.StorageClassName,
-		MountOptions:     suite.MountOptions,
-		Subdir:           suite.Subdir,
+		NamespaceID:    suite.AFSCPNamespaceID,
+		MountBindingID: bindingID,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var binding WorkspaceBindingResponse
 	require.NoError(t, resp.DecodeJSON(&binding))
 	assert.Equal(t, bindingID, binding.BindingID)
-	assert.Equal(t, "/workspace", binding.MountPath)
+	assert.Equal(t, taskHomePath(wlID), binding.MountPath)
 	assert.Equal(t, workspacebinding.PVCName(testWS, testProj, bindingID), binding.PVCName)
 }
 
@@ -99,11 +93,11 @@ func TestWorkspace_IdempotentCreatePreservesFiles(t *testing.T) {
 	c.DeleteWorkload(t, testWS, testProj, wlID)
 }
 
-// TestWorkspace_PodMountUsesBindingPVC verifies the pod mounts the binding PVC task subtree.
+// TestWorkspace_PodMountUsesBindingPVC verifies the pod mounts the binding PVC with plan-derived paths.
 func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
-	wsID := "ws-subpath"
-	wlID := uniqueID("subpath")
-	bindingID := "binding-" + wlID
+	wsID := "ws-plan"
+	wlID := uniqueID("plan")
+	bindingID := bindingIDForWorkload(wlID)
 
 	_ = mustCreateWorkload(t, wsID, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, wsID, testProj, wlID) })
@@ -118,7 +112,7 @@ func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 	require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
 	vm := pod.Spec.Containers[0].VolumeMounts[0]
 	assert.Equal(t, taskHomePath(wlID), vm.MountPath)
-	assert.Equal(t, taskSubPath(wlID), vm.SubPath)
+	assert.Empty(t, vm.SubPath)
 	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
 	assert.Equal(t, workspacebinding.PVCName(wsID, testProj, bindingID), pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }

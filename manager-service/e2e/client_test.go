@@ -45,7 +45,7 @@ func newWrongKeyClient() *managerClient {
 	return c
 }
 
-// workloadURL builds the canonical v2 workload URL.
+// workloadURL builds the canonical workload URL.
 func (c *managerClient) workloadURL(wsID, projID, wlID string) string {
 	return fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s",
 		c.baseURL, wsID, projID, wlID)
@@ -112,38 +112,28 @@ type CreateRequest struct {
 	IdleTimeoutSec     int               `json:"idle_timeout_sec,omitempty"`
 	MaxLifetimeSec     int               `json:"max_lifetime_sec,omitempty"`
 	WorkspaceBindingID string            `json:"workspace_binding_id,omitempty"`
-	MountPath          string            `json:"mount_path,omitempty"`
-	SubPath            string            `json:"sub_path,omitempty"`
-	WorkingDir         string            `json:"working_dir,omitempty"`
 }
 
 type WorkspaceBindingRequest struct {
-	FileLibraryID    string   `json:"file_library_id"`
-	FilesystemName   string   `json:"filesystem_name"`
-	MetadataURL      string   `json:"metadata_url"`
-	StorageEndpoint  string   `json:"storage_endpoint,omitempty"`
-	StorageCapacity  string   `json:"storage_capacity,omitempty"`
-	StorageClassName string   `json:"storage_class_name,omitempty"`
-	MountOptions     []string `json:"mount_options,omitempty"`
-	Subdir           string   `json:"subdir,omitempty"`
+	NamespaceID    string `json:"namespace_id"`
+	MountBindingID string `json:"mount_binding_id,omitempty"`
 }
 
 type WorkspaceBindingResponse struct {
-	BindingID        string   `json:"binding_id"`
-	WorkspaceID      string   `json:"workspace_id"`
-	ProjectID        string   `json:"project_id"`
-	FileLibraryID    string   `json:"file_library_id"`
-	Status           string   `json:"status"`
-	Namespace        string   `json:"namespace"`
-	SecretName       string   `json:"secret_name"`
-	PVName           string   `json:"pv_name"`
-	PVCName          string   `json:"pvc_name"`
-	VolumeHandle     string   `json:"volume_handle"`
-	FilesystemName   string   `json:"filesystem_name"`
-	MountPath        string   `json:"mount_path"`
-	StorageClassName string   `json:"storage_class_name"`
-	MountOptions     []string `json:"mount_options"`
-	Subdir           string   `json:"subdir"`
+	BindingID        string `json:"binding_id"`
+	WorkspaceID      string `json:"workspace_id"`
+	ProjectID        string `json:"project_id"`
+	Status           string `json:"status"`
+	Namespace        string `json:"namespace"`
+	PVName           string `json:"pv_name"`
+	PVCName          string `json:"pvc_name"`
+	VolumeHandle     string `json:"volume_handle"`
+	NamespaceID      string `json:"namespace_id"`
+	MountBindingID   string `json:"mount_binding_id"`
+	VolumeID         string `json:"volume_id"`
+	MountPath        string `json:"mount_path"`
+	ReadOnly         bool   `json:"read_only"`
+	StorageClassName string `json:"storage_class_name"`
 }
 
 // PodStatus mirrors workload.PodStatus.
@@ -259,26 +249,11 @@ func ensureWorkspaceBindingForWorkload(t *testing.T, wsID, projID, wlID string, 
 		return
 	}
 	if req.WorkspaceBindingID == "" {
-		req.WorkspaceBindingID = "binding-" + wlID
-	}
-	if req.MountPath == "" {
-		req.MountPath = taskHomePath(wlID)
-	}
-	if req.SubPath == "" {
-		req.SubPath = taskSubPath(wlID)
-	}
-	if req.WorkingDir == "" {
-		req.WorkingDir = taskWorkspacePath(wlID)
+		req.WorkspaceBindingID = bindingIDForWorkload(wlID)
 	}
 	resp := newClient().EnsureWorkspaceBinding(t, wsID, projID, req.WorkspaceBindingID, WorkspaceBindingRequest{
-		FileLibraryID:    req.WorkspaceBindingID,
-		FilesystemName:   suite.FilesystemName,
-		MetadataURL:      suite.MetadataURL,
-		StorageEndpoint:  suite.StorageEndpoint,
-		StorageCapacity:  suite.StorageCapacity,
-		StorageClassName: suite.StorageClassName,
-		MountOptions:     suite.MountOptions,
-		Subdir:           suite.Subdir,
+		NamespaceID:    suite.AFSCPNamespaceID,
+		MountBindingID: req.WorkspaceBindingID,
 	})
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		t.Fatalf("ensure binding %s: expected 201/200, got %d – %s",
@@ -294,8 +269,8 @@ func taskWorkspacePath(wlID string) string {
 	return taskHomePath(wlID) + "/workspace"
 }
 
-func taskSubPath(wlID string) string {
-	return "agent-tasks/" + wlID
+func bindingIDForWorkload(wlID string) string {
+	return "wmb_" + wlID
 }
 
 // mustDeleteWorkload deletes a workload and fails the test if response isn't 200.

@@ -4,4 +4,4 @@ metadata:
   name: sandbox-config
   namespace: sandbox-system
 data:
-  ttl-seconds-default: "1800"  # 预发布环境 TTL: 30 分钟
+  afscp-internal-base-url: "http://afscp-api.agentsmith-system.svc.cluster.local:8080"

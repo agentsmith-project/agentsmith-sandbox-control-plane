@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test script for sandbox-manager v2 API (workspace/project/workload)
+# Test script for sandbox-manager workspace/project/workload API
 # Usage: ./scripts/test-manager.sh [manager-url] [service-key]
 # Example: ./scripts/test-manager.sh http://localhost:8080 test-key-123
 

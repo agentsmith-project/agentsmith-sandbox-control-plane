@@ -3,40 +3,42 @@
 This checklist is for the current production model only:
 
 - JuiceFS CSI workspace bindings
-- workload pods mounted with task HOME subPath semantics
-- keepalive-driven reclaim of compute pods
+- workload pods mounted from AFSCP workload mount plans
+- keepalive-driven AFSCP heartbeat and reclaim of compute pods
 
 ## Must-pass checks
 
 ### Binding lifecycle
 
 - [ ] `PUT /workspace-bindings/{bindingId}` creates or reuses a stable binding
+- [ ] binding ensure fetches AFSCP orchestrator plan with sandbox orchestrator identity
 - [ ] `GET /workspace-bindings/{bindingId}` returns the current binding state
 - [ ] `DELETE /workspace-bindings/{bindingId}` removes the binding resources cleanly
 - [ ] ensuring the same binding twice returns the same stable PVC identity
+- [ ] caller-provided storage backend settings and storage auth material are rejected
 
 ### Workload lifecycle
 
 - [ ] `PUT /workloads/{wlId}` requires `workspace_binding_id`
-- [ ] workload pod mounts `sub_path=agent-tasks/<task_home_segment>` at `mount_path=/home/<task_home_segment>`
-- [ ] workload container `workingDir` is `/home/<task_home_segment>/workspace`
+- [ ] workload pod mount path and read-only mode come from AFSCP plan
+- [ ] workload container `workingDir` is `<mount_path>/workspace`
 - [ ] workload env contains `TASK_HOME`, `HOME`, and `WORKSPACE_PATH`
 - [ ] pod reaches `Running`
 - [ ] `POST /exec` works against the running pod
-- [ ] `POST /keepalive` extends `expires_at`
-- [ ] `DELETE /workloads/{wlId}` removes only compute
+- [ ] `POST /keepalive` heartbeats AFSCP and extends `expires_at`
+- [ ] `DELETE /workloads/{wlId}` removes compute and closes AFSCP mount lifecycle
 
 ### Persistence
 
-- [ ] files written under the task `WORKSPACE_PATH` survive workload deletion and recreation
-- [ ] cleaner deletes expired pods without deleting workspace bindings
+- [ ] files written under the plan-provided `WORKSPACE_PATH` survive workload deletion and recreation when the AFSCP binding remains available
+- [ ] expired compute reclaim goes through the manager workload lifecycle, not direct pod deletion
 - [ ] the same binding can be reused across multiple workloads and tasks
 
 ### Configuration
 
-- [ ] manager is configured through `JUICEFS_CSI_DRIVER`, storage capacity, storage class, mount options, and related CSI envs
-- [ ] all deployment paths use the current JuiceFS CSI binding env/config model
-- [ ] documentation and scripts use the same binding + CSI model
+- [ ] manager is configured with AFSCP internal base URL and orchestrator token
+- [ ] manager uses only CSI driver, capacity, and storage class as local storage knobs
+- [ ] documentation and scripts use the same AFSCP plan consumer model
 
 ### Release evidence
 

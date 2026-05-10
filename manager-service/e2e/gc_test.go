@@ -3,71 +3,24 @@
 package e2e_test
 
 // gc_test.go – End-to-end tests for pod expiry, idle timeout, keepalive accounting,
-// and the cleaner (GC) binary. Every test that runs the cleaner binary will call
-// runCleanerBin so the binary path is validated once.
+// and manager-owned release of expired workloads.
 //
 // Test topology (no external state assumptions):
 //   - Each test creates its own workload(s) and cleans up via t.Cleanup.
 //   - patchPodExpiry (suite helper) fast-forwards the expires_at annotation so GC
 //     tests don't need to wait for real idle timeouts.
-//   - sweepExpiredWorkloads (suite helper) is an in-process alternative to the binary
-//     and is used in tests that don't need the binary end-to-end.
+//   - releaseExpiredWorkloadsViaManager scans expired pods and calls the manager
+//     workload delete API, preserving the AFSCP release/status path.
 
 import (
 	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// runCleanerBin runs the cleaner binary with the given extra arguments and
-// returns (combined output, exit code).  Skips the test if the binary is absent.
-func runCleanerBin(t *testing.T, extraArgs ...string) (output string, exitCode int) {
-	t.Helper()
-	if _, err := os.Stat(suite.CleanerBin); err != nil {
-		t.Skipf("cleaner binary not found at %s – run `make build` first", suite.CleanerBin)
-	}
-
-	// Resolve kubeconfig: prefer KUBECONFIG env, fall back to ~/.kube/config.
-	kubeconfig := os.Getenv("KUBECONFIG")
-	if kubeconfig == "" {
-		if home := os.Getenv("HOME"); home != "" {
-			kubeconfig = filepath.Join(home, ".kube", "config")
-		}
-	}
-
-	args := []string{
-		"--namespace=" + suite.Namespace,
-		"--log-level=debug",
-	}
-	if kubeconfig != "" {
-		args = append(args, "--kubeconfig="+kubeconfig)
-	}
-	args = append(args, extraArgs...)
-
-	cmd := exec.Command(suite.CleanerBin, args...)
-	out, err := cmd.CombinedOutput()
-	t.Logf("cleaner output:\n%s", string(out))
-
-	exitCode = 0
-	if err != nil {
-		if e, ok := err.(*exec.ExitError); ok {
-			exitCode = e.ExitCode()
-		}
-	}
-	return string(out), exitCode
-}
 
 // ---------------------------------------------------------------------------
 // Annotation verification tests (no real K8s pod needed for the assertions –
@@ -298,12 +251,10 @@ func TestGC_MultipleKeepalives(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// In-process GC sweep (sweepExpiredWorkloads helper)
+// Manager-owned expiry release
 // ---------------------------------------------------------------------------
 
-// TestGC_InProcessSweep_DeletesExpiredPod verifies the in-process sweep (used as a
-// reference implementation for the cleaner binary) correctly deletes an expired pod.
-func TestGC_InProcessSweep_DeletesExpiredPod(t *testing.T) {
+func TestGC_ManagerRelease_DeletesExpiredPod(t *testing.T) {
 	wlID := uniqueID("gc-inproc-del")
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
@@ -315,7 +266,7 @@ func TestGC_InProcessSweep_DeletesExpiredPod(t *testing.T) {
 	// Force-expire the pod.
 	patchPodExpiry(t, suite.Namespace, podName, time.Now().UTC().Add(-1*time.Hour))
 
-	deleted := sweepExpiredWorkloads(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
 	assert.GreaterOrEqual(t, deleted, 1, "at least one expired pod must be deleted")
 
 	waitPodGone(t, suite.Namespace, podName, 60*time.Second)
@@ -327,9 +278,9 @@ func TestGC_InProcessSweep_DeletesExpiredPod(t *testing.T) {
 	assert.Equal(t, "offline", ps.Phase, "deleted pod must appear as offline")
 }
 
-// TestGC_InProcessSweep_PreservesActivePod verifies the sweep does NOT delete a pod
+// TestGC_ManagerRelease_PreservesActivePod verifies the manager release helper does NOT delete a pod
 // whose expires_at is in the future.
-func TestGC_InProcessSweep_PreservesActivePod(t *testing.T) {
+func TestGC_ManagerRelease_PreservesActivePod(t *testing.T) {
 	wlID := uniqueID("gc-inproc-keep")
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
@@ -338,7 +289,7 @@ func TestGC_InProcessSweep_PreservesActivePod(t *testing.T) {
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	// Pod expires_at is already in the future from creation (default 30 min).
-	deleted := sweepExpiredWorkloads(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
 
 	// The active pod must NOT have been deleted.
 	resp := newClient().GetWorkload(t, testWS, testProj, wlID)
@@ -348,9 +299,9 @@ func TestGC_InProcessSweep_PreservesActivePod(t *testing.T) {
 		"active pod (expires_at in future) must not be swept; deleted=%d", deleted)
 }
 
-// TestGC_InProcessSweep_MultipleExpiredPods verifies batch sweep deletes all expired
+// TestGC_ManagerRelease_MultipleExpiredPods verifies batch release deletes all expired
 // pods in one pass without touching active ones.
-func TestGC_InProcessSweep_MultipleExpiredPods(t *testing.T) {
+func TestGC_ManagerRelease_MultipleExpiredPods(t *testing.T) {
 	const n = 3
 	wlIDs := make([]string, n)
 	for i := 0; i < n; i++ {
@@ -378,7 +329,7 @@ func TestGC_InProcessSweep_MultipleExpiredPods(t *testing.T) {
 		patchPodExpiry(t, suite.Namespace, "workload-"+id, pastTime)
 	}
 
-	deleted := sweepExpiredWorkloads(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
 	assert.GreaterOrEqual(t, deleted, n, "must delete all %d expired pods", n)
 
 	// All n expired pods must be gone.
@@ -394,94 +345,11 @@ func TestGC_InProcessSweep_MultipleExpiredPods(t *testing.T) {
 		"active pod must survive batch GC sweep")
 }
 
-// ---------------------------------------------------------------------------
-// Cleaner binary (real binary execution)
-// ---------------------------------------------------------------------------
-
-// TestGC_CleanerBin_DeletesExpiredWorkloadPod verifies the actual cleaner binary
-// deletes a workload pod whose expires_at is in the past.
-func TestGC_CleanerBin_DeletesExpiredWorkloadPod(t *testing.T) {
-	wlID := uniqueID("gc-bin-del")
-
-	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
-
-	podName := "workload-" + wlID
-	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
-
-	patchPodExpiry(t, suite.Namespace, podName, time.Now().UTC().Add(-1*time.Hour))
-
-	out, code := runCleanerBin(t, "--dry-run=false")
-	assert.Equal(t, 0, code, "cleaner must exit 0 on success\noutput:\n%s", out)
-	assert.Contains(t, out, podName, "cleaner output must mention the expired pod")
-
-	waitPodGone(t, suite.Namespace, podName, 60*time.Second)
-}
-
-// TestGC_CleanerBin_DryRunPreservesExpiredPod verifies --dry-run=true logs the pod
-// but does NOT delete it.
-func TestGC_CleanerBin_DryRunPreservesExpiredPod(t *testing.T) {
-	wlID := uniqueID("gc-bin-dry")
-
-	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
-
-	podName := "workload-" + wlID
-	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
-
-	patchPodExpiry(t, suite.Namespace, podName, time.Now().UTC().Add(-1*time.Hour))
-
-	out, code := runCleanerBin(t, "--dry-run=true")
-	assert.Equal(t, 0, code, "cleaner must exit 0\noutput:\n%s", out)
-	// Dry-run must log the pod but must NOT actually delete it.
-	assert.True(t,
-		strings.Contains(out, "DRY-RUN") || strings.Contains(out, "dry-run") || strings.Contains(out, "dry_run"),
-		"dry-run cleaner output must contain dry-run indicator")
-
-	// Pod must still be present.
-	resp := newClient().GetWorkload(t, testWS, testProj, wlID)
-	var ps PodStatus
-	require.NoError(t, resp.DecodeJSON(&ps))
-	assert.NotEqual(t, "offline", ps.Phase,
-		"dry-run cleaner must not actually delete the pod")
-}
-
-// TestGC_CleanerBin_PreservesActivePod verifies the cleaner does NOT delete a pod
-// whose expires_at is in the future.
-func TestGC_CleanerBin_PreservesActivePod(t *testing.T) {
-	wlID := uniqueID("gc-bin-keep")
-
-	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
-	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
-
-	podName := "workload-" + wlID
-	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
-
-	// Do NOT patch expiry – pod expires_at is in the future by default.
-	out, code := runCleanerBin(t, "--dry-run=false")
-	assert.Equal(t, 0, code, "cleaner must exit 0\noutput:\n%s", out)
-
-	// Pod must still be alive after the cleaner run.
-	resp := newClient().GetWorkload(t, testWS, testProj, wlID)
-	var ps PodStatus
-	require.NoError(t, resp.DecodeJSON(&ps))
-	assert.NotEqual(t, "offline", ps.Phase,
-		"cleaner must not delete pod with future expires_at; pod=%s phase=%s", podName, ps.Phase)
-}
-
-// TestGC_CleanerBin_ExitZeroOnEmptyNamespace verifies the cleaner handles an empty
-// (or all-active) namespace gracefully and exits 0.
-func TestGC_CleanerBin_ExitZeroOnEmptyNamespace(t *testing.T) {
-	_, code := runCleanerBin(t, "--dry-run=true", "--namespace="+suite.Namespace)
-	assert.Equal(t, 0, code, "cleaner must exit 0 on a namespace with no expired pods")
-}
-
-// ---------------------------------------------------------------------------
 // GET reflects offline after deletion
 // ---------------------------------------------------------------------------
 
-// TestGC_GetAfterDeletion verifies that after a pod is deleted (by either the cleaner
-// or the DELETE API), GET returns phase "offline" rather than the previous phase.
+// TestGC_GetAfterDeletion verifies that after a pod is deleted through the manager API,
+// GET returns phase "offline" rather than the previous phase.
 func TestGC_GetAfterDeletion(t *testing.T) {
 	wlID := uniqueID("gc-get-after")
 

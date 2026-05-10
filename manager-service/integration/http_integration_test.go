@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox/manager/internal/observability"
 	"github.com/sandbox/manager/internal/ratelimit"
 	"github.com/sandbox/manager/internal/workload"
+	"github.com/sandbox/manager/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -205,6 +206,12 @@ func (f *statefulPodFake) addPod(pod *v1.Pod) {
 func (f *statefulPodFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := r.URL.Path
+
+	if r.Method == http.MethodGet && strings.Contains(path, "/persistentvolumeclaims/") {
+		_ = json.NewEncoder(w).Encode(testBindingPVC("ws", "p", "wmb_demo"))
+		return
+	}
+
 	// Expect paths like /api/v1/namespaces/test-ns/pods or .../pods/<name>
 	idx := strings.Index(path, "/pods")
 	if idx < 0 {
@@ -305,6 +312,26 @@ func (f *statefulPodFake) makeServer(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolumeClaim {
+	return &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"mbos.io/afscp-namespace-id":          "ns_demo",
+				"mbos.io/afscp-mount-binding-id":      bindingID,
+				"mbos.io/afscp-volume-id":             "vol_demo",
+				"mbos.io/payload-volume-subdir":       "afscp/ns_demo/repos/repo_demo/payload",
+				"mbos.io/mount-path":                  "/home/task-plan",
+				"mbos.io/read-only":                   "false",
+				"mbos.io/run-as-non-root":             "true",
+				"mbos.io/allow-privileged":            "false",
+				"mbos.io/jvs-control-outside-payload": "true",
+			},
+		},
+	}
 }
 
 // ---- Auth error codes -------------------------------------------------------
@@ -664,7 +691,7 @@ func TestIntegration_FullLifecycle_CreateGetKeepaliveDeleteGet(t *testing.T) {
 	base := srv.URL + "/v1/workspaces/ws/projects/p/workloads/wl1"
 	key := "key"
 
-	createBody := `{"image":"busybox:1.36","workspace_binding_id":"flib-demo","mount_path":"/home/task-wl1","sub_path":"agent-tasks/wl1","working_dir":"/home/task-wl1/workspace","idle_timeout_sec":600,"max_lifetime_sec":3600}`
+	createBody := `{"image":"busybox:1.36","workspace_binding_id":"wmb_demo","idle_timeout_sec":600,"max_lifetime_sec":3600}`
 	req, _ := http.NewRequest(http.MethodPut, base, strings.NewReader(createBody))
 	req.Header.Set("X-Service-Key", key)
 	req.Header.Set("Content-Type", "application/json")
@@ -672,6 +699,19 @@ func TestIntegration_FullLifecycle_CreateGetKeepaliveDeleteGet(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create must return 201: %s", readBody(resp))
 	resp.Body.Close()
+
+	stateful.mu.Lock()
+	createdPod := stateful.pods["workload-wl1"]
+	stateful.mu.Unlock()
+	require.NotNil(t, createdPod)
+	require.Len(t, createdPod.Spec.Containers, 1)
+	require.Len(t, createdPod.Spec.Containers[0].VolumeMounts, 1)
+	mount := createdPod.Spec.Containers[0].VolumeMounts[0]
+	assert.Equal(t, "/home/task-plan", mount.MountPath)
+	assert.Empty(t, mount.SubPath)
+	assert.Equal(t, "/home/task-plan/workspace", createdPod.Spec.Containers[0].WorkingDir)
+	require.NotNil(t, createdPod.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.Equal(t, workspacebinding.PVCName("ws", "p", "wmb_demo"), createdPod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 
 	req, _ = http.NewRequest(http.MethodGet, base, nil)
 	req.Header.Set("X-Service-Key", key)
