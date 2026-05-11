@@ -30,11 +30,11 @@ labels:
 images:
   - name: sandbox-manager
     newName: sandbox-manager
-    newTag: "2.0.2"
+    newTag: "2.0.3"
   - name: sandbox-runner
     newName: sandbox-runner
     newTag: "1.0.0"
 
 # 通用注解
 commonAnnotations:
-  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/version: "2.0.3"

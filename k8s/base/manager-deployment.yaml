@@ -8,6 +8,8 @@ spec:
   selector:
     matchLabels:
       app: sandbox-manager
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -24,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: manager
-        image: sandbox-manager:2.0.0
+        image: sandbox-manager:2.0.3
         imagePullPolicy: IfNotPresent
         ports:
         - name: http

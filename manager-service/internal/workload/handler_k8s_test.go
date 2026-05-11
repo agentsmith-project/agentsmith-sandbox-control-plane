@@ -570,7 +570,7 @@ func TestHandleCreatePod_RejectsPVPlanDriftBeforeCreate(t *testing.T) {
 	pvc := testBindingPVC("ws-1", "proj-1", "wmb_demo")
 	pvc.Annotations["mbos.io/payload-volume-subdir"] = currentPlan.PayloadVolumeSubdir
 	pv := testBindingPV("ws-1", "proj-1", "wmb_demo")
-	pv.Spec.CSI.VolumeAttributes["subdir"] = "afscp/ns_demo/repos/repo_old/payload"
+	pv.Spec.MountOptions = []string{"subdir=afscp/ns_demo/repos/repo_old/payload"}
 
 	reg := newPodRegistry()
 	reg.bindingPVC = pvc

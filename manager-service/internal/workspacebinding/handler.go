@@ -294,7 +294,6 @@ func (h *Handler) activeWorkloadsForBinding(ctx context.Context, workspaceID, pr
 
 func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan) *v1.PersistentVolume {
 	capacity := firstNonEmpty(h.options.StorageCapacity, "1Pi")
-	attrs := map[string]string{"subdir": plan.PayloadVolumeSubdir}
 	return &v1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: status.PVName,
@@ -325,12 +324,12 @@ func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan
 			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimRetain,
 			VolumeMode:                    func() *v1.PersistentVolumeMode { m := v1.PersistentVolumeFilesystem; return &m }(),
 			StorageClassName:              status.StorageClassName,
+			MountOptions:                  []string{payloadSubdirMountOption(plan.PayloadVolumeSubdir)},
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
-					Driver:           firstNonEmpty(h.options.CSIDriver, "csi.juicefs.com"),
-					VolumeHandle:     status.VolumeHandle,
-					FSType:           "juicefs",
-					VolumeAttributes: attrs,
+					Driver:       firstNonEmpty(h.options.CSIDriver, "csi.juicefs.com"),
+					VolumeHandle: status.VolumeHandle,
+					FSType:       "juicefs",
 					NodePublishSecretRef: &v1.SecretReference{
 						Name:      plan.SecretRef.Name,
 						Namespace: plan.SecretRef.Namespace,
@@ -584,6 +583,9 @@ func bindingStatusFromObjects(workspaceID, projectID, bindingID, namespace strin
 		return BindingStatus{}, err
 	}
 	pvName, pvcName := names(workspaceID, projectID, bindingID)
+	if err := validatePVPayloadMountOptions(pv, resolved.PayloadVolumeSubdir); err != nil {
+		return BindingStatus{}, err
+	}
 	if pv != nil && pv.Spec.CSI != nil && pv.Spec.CSI.VolumeAttributes != nil {
 		if subdir := pv.Spec.CSI.VolumeAttributes["subdir"]; subdir != "" && subdir != resolved.PayloadVolumeSubdir {
 			return BindingStatus{}, fmt.Errorf("pv payload subdir does not match pvc annotation")
@@ -648,6 +650,35 @@ func ResolvedMountFromPVC(pvc *v1.PersistentVolumeClaim) (ResolvedMount, error) 
 		return ResolvedMount{}, fmt.Errorf("binding security policy is not allowed")
 	}
 	return resolved, nil
+}
+
+func payloadSubdirMountOption(payloadVolumeSubdir string) string {
+	return "subdir=" + strings.TrimSpace(payloadVolumeSubdir)
+}
+
+func validatePVPayloadMountOptions(pv *v1.PersistentVolume, payloadVolumeSubdir string) error {
+	if pv == nil {
+		return errors.New("workspace binding pv is required")
+	}
+	want := payloadSubdirMountOption(payloadVolumeSubdir)
+	found := false
+	for _, option := range pv.Spec.MountOptions {
+		trimmed := strings.TrimSpace(option)
+		if !strings.HasPrefix(trimmed, "subdir=") {
+			continue
+		}
+		if trimmed != want {
+			return fmt.Errorf("pv payload subdir mount option does not match pvc annotation")
+		}
+		if found {
+			return fmt.Errorf("pv payload subdir mount option is duplicated")
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("pv payload subdir mount option is missing")
+	}
+	return nil
 }
 
 func boolString(value bool) string {

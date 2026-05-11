@@ -5,7 +5,7 @@ resources:
 images:
 - name: sandbox-manager
   newName: sandbox-manager
-  newTag: 2.0.2
+  newTag: 2.0.3
 - name: sandbox-runner
   newName: sandbox-runner
   newTag: 1.0.0

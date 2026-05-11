@@ -150,11 +150,9 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 			},
 		},
 		Spec: v1.PersistentVolumeSpec{
+			MountOptions: []string{"subdir=afscp/ns_demo/repos/repo_demo/payload"},
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
-					VolumeAttributes: map[string]string{
-						"subdir": "afscp/ns_demo/repos/repo_demo/payload",
-					},
 					NodePublishSecretRef: &v1.SecretReference{
 						Namespace: "afscp-mounts",
 						Name:      "juicefs-vol-demo",

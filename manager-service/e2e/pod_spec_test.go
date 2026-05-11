@@ -18,6 +18,8 @@ package e2e_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -54,6 +56,43 @@ func setupPod(t *testing.T, prefix string, req CreateRequest) (wlID string, pod 
 	podName := "workload-" + wlID
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 	return wlID, fetchPod(t, podName)
+}
+
+func startCreateWorkloadRequest(ctx context.Context, wsID, projID, wlID string, req CreateRequest) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		c := newClient()
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.workloadURL(wsID, projID, wlID), jsonBody(req))
+		if err != nil {
+			done <- err
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-Service-Key", c.serviceKey)
+
+		resp, err := c.http.Do(httpReq)
+		if err != nil {
+			if ctx.Err() != nil {
+				done <- nil
+				return
+			}
+			done <- err
+			return
+		}
+		defer resp.Body.Close()
+
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			done <- fmt.Errorf("create workload returned %d: %s", resp.StatusCode, string(body))
+			return
+		}
+		done <- nil
+	}()
+	return done
 }
 
 // ---------------------------------------------------------------------------
@@ -187,10 +226,31 @@ func TestPodSpec_ContainerSecurityContext(t *testing.T) {
 func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	const wsID = "ws-spec-vol"
 	wlID := uniqueID("spec-vol")
-	_ = mustCreateWorkload(t, wsID, testProj, wlID, CreateRequest{Image: suite.Image})
-	t.Cleanup(func() { newClient().DeleteWorkload(t, wsID, testProj, wlID) })
+	req := CreateRequest{Image: suite.Image}
+	ensureWorkspaceBindingForWorkload(t, wsID, testProj, wlID, &req)
 
 	podName := "workload-" + wlID
+	createCtx, cancelCreate := context.WithCancel(context.Background())
+	defer cancelCreate()
+	createDone := startCreateWorkloadRequest(createCtx, wsID, testProj, wlID, req)
+	createDoneDrained := false
+	defer func() {
+		cancelCreate()
+		if createDoneDrained {
+			return
+		}
+		select {
+		case err := <-createDone:
+			require.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Error("create workload request did not finish after cancellation")
+		}
+	}()
+	t.Cleanup(func() {
+		cancelCreate()
+		newClient().DeleteWorkload(t, wsID, testProj, wlID)
+	})
+
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 	pod := fetchPod(t, podName)
 
@@ -199,7 +259,9 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	vol := pod.Spec.Volumes[0]
 	assert.Equal(t, "workspace", vol.Name)
 	require.NotNil(t, vol.PersistentVolumeClaim, "volume must be backed by a PVC")
-	assert.Equal(t, workspacebinding.PVCName(wsID, testProj, "binding-"+wlID), vol.PersistentVolumeClaim.ClaimName,
+	pvcName := workspacebinding.PVCName(wsID, testProj, req.WorkspaceBindingID)
+	assert.Equal(t, pvcName,
+		vol.PersistentVolumeClaim.ClaimName,
 		"PVC claim name must match the expected binding PVC")
 
 	// Volume mount.
@@ -209,7 +271,31 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	vm := vms[0]
 	assert.Equal(t, "workspace", vm.Name)
 	assert.Equal(t, taskHomePath(wlID), vm.MountPath, "workspace PVC must be mounted at the AFSCP plan mount path")
-	assert.Empty(t, vm.SubPath, "payload subdir is carried by the PV CSI plan")
+	assert.Empty(t, vm.SubPath, "payload subdir is carried by the PV mountOptions plan")
+
+	payloadSubdir := pod.Annotations["mbos.io/payload-volume-subdir"]
+	require.NotEmpty(t, payloadSubdir, "pod annotations must retain the AFSCP payload path for audit")
+	pvc, err := k8sCli.CoreV1().PersistentVolumeClaims(suite.Namespace).Get(context.Background(), pvcName, metav1.GetOptions{})
+	require.NoError(t, err, "workspace PVC must exist")
+	require.NotEmpty(t, pvc.Spec.VolumeName, "workspace PVC must bind to a PV")
+	pv, err := k8sCli.CoreV1().PersistentVolumes().Get(context.Background(), pvc.Spec.VolumeName, metav1.GetOptions{})
+	require.NoError(t, err, "workspace PV must exist")
+	assert.Contains(t, pv.Spec.MountOptions, "subdir="+payloadSubdir,
+		"PV mountOptions must carry the AFSCP payload path used by JuiceFS CSI")
+	if pv.Spec.CSI != nil {
+		assert.Empty(t, pv.Spec.CSI.VolumeAttributes["subdir"],
+			"VolumeAttributes[subdir] must not be the isolation source")
+	}
+
+	deleteResp := newClient().DeleteWorkload(t, wsID, testProj, wlID)
+	assert.Contains(t, []int{http.StatusOK, http.StatusNotFound}, deleteResp.StatusCode)
+	select {
+	case err := <-createDone:
+		createDoneDrained = true
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("create workload request did not finish after deleting inspected pod")
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -135,8 +135,11 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	if client.pv.Spec.CSI == nil {
 		t.Fatalf("expected CSI PV")
 	}
-	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "afscp/ns_demo/repos/repo_demo/payload" {
-		t.Fatalf("expected payload subdir from AFSCP plan, got %q", got)
+	if !hasMountOption(client.pv.Spec.MountOptions, "subdir=afscp/ns_demo/repos/repo_demo/payload") {
+		t.Fatalf("expected PV mountOptions to carry AFSCP payload subdir, got %#v", client.pv.Spec.MountOptions)
+	}
+	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "" {
+		t.Fatalf("VolumeAttributes[subdir] must not be the isolation source, got %q", got)
 	}
 	if got := client.pv.Spec.CSI.NodePublishSecretRef; got == nil || got.Namespace != "afscp-mounts" || got.Name != "juicefs-vol-demo" {
 		t.Fatalf("expected secret_ref from AFSCP plan, got %#v", got)
@@ -171,6 +174,70 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	if strings.Contains(getRec.Body.String(), "payload_volume_subdir") || strings.Contains(getRec.Body.String(), "secret_ref") || strings.Contains(getRec.Body.String(), "juicefs-vol-demo") {
 		t.Fatalf("binding status leaked orchestrator-only fields: %s", getRec.Body.String())
 	}
+}
+
+func TestEnsureBindingMountOptionsAreRepoPayloadScoped(t *testing.T) {
+	firstPlan := validPlan()
+	firstPlan.MountBindingID = "wmb_repo_a"
+	firstPlan.PayloadVolumeSubdir = "afscp/ns_demo/repos/repo_a/payload"
+	firstPlan.MountPath = "/home/repo-a"
+	secondPlan := validPlan()
+	secondPlan.MountBindingID = "wmb_repo_b"
+	secondPlan.PayloadVolumeSubdir = "afscp/ns_demo/repos/repo_b/payload"
+	secondPlan.MountPath = "/home/repo-b"
+
+	firstPV := ensureBindingPVForTest(t, firstPlan)
+	secondPV := ensureBindingPVForTest(t, secondPlan)
+
+	if !hasMountOption(firstPV.Spec.MountOptions, "subdir=afscp/ns_demo/repos/repo_a/payload") {
+		t.Fatalf("first PV missing repo-scoped subdir mount option: %#v", firstPV.Spec.MountOptions)
+	}
+	if !hasMountOption(secondPV.Spec.MountOptions, "subdir=afscp/ns_demo/repos/repo_b/payload") {
+		t.Fatalf("second PV missing repo-scoped subdir mount option: %#v", secondPV.Spec.MountOptions)
+	}
+	if strings.Join(firstPV.Spec.MountOptions, "\n") == strings.Join(secondPV.Spec.MountOptions, "\n") {
+		t.Fatalf("distinct repo payloads must not share identical PV mount options: %#v", firstPV.Spec.MountOptions)
+	}
+	for name, pv := range map[string]*v1.PersistentVolume{"first": firstPV, "second": secondPV} {
+		if pv.Spec.CSI == nil {
+			t.Fatalf("%s PV must be CSI-backed", name)
+		}
+		if got := pv.Spec.CSI.VolumeAttributes["subdir"]; got != "" {
+			t.Fatalf("%s PV must not rely on VolumeAttributes[subdir], got %q", name, got)
+		}
+	}
+}
+
+func ensureBindingPVForTest(t *testing.T, plan afscp.OrchestratorMountPlan) *v1.PersistentVolume {
+	t.Helper()
+	client := &fakeK8sClient{}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: plan},
+	})
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"` + plan.MountBindingID + `"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/"+plan.MountBindingID, strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.pv == nil {
+		t.Fatalf("expected PV to be ensured")
+	}
+	return client.pv
+}
+
+func hasMountOption(options []string, want string) bool {
+	for _, option := range options {
+		if option == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEnsureBindingRejectsRawJuiceFSFields(t *testing.T) {

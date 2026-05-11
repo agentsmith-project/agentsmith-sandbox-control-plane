@@ -763,8 +763,8 @@ func ensurePersistentVolumeMatchesResolvedMount(pv *v1.PersistentVolume, mount w
 	if pv.Spec.CSI == nil {
 		return fmt.Errorf("persistent volume is not CSI-backed")
 	}
-	if got := strings.TrimSpace(pv.Spec.CSI.VolumeAttributes["subdir"]); got != strings.TrimSpace(mount.PayloadVolumeSubdir) {
-		return fmt.Errorf("persistent volume payload_volume_subdir changed")
+	if err := ensurePersistentVolumePayloadMountOption(pv, mount.PayloadVolumeSubdir); err != nil {
+		return err
 	}
 	return nil
 }
@@ -776,14 +776,36 @@ func ensurePersistentVolumeMatchesPlan(pv *v1.PersistentVolume, plan afscp.Orche
 	if pv.Spec.CSI == nil {
 		return fmt.Errorf("persistent volume is not CSI-backed")
 	}
-	if got := strings.TrimSpace(pv.Spec.CSI.VolumeAttributes["subdir"]); got != strings.TrimSpace(plan.PayloadVolumeSubdir) {
-		return fmt.Errorf("persistent volume payload_volume_subdir changed")
+	if err := ensurePersistentVolumePayloadMountOption(pv, plan.PayloadVolumeSubdir); err != nil {
+		return err
 	}
 	ref := pv.Spec.CSI.NodePublishSecretRef
 	if ref == nil ||
 		strings.TrimSpace(ref.Namespace) != strings.TrimSpace(plan.SecretRef.Namespace) ||
 		strings.TrimSpace(ref.Name) != strings.TrimSpace(plan.SecretRef.Name) {
 		return fmt.Errorf("persistent volume secret_ref changed")
+	}
+	return nil
+}
+
+func ensurePersistentVolumePayloadMountOption(pv *v1.PersistentVolume, payloadVolumeSubdir string) error {
+	want := "subdir=" + strings.TrimSpace(payloadVolumeSubdir)
+	found := false
+	for _, option := range pv.Spec.MountOptions {
+		trimmed := strings.TrimSpace(option)
+		if !strings.HasPrefix(trimmed, "subdir=") {
+			continue
+		}
+		if trimmed != want {
+			return fmt.Errorf("persistent volume payload_volume_subdir changed")
+		}
+		if found {
+			return fmt.Errorf("persistent volume payload_volume_subdir mount option duplicated")
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("persistent volume payload_volume_subdir mount option missing")
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -11,12 +12,17 @@ import (
 
 const afscpInternalServiceURL = "http://afscp-api.agentsmith-system.svc.cluster.local:8080"
 
-func TestActiveSurfaceExposesOnlyAFSCPWorkloadMountContract(t *testing.T) {
+func repoRootForTest(t *testing.T) string {
+	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test file path")
 	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+}
+
+func TestActiveSurfaceExposesOnlyAFSCPWorkloadMountContract(t *testing.T) {
+	repoRoot := repoRootForTest(t)
 
 	alwaysForbidden := []string{
 		"v2.0.0",
@@ -183,11 +189,7 @@ func TestActiveSurfaceExposesOnlyAFSCPWorkloadMountContract(t *testing.T) {
 }
 
 func TestKustomizeOverlaysConfigureAFSCPInternalBaseURL(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test file path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	repoRoot := repoRootForTest(t)
 	expected := map[string]string{
 		"dev":        afscpInternalServiceURL,
 		"staging":    afscpInternalServiceURL,
@@ -218,11 +220,7 @@ func TestKustomizeOverlaysConfigureAFSCPInternalBaseURL(t *testing.T) {
 }
 
 func TestKustomizeBaseConfiguresAFSCPInternalBaseURLDefault(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test file path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	repoRoot := repoRootForTest(t)
 	configPath := filepath.Join(repoRoot, "k8s", "base", "configmap.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -230,6 +228,48 @@ func TestKustomizeBaseConfiguresAFSCPInternalBaseURLDefault(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "afscp-internal-base-url: "+strconv.Quote(afscpInternalServiceURL)) {
 		t.Fatalf("base configmap must set non-empty AFSCP internal base URL %q", afscpInternalServiceURL)
+	}
+}
+
+func TestKustomizeRendersManagerReleaseControls(t *testing.T) {
+	kubectl, err := exec.LookPath("kubectl")
+	if err != nil {
+		t.Skip("kubectl is required to render kustomize overlays")
+	}
+
+	repoRoot := repoRootForTest(t)
+	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "manager-service", "VERSION"))
+	if err != nil {
+		t.Fatalf("read manager version: %v", err)
+	}
+	version := strings.TrimSpace(string(versionBytes))
+	expectedImages := map[string]string{
+		"dev":        "image: sandbox-manager:" + version,
+		"staging":    "image: localhost:5001/sandbox-manager:" + version,
+		"production": "image: localhost:5001/sandbox-manager:" + version,
+	}
+
+	for overlay, image := range expectedImages {
+		t.Run(overlay, func(t *testing.T) {
+			overlayPath := filepath.Join(repoRoot, "k8s", "overlays", overlay)
+			out, err := exec.Command(kubectl, "kustomize", overlayPath).CombinedOutput()
+			if err != nil {
+				t.Fatalf("render %s overlay: %v\n%s", overlay, err, string(out))
+			}
+			rendered := string(out)
+			if !strings.Contains(rendered, image) {
+				t.Fatalf("%s overlay must render manager image %q", overlay, image)
+			}
+			if !strings.Contains(rendered, "app.kubernetes.io/version: "+version) {
+				t.Fatalf("%s overlay must render app.kubernetes.io/version %q", overlay, version)
+			}
+			if strings.Contains(rendered, "app.kubernetes.io/version: 1.0.0") {
+				t.Fatalf("%s overlay rendered stale app.kubernetes.io/version 1.0.0", overlay)
+			}
+			if !strings.Contains(rendered, "strategy:\n    type: Recreate") {
+				t.Fatalf("%s overlay must render sandbox-manager with Recreate rollout strategy", overlay)
+			}
+		})
 	}
 }
 
