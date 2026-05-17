@@ -57,8 +57,8 @@ Create a workload with `workspace_binding_id`, then check:
 
 Active Kubernetes deployment has no separate pod-deleting reclaim path. Reclaim
 must go through the manager workload delete path so AFSCP release runs before
-pod deletion and terminal `released` status is written only after the pod is
-confirmed gone.
+pod deletion, the mounted payload path is flushed before deletion, and terminal
+`released` status is written only after the pod is confirmed gone.
 
 If pods are not reclaimed:
 
@@ -75,5 +75,5 @@ Before release:
 2. manager tests pass
 3. workspace binding ensure/get/delete works
 4. workload create/get/delete/keepalive/exec works
-5. deleting a workload calls AFSCP release, removes the pod, then reports `released`
+5. deleting a workload calls and confirms AFSCP release, flushes the mounted payload path, removes the pod, then reports `released`
 6. docs and API reference match the current AFSCP plan consumer model

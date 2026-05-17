@@ -18,7 +18,7 @@ Sandbox Manager owns:
 - PV/PVC materialization from plan fields
 - workload pod lifecycle
 - AFSCP heartbeat on workload keepalive
-- AFSCP release before workload pod deletion, then `released` status only after the pod is confirmed gone
+- AFSCP release before workload pod deletion, a storage flush barrier for the mounted payload path before pod deletion, then `released` status only after the pod is confirmed gone
 
 AgentSmith owns:
 
@@ -71,5 +71,5 @@ Before release, verify:
 2. PV/PVC use only AFSCP plan payload subdir, Secret ref, mount path, read-only flag, and security policy.
 3. `PUT /workloads/{wlId}` mounts the binding PVC at the plan mount path.
 4. `POST /workloads/{wlId}/keepalive` calls AFSCP heartbeat.
-5. `DELETE /workloads/{wlId}` calls AFSCP release with a stable idempotency key, deletes the pod, confirms it is gone, then reports `released`; failed pod deletion leaves the pod present for retry and does not write terminal status.
+5. `DELETE /workloads/{wlId}` calls AFSCP release with a stable idempotency key, runs the storage flush barrier, deletes the pod, confirms it is gone, then reports `released`; failed flush or pod deletion leaves the pod present for retry and does not write terminal status.
 6. docs, tests, and operational runbooks all describe this same model.

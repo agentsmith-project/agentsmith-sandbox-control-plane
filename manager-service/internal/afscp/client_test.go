@@ -93,7 +93,7 @@ func TestClientReleaseAndStatusUseMutationHeaders(t *testing.T) {
 			ActorID:        r.Header.Get(HeaderActorID),
 			Body:           body,
 		})
-		_ = json.NewEncoder(w).Encode(OperationEnvelope{OperationID: "op_123", OperationState: "queued"})
+		_ = json.NewEncoder(w).Encode(OperationEnvelope{OperationID: "op_123", OperationState: "succeeded"})
 	}))
 	t.Cleanup(server.Close)
 
@@ -124,5 +124,40 @@ func TestClientReleaseAndStatusUseMutationHeaders(t *testing.T) {
 	}
 	if requests[1].Body["status"] != "released" || requests[1].Body["reason"] != "pod deleted" || requests[1].Body["observed_at"] != "2026-05-10T12:00:00Z" {
 		t.Fatalf("status body = %#v", requests[1].Body)
+	}
+}
+
+func TestClientReleaseAndStatusWaitForTerminalSuccess(t *testing.T) {
+	counts := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		counts[key]++
+		state := "queued"
+		if counts[key] > 1 {
+			state = "succeeded"
+		}
+		_ = json.NewEncoder(w).Encode(OperationEnvelope{OperationID: "op_wait", OperationState: state})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "token", CallerService: "sandbox-orchestrator", OperationPollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, err := client.ReleaseWorkloadMountBinding(t.Context(), "ns_123", "wmb_123", "corr-123", "idem-release"); err != nil {
+		t.Fatalf("ReleaseWorkloadMountBinding: %v", err)
+	}
+	if _, err := client.UpdateWorkloadMountStatus(t.Context(), "ns_123", "wmb_123", "released", "pod deleted", time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC), "corr-123", "idem-status"); err != nil {
+		t.Fatalf("UpdateWorkloadMountStatus: %v", err)
+	}
+
+	releaseKey := http.MethodPost + " /internal/v1/workload-mount-bindings/wmb_123:release"
+	statusKey := http.MethodPatch + " /internal/v1/workload-mount-bindings/wmb_123/status"
+	if counts[releaseKey] != 2 {
+		t.Fatalf("release calls = %d, want 2 to confirm queued operation", counts[releaseKey])
+	}
+	if counts[statusKey] != 2 {
+		t.Fatalf("status calls = %d, want 2 to confirm queued operation", counts[statusKey])
 	}
 }

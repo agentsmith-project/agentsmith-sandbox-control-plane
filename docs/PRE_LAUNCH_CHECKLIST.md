@@ -30,7 +30,7 @@ This checklist is for the current production model only:
 
 ### Persistence
 
-- [ ] files written under the plan-provided `WORKSPACE_PATH` survive workload deletion and recreation when the AFSCP binding remains available
+- [ ] files written under the plan-provided `WORKSPACE_PATH` survive workload deletion and recreation when the AFSCP binding remains available; deletion runs the mounted payload flush barrier before terminal release
 - [ ] expired compute reclaim goes through the manager workload lifecycle, not direct pod deletion
 - [ ] the same binding can be reused across multiple workloads and tasks
 

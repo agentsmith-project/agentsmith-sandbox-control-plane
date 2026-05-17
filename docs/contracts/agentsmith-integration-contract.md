@@ -140,7 +140,7 @@ Deleting a workload removes compute and closes the AFSCP mount lifecycle:
 DELETE /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}
 ```
 
-Sandbox Manager calls AFSCP release with a stable idempotency key before deleting the pod. It reports `released` only after the pod is confirmed gone. If release or pod deletion fails, the pod remains so the same workload delete can be retried; pod deletion failure does not write terminal AFSCP status.
+Sandbox Manager calls AFSCP release with a stable idempotency key before deleting the pod and confirms the AFSCP operation succeeds. It then runs the storage flush barrier on the mounted payload path, deletes the pod, and reports `released` only after the pod is confirmed gone and the status operation succeeds. If release, flush, or pod deletion fails, the pod remains so the same workload delete can be retried; those failures do not write terminal AFSCP status.
 
 Deleting a workspace binding removes the sandbox-managed PV/PVC:
 

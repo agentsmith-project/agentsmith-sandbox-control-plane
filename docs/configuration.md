@@ -54,7 +54,7 @@ Do not point sandbox at the AgentSmith API service for AFSCP lifecycle calls.
 
 ## Reclaim
 
-Expired workload reclaim must enter through the manager workload delete API. That path owns AFSCP release before pod deletion and writes `released` only after the pod is confirmed gone.
+Expired workload reclaim must enter through the manager workload delete API. That path owns AFSCP release confirmation, mounted payload flush, pod deletion, and writes `released` only after the pod is confirmed gone.
 
 ## Example YAML
 

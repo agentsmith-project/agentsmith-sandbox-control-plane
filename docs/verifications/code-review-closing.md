@@ -12,7 +12,7 @@
 | **Workspace mount** | Pod mount path, read-only mode, runtime env, and writable init behavior are derived from the AFSCP plan. |
 | **Keepalive** | AFSCP heartbeat runs before `expires_at` is extended and capped locally. |
 | **Exec** | Pod existence checked; timeout capped; container `main` only. |
-| **Delete** | Calls AFSCP release before compute deletion and writes `released` only after the pod is confirmed gone; pod deletion failures remain retryable and do not write terminal status. |
+| **Delete** | Calls and confirms AFSCP release before compute deletion, runs the storage flush barrier, and writes `released` only after the pod is confirmed gone; flush or pod deletion failures remain retryable and do not write terminal status. |
 | **Reclaim** | Active deploy surface avoids direct pod deletion; compute closure goes through manager delete so AFSCP release/status runs. |
 | **Auth** | Service-key middleware and validator protect all `/v1/` routes. |
 | **K8s client** | In-cluster / kubeconfig, QPS/burst, retry, namespace trimming. |

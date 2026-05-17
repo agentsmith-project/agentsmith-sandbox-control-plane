@@ -24,21 +24,25 @@ const (
 )
 
 type Client struct {
-	baseURL       *url.URL
-	httpClient    *http.Client
-	token         string
-	callerService string
-	actorType     string
-	actorID       string
+	baseURL               *url.URL
+	httpClient            *http.Client
+	token                 string
+	callerService         string
+	actorType             string
+	actorID               string
+	operationWaitTimeout  time.Duration
+	operationPollInterval time.Duration
 }
 
 type ClientConfig struct {
-	BaseURL       string
-	Token         string
-	CallerService string
-	ActorType     string
-	ActorID       string
-	HTTPClient    *http.Client
+	BaseURL               string
+	Token                 string
+	CallerService         string
+	ActorType             string
+	ActorID               string
+	HTTPClient            *http.Client
+	OperationWaitTimeout  time.Duration
+	OperationPollInterval time.Duration
 }
 
 type SecretRef struct {
@@ -70,6 +74,11 @@ type OperationEnvelope struct {
 	Error          map[string]any `json:"error"`
 }
 
+const (
+	defaultOperationWaitTimeout  = 30 * time.Second
+	defaultOperationPollInterval = 250 * time.Millisecond
+)
+
 func NewClient(config ClientConfig) (*Client, error) {
 	rawBaseURL := strings.TrimSpace(config.BaseURL)
 	if rawBaseURL == "" {
@@ -90,13 +99,23 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	waitTimeout := config.OperationWaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = defaultOperationWaitTimeout
+	}
+	pollInterval := config.OperationPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultOperationPollInterval
+	}
 	return &Client{
-		baseURL:       baseURL,
-		httpClient:    httpClient,
-		token:         token,
-		callerService: callerService,
-		actorType:     actorType,
-		actorID:       actorID,
+		baseURL:               baseURL,
+		httpClient:            httpClient,
+		token:                 token,
+		callerService:         callerService,
+		actorType:             actorType,
+		actorID:               actorID,
+		operationWaitTimeout:  waitTimeout,
+		operationPollInterval: pollInterval,
 	}, nil
 }
 
@@ -114,7 +133,7 @@ func (c *Client) HeartbeatWorkloadMountBinding(ctx context.Context, namespaceID,
 }
 
 func (c *Client) ReleaseWorkloadMountBinding(ctx context.Context, namespaceID, mountBindingID, correlationID, idempotencyKey string) (OperationEnvelope, error) {
-	return c.emptyMutation(ctx, fmt.Sprintf("/internal/v1/workload-mount-bindings/%s:release", url.PathEscape(mountBindingID)), namespaceID, correlationID, idempotencyKey)
+	return c.confirmedEmptyMutation(ctx, fmt.Sprintf("/internal/v1/workload-mount-bindings/%s:release", url.PathEscape(mountBindingID)), namespaceID, correlationID, idempotencyKey)
 }
 
 func (c *Client) UpdateWorkloadMountStatus(ctx context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (OperationEnvelope, error) {
@@ -126,11 +145,7 @@ func (c *Client) UpdateWorkloadMountStatus(ctx context.Context, namespaceID, mou
 		body["reason"] = strings.TrimSpace(reason)
 	}
 	var envelope OperationEnvelope
-	err := c.doJSON(ctx, http.MethodPatch, fmt.Sprintf("/internal/v1/workload-mount-bindings/%s/status", url.PathEscape(mountBindingID)), namespaceID, correlationID, idempotencyKey, body, &envelope)
-	if err != nil {
-		return OperationEnvelope{}, err
-	}
-	return envelope, nil
+	return c.confirmedMutation(ctx, http.MethodPatch, fmt.Sprintf("/internal/v1/workload-mount-bindings/%s/status", url.PathEscape(mountBindingID)), namespaceID, correlationID, idempotencyKey, body, &envelope)
 }
 
 func (c *Client) emptyMutation(ctx context.Context, path string, namespaceID, correlationID, idempotencyKey string) (OperationEnvelope, error) {
@@ -140,6 +155,72 @@ func (c *Client) emptyMutation(ctx context.Context, path string, namespaceID, co
 		return OperationEnvelope{}, err
 	}
 	return envelope, nil
+}
+
+func (c *Client) confirmedEmptyMutation(ctx context.Context, path string, namespaceID, correlationID, idempotencyKey string) (OperationEnvelope, error) {
+	return c.confirmedMutation(ctx, http.MethodPost, path, namespaceID, correlationID, idempotencyKey, nil, nil)
+}
+
+func (c *Client) confirmedMutation(ctx context.Context, method, path string, namespaceID, correlationID, idempotencyKey string, body any, out *OperationEnvelope) (OperationEnvelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, c.operationWaitTimeout)
+	defer cancel()
+
+	var last OperationEnvelope
+	for {
+		var envelope OperationEnvelope
+		if out != nil {
+			envelope = *out
+		}
+		if err := c.doJSON(waitCtx, method, path, namespaceID, correlationID, idempotencyKey, body, &envelope); err != nil {
+			return OperationEnvelope{}, err
+		}
+		last = envelope
+		if operationSucceeded(envelope.OperationState) {
+			if out != nil {
+				*out = envelope
+			}
+			return envelope, nil
+		}
+		if operationFailed(envelope.OperationState) {
+			return OperationEnvelope{}, fmt.Errorf("afscp operation %s ended in %s", envelope.OperationID, envelope.OperationState)
+		}
+		if !operationPending(envelope.OperationState) {
+			return OperationEnvelope{}, fmt.Errorf("afscp operation %s returned unknown state %q", envelope.OperationID, envelope.OperationState)
+		}
+
+		timer := time.NewTimer(c.operationPollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return OperationEnvelope{}, fmt.Errorf("afscp operation %s did not succeed before timeout: last_state=%s", last.OperationID, last.OperationState)
+		case <-timer.C:
+		}
+	}
+}
+
+func operationSucceeded(state string) bool {
+	return strings.TrimSpace(state) == "succeeded"
+}
+
+func operationPending(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "queued", "running", "cancel_requested":
+		return true
+	default:
+		return false
+	}
+}
+
+func operationFailed(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "failed", "cancelled", "operator_intervention_required":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) doJSON(ctx context.Context, method, requestPath, namespaceID, correlationID, idempotencyKey string, body any, out any) error {

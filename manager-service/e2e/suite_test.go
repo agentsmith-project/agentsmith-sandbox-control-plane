@@ -313,7 +313,7 @@ func startFakeAFSCP(c *SuiteConfig) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPatch {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"operation_id":    "op_e2e",
-				"operation_state": "queued",
+				"operation_state": "succeeded",
 			})
 			return
 		}

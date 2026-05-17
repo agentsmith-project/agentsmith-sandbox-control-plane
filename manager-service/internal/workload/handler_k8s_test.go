@@ -93,6 +93,28 @@ type fakeMountLifecycleClient struct {
 	statusErr               error
 }
 
+type fakeStorageFlushBarrier struct {
+	events    *eventRecorder
+	podName   string
+	mountPath string
+	err       error
+}
+
+func (f *fakeStorageFlushBarrier) FlushWorkloadMount(_ context.Context, pod *v1.Pod, mountPath string) error {
+	if pod != nil {
+		f.podName = pod.Name
+	}
+	f.mountPath = mountPath
+	f.events.append("flush-" + f.podName + ":" + mountPath)
+	return f.err
+}
+
+type noopStorageFlushBarrier struct{}
+
+func (noopStorageFlushBarrier) FlushWorkloadMount(context.Context, *v1.Pod, string) error {
+	return nil
+}
+
 func (f *fakeMountLifecycleClient) GetOrchestratorMountPlan(_ context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error) {
 	f.planNamespaceID = namespaceID
 	f.planMountBindingID = mountBindingID
@@ -325,6 +347,9 @@ func newHandlerWithRegistryAndOptions(t *testing.T, reg *podRegistry, options Op
 	srv := reg.makeServer(t)
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
+	if options.AFSCPClient != nil && options.StorageFlushBarrier == nil {
+		options.StorageFlushBarrier = noopStorageFlushBarrier{}
+	}
 	return NewHandler(client, executor, options)
 }
 
@@ -344,6 +369,7 @@ func workloadPodWithMountAnnotations(name string) *v1.Pod {
 				"workload/maxExpiresAt":          time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
 				"mbos.io/afscp-namespace-id":     "ns_demo",
 				"mbos.io/afscp-mount-binding-id": "wmb_demo",
+				"mbos.io/mount-path":             "/home/task-plan",
 			},
 		},
 		Status: v1.PodStatus{Phase: v1.PodRunning},
@@ -876,6 +902,48 @@ func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
 	assert.Equal(t, "workload pod deleted", lifecycle.statusReason)
 	assert.Equal(t, "corr-delete", lifecycle.statusCorrelationID)
 	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+}
+
+func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
+	events := &eventRecorder{}
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events}
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg.events = events
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "workload-wl-1", flush.podName)
+	assert.Equal(t, "/home/task-plan", flush.mountPath)
+	assert.Equal(t, []string{"release", "flush-workload-wl-1:/home/task-plan", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+}
+
+func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
+	events := &eventRecorder{}
+	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events, err: errors.New("sync failed")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "storage flush barrier failed")
+	assert.Equal(t, []string{"release", "flush-workload-wl-1:/home/task-plan"}, events.snapshot())
+	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when storage flush fails")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods["workload-wl-1"], "failed storage flush must leave pod available for retry")
 }
 
 func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {

@@ -102,5 +102,5 @@ Before calling the service release-ready, verify:
 1. Workspace binding ensure fetches the AFSCP plan and creates/reuses PV/PVC.
 2. Workload create accepts `workspace_binding_id` only for mount selection.
 3. Pod mount path, read-only mode, working directory, and runtime env come from the plan.
-4. Keepalive and delete call the AFSCP workload mount lifecycle endpoints.
+4. Keepalive and delete call the AFSCP workload mount lifecycle endpoints; delete confirms release/status operations and runs the storage flush barrier before pod removal.
 5. Docs, tests, and runbooks describe this same AFSCP plan consumer model.

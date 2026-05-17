@@ -51,6 +51,10 @@ type mountLifecycleClient interface {
 	UpdateWorkloadMountStatus(ctx context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error)
 }
 
+type WorkloadStorageFlushBarrier interface {
+	FlushWorkloadMount(ctx context.Context, pod *v1.Pod, mountPath string) error
+}
+
 // Handler provides REST endpoints for managed workload pod lifecycle.
 type Handler struct {
 	k8sClient *k8s.Client
@@ -62,6 +66,7 @@ type Options struct {
 	DefaultNodeSelector map[string]string
 	DefaultTolerations  []v1.Toleration
 	AFSCPClient         mountLifecycleClient
+	StorageFlushBarrier WorkloadStorageFlushBarrier
 }
 
 type responseStatusError struct {
@@ -277,6 +282,11 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 
 	if err := h.releaseWorkloadMount(ctx, r, pod); err != nil {
 		jsonError(w, http.StatusBadGateway, "afscp workload mount release failed: "+err.Error())
+		return
+	}
+
+	if err := h.flushWorkloadStorage(ctx, pod); err != nil {
+		jsonError(w, http.StatusInternalServerError, "storage flush barrier failed: "+err.Error())
 		return
 	}
 
@@ -1017,6 +1027,24 @@ func (h *Handler) releaseWorkloadMount(ctx context.Context, r *http.Request, pod
 	return nil
 }
 
+func (h *Handler) flushWorkloadStorage(ctx context.Context, pod *v1.Pod) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	if _, ok := workloadMountRefFromPod(pod); !ok {
+		return fmt.Errorf("pod is missing AFSCP workload mount annotations")
+	}
+	mountPath, ok := workloadMountPathFromPod(pod)
+	if !ok {
+		return fmt.Errorf("pod is missing AFSCP mount path annotation")
+	}
+	barrier := h.options.StorageFlushBarrier
+	if barrier == nil {
+		barrier = podExecStorageFlushBarrier{executor: h.executor}
+	}
+	return barrier.FlushWorkloadMount(ctx, pod, mountPath)
+}
+
 func (h *Handler) markWorkloadMountReleased(ctx context.Context, r *http.Request, pod *v1.Pod) error {
 	if h.options.AFSCPClient == nil {
 		return nil
@@ -1040,6 +1068,67 @@ func workloadMountRefFromPod(pod *v1.Pod) (workloadMountRef, bool) {
 		return workloadMountRef{}, false
 	}
 	return workloadMountRef{namespaceID: namespaceID, mountBindingID: mountBindingID}, true
+}
+
+func workloadMountPathFromPod(pod *v1.Pod) (string, bool) {
+	if pod == nil || pod.Annotations == nil {
+		return "", false
+	}
+	mountPath := strings.TrimSpace(pod.Annotations["mbos.io/mount-path"])
+	if mountPath == "" || !path.IsAbs(mountPath) || mountPath == "/" || containsParentPathSegment(mountPath) || path.Clean(mountPath) != mountPath {
+		return "", false
+	}
+	if strings.Contains(mountPath, "\\") {
+		return "", false
+	}
+	return mountPath, true
+}
+
+type podExecStorageFlushBarrier struct {
+	executor *k8s.Executor
+	timeout  time.Duration
+}
+
+func (barrier podExecStorageFlushBarrier) FlushWorkloadMount(ctx context.Context, pod *v1.Pod, mountPath string) error {
+	if barrier.executor == nil {
+		return fmt.Errorf("k8s executor is not configured")
+	}
+	if pod == nil {
+		return fmt.Errorf("pod is required")
+	}
+	podName := strings.TrimSpace(pod.GetName())
+	if podName == "" {
+		return fmt.Errorf("pod name is required")
+	}
+	timeout := barrier.timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	result, err := barrier.executor.Exec(ctx, podName, &k8s.ExecOptions{
+		Command: []string{
+			"sh",
+			"-c",
+			`if [ ! -d "$1" ]; then echo "mount path not found: $1" >&2; exit 1; fi; sync -f "$1" 2>/dev/null || sync`,
+			"sh",
+			mountPath,
+		},
+		Container: "main",
+		Timeout:   timeout,
+	})
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return fmt.Errorf("storage flush command returned no result")
+	}
+	if result.ExitCode != 0 {
+		stderr := strings.TrimSpace(result.Stderr)
+		if stderr == "" {
+			stderr = "no stderr"
+		}
+		return fmt.Errorf("storage flush command exited %d: %s", result.ExitCode, stderr)
+	}
+	return nil
 }
 
 func requestCorrelationID(r *http.Request) string {

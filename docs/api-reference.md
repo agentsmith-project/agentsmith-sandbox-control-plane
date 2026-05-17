@@ -142,7 +142,7 @@ Returns the workload pod status, or `{ "phase": "offline" }` when missing.
 
 ### DELETE - Delete Workload Pod
 
-Calls AFSCP release with a stable idempotency key, deletes the pod, confirms it is gone, then reports `released`. If release or pod deletion fails, the pod is left in place so a later `DELETE` can retry; pod deletion failure does not write terminal AFSCP status.
+Calls AFSCP release with a stable idempotency key, confirms the release operation succeeds, runs the storage flush barrier on the mounted payload path, deletes the pod, confirms it is gone, then reports `released` after the status operation succeeds. If release, flush, or pod deletion fails, the pod is left in place so a later `DELETE` can retry; those failures do not write terminal AFSCP status.
 
 ### POST /keepalive - Extend Workload Expiry
 
