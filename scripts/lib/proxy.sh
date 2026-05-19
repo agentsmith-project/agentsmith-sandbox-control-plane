@@ -47,8 +47,8 @@ proxy_env_build_args() {
   local img_no="${DOCKER_IMAGE_NO_PROXY:-}"
 
   local args=()
-  if [ -n "$img_http" ]; then args+=("--build-arg" "HTTP_PROXY=$img_http" "--build-arg" "http_proxy=$img_http"); fi
-  if [ -n "$img_https" ]; then args+=("--build-arg" "HTTPS_PROXY=$img_https" "--build-arg" "https_proxy=$img_https"); fi
-  if [ -n "$img_no" ]; then args+=("--build-arg" "NO_PROXY=$img_no" "--build-arg" "no_proxy=$img_no"); fi
+  if [ -n "$img_http" ]; then args+=("--build-arg" "ASBCP_BUILD_HTTP_PROXY=$img_http"); fi
+  if [ -n "$img_https" ]; then args+=("--build-arg" "ASBCP_BUILD_HTTPS_PROXY=$img_https"); fi
+  if [ -n "$img_no" ]; then args+=("--build-arg" "ASBCP_BUILD_NO_PROXY=$img_no"); fi
   printf "%s " "${args[@]}"
 }

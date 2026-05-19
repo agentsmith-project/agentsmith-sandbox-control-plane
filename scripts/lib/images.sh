@@ -56,7 +56,7 @@ images_build() {
     build_args="$(proxy_env_build_args)"
   else
     # Explicitly override Docker's auto proxy build-args injection.
-    build_args="--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy="
+    build_args="--build-arg ASBCP_BUILD_HTTP_PROXY= --build-arg ASBCP_BUILD_HTTPS_PROXY= --build-arg ASBCP_BUILD_NO_PROXY= --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy="
   fi
 
   local asbcp_ver runner_ver
@@ -174,7 +174,7 @@ images_push_harbor() {
       args_build=($(proxy_env_build_args))
     else
       # Explicitly override Docker's auto proxy build-args injection.
-      args_build=(--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy=)
+      args_build=(--build-arg ASBCP_BUILD_HTTP_PROXY= --build-arg ASBCP_BUILD_HTTPS_PROXY= --build-arg ASBCP_BUILD_NO_PROXY= --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy=)
     fi
 
     local no_proxy_skopeo="false"

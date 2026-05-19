@@ -56,6 +56,12 @@
       "rationale": "The tag release workflow verifies docker pull of the published tag@digest before creating release notes."
     },
     {
+      "id": "final_manifest",
+      "description": "Tag release workflow emits the canonical final manifest with version, tag, commit, image digest, API contract version, and public inspect result.",
+      "status": "workflow-gated",
+      "rationale": "The release workflow generates dist/asbcp-final-manifest.json after anonymous inspect and uploads it as a GitHub Release asset."
+    },
+    {
       "id": "raw_storage_exclusion",
       "description": "ASBCP contract excludes raw storage credentials.",
       "status": "added"

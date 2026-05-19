@@ -2,19 +2,17 @@ ARG GO_BASE_IMAGE=golang:1.25-alpine
 ARG RUNTIME_BASE_IMAGE=ubuntu:22.04
 FROM ${GO_BASE_IMAGE} AS builder
 
-# 代理配置（可选，仅用于构建时，不会保留在最终镜像中）
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG NO_PROXY
-ARG no_proxy
+# Optional build-only proxy args. Defaults stay empty for public release builds.
+ARG ASBCP_BUILD_HTTP_PROXY=""
+ARG ASBCP_BUILD_HTTPS_PROXY=""
+ARG ASBCP_BUILD_NO_PROXY=""
 
 ARG VERSION=dev
 
 WORKDIR /build
 COPY go.mod go.sum ./
-RUN go mod download
+RUN export HTTP_PROXY="${ASBCP_BUILD_HTTP_PROXY}" HTTPS_PROXY="${ASBCP_BUILD_HTTPS_PROXY}" http_proxy="${ASBCP_BUILD_HTTP_PROXY}" https_proxy="${ASBCP_BUILD_HTTPS_PROXY}" NO_PROXY="${ASBCP_BUILD_NO_PROXY}" no_proxy="${ASBCP_BUILD_NO_PROXY}" && \
+    go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -35,16 +33,13 @@ LABEL org.opencontainers.image.title="AgentSmith Sandbox Control Plane" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-# 代理配置（可选，用于构建时，不会保留在最终镜像中）
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG NO_PROXY
-ARG no_proxy
+# Optional build-only proxy args. Defaults stay empty for public release builds.
+ARG ASBCP_BUILD_HTTP_PROXY=""
+ARG ASBCP_BUILD_HTTPS_PROXY=""
+ARG ASBCP_BUILD_NO_PROXY=""
 
-# 先使用默认源安装 ca-certificates（构建期可使用代理；不写入 ENV，避免保留到运行时）
-RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="${http_proxy}" https_proxy="${https_proxy}" NO_PROXY="${NO_PROXY}" no_proxy="${no_proxy}" && \
+# Install ca-certificates with the default upstream source; proxy is opt-in and build-only.
+RUN export HTTP_PROXY="${ASBCP_BUILD_HTTP_PROXY}" HTTPS_PROXY="${ASBCP_BUILD_HTTPS_PROXY}" http_proxy="${ASBCP_BUILD_HTTP_PROXY}" https_proxy="${ASBCP_BUILD_HTTPS_PROXY}" NO_PROXY="${ASBCP_BUILD_NO_PROXY}" no_proxy="${ASBCP_BUILD_NO_PROXY}" && \
     apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*

@@ -69,6 +69,18 @@ require_contains .github/workflows/release.yml "packages:[[:space:]]*write" "GHC
 require_contains .github/workflows/release.yml "docker/login-action" "GHCR login"
 require_contains .github/workflows/release.yml "docker/build-push-action" "image build and push"
 require_contains .github/workflows/release.yml "docker pull" "digest pull verification"
+require_contains .github/workflows/release.yml "Generate final manifest" "final manifest generation"
+require_contains .github/workflows/release.yml "asbcp-final-manifest\\.json" "final manifest release asset"
+require_contains .github/workflows/release.yml "asbcp-release-notes\\.md" "release notes derived from the final manifest"
+require_contains .github/workflows/release.yml "body_path:" "release notes file upload"
+require_contains .github/workflows/release.yml "fail_on_unmatched_files:[[:space:]]*true" "hard failure when final manifest asset is missing"
+require_contains .github/workflows/release.yml "files:" "GitHub Release asset upload"
+require_contains .github/workflows/release.yml "\"version\"" "final manifest version field"
+require_contains .github/workflows/release.yml "\"tag\"" "final manifest tag field"
+require_contains .github/workflows/release.yml "\"commit\"" "final manifest commit field"
+require_contains .github/workflows/release.yml "\"image_digest\"" "final manifest image digest field"
+require_contains .github/workflows/release.yml "\"api_contract_version\"" "final manifest API contract version field"
+require_contains .github/workflows/release.yml "\"public_inspect_result\"" "final manifest public inspect result field"
 
 guard_paths=(
   README.md

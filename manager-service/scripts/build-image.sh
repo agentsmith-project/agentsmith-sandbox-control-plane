@@ -129,14 +129,11 @@ if [ "$USING_PROXY" = "false" ]; then
     --cache-to type=local,dest=$CACHE_DIR,mode=max"
 fi
 
-# 添加代理参数（用于 Dockerfile 内部使用）
+# 添加代理参数（用于 Dockerfile 内部使用；Dockerfile 只读取 ASBCP_BUILD_*）
 BUILD_CMD="$BUILD_CMD \
-    ${HTTP_PROXY:+--build-arg HTTP_PROXY=$HTTP_PROXY} \
-    ${HTTPS_PROXY:+--build-arg HTTPS_PROXY=$HTTPS_PROXY} \
-    ${http_proxy:+--build-arg http_proxy=$http_proxy} \
-    ${https_proxy:+--build-arg https_proxy=$https_proxy} \
-    ${NO_PROXY:+--build-arg NO_PROXY=$NO_PROXY} \
-    ${no_proxy:+--build-arg no_proxy=$no_proxy} \
+    ${HTTP_PROXY:+--build-arg ASBCP_BUILD_HTTP_PROXY=$HTTP_PROXY} \
+    ${HTTPS_PROXY:+--build-arg ASBCP_BUILD_HTTPS_PROXY=$HTTPS_PROXY} \
+    ${NO_PROXY:+--build-arg ASBCP_BUILD_NO_PROXY=$NO_PROXY} \
     --progress=plain \
     ${SERVICE_DIR}"
 

@@ -42,4 +42,4 @@ The release workflow must call `scripts/verify-release.sh` before `docker/build-
 
 ## Release Evidence
 
-Release evidence is tracked in `docs/release-evidence/release-manifest.json` and summarized in `docs/READINESS_EVIDENCE.md`. Each tag release must publish image digest, commit SHA, API contract version, breaking changes, and known risk status.
+Release evidence is tracked in `docs/release-evidence/release-manifest.json` and summarized in `docs/READINESS_EVIDENCE.md`. Each tag release must publish image digest, commit SHA, API contract version, breaking changes, known risk status, and an attached `asbcp-final-manifest.json` generated after anonymous public digest inspect.

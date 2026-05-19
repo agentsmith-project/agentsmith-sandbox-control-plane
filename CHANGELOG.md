@@ -6,6 +6,14 @@ This project follows pre-GA evidence-first release notes. Each release entry mus
 
 ## Unreleased
 
+## 2.0.4 - 2026-05-19
+
+- Fixed tag release evidence by generating `asbcp-final-manifest.json` after fresh anonymous digest inspect and uploading it as a GitHub Release asset.
+- Hardened workflow guards so release notes are file-based and the release workflow must publish final manifest fields for version, tag, commit, image digest, API contract version, and public inspect result.
+- Cleaned ASBCP release image build defaults so Dockerfile proxy usage is opt-in via empty-by-default `ASBCP_BUILD_*` build args and release gate builds clear host proxy defaults.
+
+## 2.0.3 - 2026-05-19
+
 - Added ASBCP public governance skeleton.
 - Added authoritative release gate entrypoint at `scripts/verify-release.sh`.
 - Added GitHub PR, CI, and tag release workflow skeletons.

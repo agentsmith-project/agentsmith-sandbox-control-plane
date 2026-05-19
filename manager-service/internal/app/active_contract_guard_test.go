@@ -373,6 +373,27 @@ func makeTargetStanza(makefile string, target string) string {
 	return strings.Join(out, "\n")
 }
 
+func shellFunctionStanza(script string, functionName string) string {
+	lines := strings.Split(script, "\n")
+	var out []string
+	inFunction := false
+	prefix := functionName + "() {"
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			inFunction = true
+			out = append(out, line)
+			continue
+		}
+		if inFunction {
+			out = append(out, line)
+			if line == "}" {
+				break
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "verify-release.sh")
@@ -523,6 +544,9 @@ func TestDockerfileReleaseContract(t *testing.T) {
 		"ARG VERSION=dev",
 		"ARG VCS_REF=unknown",
 		"ARG BUILD_DATE=unknown",
+		`ARG ASBCP_BUILD_HTTP_PROXY=""`,
+		`ARG ASBCP_BUILD_HTTPS_PROXY=""`,
+		`ARG ASBCP_BUILD_NO_PROXY=""`,
 		"org.opencontainers.image.title",
 		"org.opencontainers.image.version",
 		"org.opencontainers.image.revision",
@@ -541,12 +565,26 @@ func TestDockerfileReleaseContract(t *testing.T) {
 		"cmd/manager",
 		"sandbox-manager",
 		"USER root",
+		"ARG HTTP_PROXY",
+		"ARG HTTPS_PROXY",
+		"ARG http_proxy",
+		"ARG https_proxy",
+		"ARG NO_PROXY",
+		"ARG no_proxy",
 		"ENV HTTP_PROXY",
 		"ENV HTTPS_PROXY",
 		"ENV http_proxy",
 		"ENV https_proxy",
 		"ENV NO_PROXY",
 		"ENV no_proxy",
+		`HTTP_PROXY="${HTTP_PROXY}"`,
+		`HTTPS_PROXY="${HTTPS_PROXY}"`,
+		`http_proxy="${http_proxy}"`,
+		`https_proxy="${https_proxy}"`,
+		`NO_PROXY="${NO_PROXY}"`,
+		`no_proxy="${no_proxy}"`,
+		"192.168.",
+		"pullot",
 		"mirrors.tuna.tsinghua.edu.cn",
 		"mirrors.aliyun.com",
 		"mirrors.cloud.tencent.com",
@@ -559,6 +597,58 @@ func TestDockerfileReleaseContract(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("Dockerfile release contract violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseGateBuildClearsHostProxyDefaults(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "verify-release.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read release verifier: %v", err)
+	}
+	content := string(data)
+	buildReleaseImage := shellFunctionStanza(content, "build_release_image")
+	if buildReleaseImage == "" {
+		t.Fatalf("release verifier missing build_release_image function")
+	}
+	required := []string{
+		`asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"`,
+		`asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"`,
+		`asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"`,
+		"--build-arg \"ASBCP_BUILD_HTTP_PROXY=${asbcp_build_http_proxy}\"",
+		"--build-arg \"ASBCP_BUILD_HTTPS_PROXY=${asbcp_build_https_proxy}\"",
+		"--build-arg \"ASBCP_BUILD_NO_PROXY=${asbcp_build_no_proxy}\"",
+		"--build-arg \"HTTP_PROXY=\"",
+		"--build-arg \"HTTPS_PROXY=\"",
+		"--build-arg \"http_proxy=\"",
+		"--build-arg \"https_proxy=\"",
+		"--build-arg \"NO_PROXY=\"",
+		"--build-arg \"no_proxy=\"",
+		"image must not persist proxy env",
+		"ASBCP_BUILD_HTTP_PROXY=*|ASBCP_BUILD_HTTPS_PROXY=*|ASBCP_BUILD_NO_PROXY=*|HTTP_PROXY=*|HTTPS_PROXY=*|http_proxy=*|https_proxy=*|NO_PROXY=*|no_proxy=*",
+	}
+	forbidden := []string{
+		"env -u HTTP_PROXY",
+		"env -u HTTPS_PROXY",
+		"env -u http_proxy",
+		"env -u https_proxy",
+		"env -u ALL_PROXY",
+		"env -u all_proxy",
+	}
+	var violations []string
+	for _, token := range required {
+		if !strings.Contains(buildReleaseImage, token) {
+			violations = append(violations, "release gate build missing empty Dockerfile proxy build arg "+token)
+		}
+	}
+	for _, token := range forbidden {
+		if strings.Contains(buildReleaseImage, token) {
+			violations = append(violations, "release gate must not clear Docker/BuildKit host proxy env with "+token)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release gate proxy boundary violations:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
@@ -589,6 +679,58 @@ func TestReleaseWorkflowEmitsAgentSmithLockFieldsAndValidatesTag(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("release workflow version/digest lock contract violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	content := string(data)
+	required := []string{
+		"Generate final manifest",
+		"asbcp-final-manifest.json",
+		"asbcp-release-notes.md",
+		"body_path:",
+		"fail_on_unmatched_files: true",
+		"files:",
+		`"version"`,
+		`"tag"`,
+		`"commit"`,
+		`"image_digest"`,
+		`"api_contract_version"`,
+		`"public_inspect_result"`,
+	}
+	var violations []string
+	for _, token := range required {
+		if !strings.Contains(content, token) {
+			violations = append(violations, "release workflow missing final manifest token "+token)
+		}
+	}
+
+	sequence := []string{
+		"Build and push ASBCP image",
+		"Verify anonymous digest pull",
+		"Generate final manifest",
+		"Create GitHub Release",
+	}
+	previousIndex := -1
+	for _, token := range sequence {
+		index := strings.Index(content, token)
+		if index == -1 {
+			continue
+		}
+		if index <= previousIndex {
+			violations = append(violations, "release workflow must order "+strings.Join(sequence, " -> "))
+			break
+		}
+		previousIndex = index
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release workflow final manifest contract violations:\n%s", strings.Join(violations, "\n"))
 	}
 }
 

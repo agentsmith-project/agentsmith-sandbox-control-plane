@@ -86,31 +86,78 @@ jobs:
         run: docker pull "${IMAGE_NAME}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}"
 
       - name: Verify anonymous digest pull
+        id: public_inspect
         shell: bash
         run: |
           set -euo pipefail
+          image_ref="${IMAGE_NAME}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}"
           tmp_docker_config="$(mktemp -d)"
           trap 'rm -rf "${tmp_docker_config}"' EXIT
-          DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${IMAGE_NAME}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}" >/dev/null
+          DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${image_ref}" >/tmp/asbcp-public-manifest.json
+          echo "result=ok" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate final manifest
+        shell: bash
+        env:
+          ASBCP_VERSION: ${{ steps.version.outputs.version }}
+          ASBCP_TAG: ${{ steps.version.outputs.image_tag }}
+          ASBCP_IMAGE_REF: ${{ steps.public_inspect.outputs.image_ref }}
+          ASBCP_IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLIC_INSPECT_RESULT: ${{ steps.public_inspect.outputs.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = {
+              "version": os.environ["ASBCP_VERSION"],
+              "tag": os.environ["ASBCP_TAG"],
+              "commit": os.environ["GITHUB_SHA"],
+              "image_ref": os.environ["ASBCP_IMAGE_REF"],
+              "image_digest": os.environ["ASBCP_IMAGE_DIGEST"],
+              "api_contract_version": os.environ["API_CONTRACT_VERSION"],
+              "public_inspect_result": os.environ["PUBLIC_INSPECT_RESULT"],
+              "release_gate": "scripts/verify-release.sh",
+              "breaking_changes": os.environ["BREAKING_CHANGES"],
+          }
+
+          manifest_path = Path("dist/asbcp-final-manifest.json")
+          manifest_path.write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          notes = f"""## ASBCP Release
+
+          Version: {manifest["tag"]}
+          Commit SHA: {manifest["commit"]}
+          API contract version: {manifest["api_contract_version"]}
+          Image digest: `{manifest["image_ref"]}`
+          Public inspect result: {manifest["public_inspect_result"]}
+          Final manifest: `asbcp-final-manifest.json`
+          Breaking changes: {manifest["breaking_changes"]}
+
+          AgentSmith lock:
+          ```text
+          asbcp_version={manifest["tag"]}
+          asbcp_source_image={manifest["image_ref"]}
+          asbcp_release_url=https://github.com/{os.environ["GITHUB_REPOSITORY"]}/releases/tag/{manifest["tag"]}
+          asbcp_commit_sha={manifest["commit"]}
+          ```
+
+          Release readiness was evaluated by `{manifest["release_gate"]}`.
+          """
+          Path("dist/asbcp-release-notes.md").write_text(notes, encoding="utf-8")
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          body: |
-            ## ASBCP Release
-
-            Version: ${{ steps.version.outputs.image_tag }}
-            Commit SHA: ${{ github.sha }}
-            API contract version: ${{ env.API_CONTRACT_VERSION }}
-            Image digest: `${{ env.IMAGE_NAME }}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}`
-            Breaking changes: ${{ env.BREAKING_CHANGES }}
-
-            AgentSmith lock:
-            ```text
-            asbcp_version=${{ steps.version.outputs.image_tag }}
-            asbcp_source_image=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}
-            asbcp_release_url=https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.image_tag }}
-            asbcp_commit_sha=${{ github.sha }}
-            ```
-
-            Release readiness was evaluated by `scripts/verify-release.sh`.
+          body_path: dist/asbcp-release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/asbcp-final-manifest.json

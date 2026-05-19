@@ -15,6 +15,7 @@ This ledger records ASBCP release-readiness evidence. It is intentionally lightw
 | Kubernetes render check | Yes | Enforced by `scripts/verify-release.sh` |
 | Dockerfile contract and image build | Yes | Enforced by `scripts/verify-release.sh` |
 | Digest pull | Workflow-gated | Tag release workflow pulls the published tag@digest before release notes |
+| Final manifest | Workflow-gated | Tag release workflow generates `asbcp-final-manifest.json` after anonymous inspect and uploads it as a GitHub Release asset |
 | Retired naming guard | Yes | Added for governed release surface |
 | Raw storage credential exclusion | Yes | Contract and active guard added |
 | Runner artifact classification | Yes | ADR and active release-surface guard added |

@@ -29,6 +29,16 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required for release mode"
 }
 
+shell_function_stanza() {
+  local function_name="$1"
+  local path="$2"
+  awk -v name="${function_name}() {" '
+    $0 == name { in_function = 1 }
+    in_function { print }
+    in_function && $0 == "}" { exit }
+  ' "$path"
+}
+
 read_version() {
   tr -d '[:space:]' < "${ROOT}/VERSION"
 }
@@ -65,6 +75,18 @@ check_release_workflow_lock_output() {
     "Verify anonymous digest pull"
     "DOCKER_CONFIG="
     "docker manifest inspect"
+    "Generate final manifest"
+    "asbcp-final-manifest.json"
+    "asbcp-release-notes.md"
+    "body_path:"
+    "fail_on_unmatched_files: true"
+    "files:"
+    '"version"'
+    '"tag"'
+    '"commit"'
+    '"image_digest"'
+    '"api_contract_version"'
+    '"public_inspect_result"'
   )
   for token in "${required[@]}"; do
     grep -Fq "$token" "$workflow" || fail "release workflow missing: $token"
@@ -97,6 +119,8 @@ required_ids = {
     "dockerfile_contract",
     "docker_image_build",
     "kubernetes_render",
+    "digest_pull",
+    "final_manifest",
     "raw_storage_exclusion",
     "runner_artifact_classification",
 }
@@ -128,6 +152,9 @@ check_dockerfile_contract() {
     "ARG VERSION=dev"
     "ARG VCS_REF=unknown"
     "ARG BUILD_DATE=unknown"
+    'ARG ASBCP_BUILD_HTTP_PROXY=""'
+    'ARG ASBCP_BUILD_HTTPS_PROXY=""'
+    'ARG ASBCP_BUILD_NO_PROXY=""'
     "org.opencontainers.image.title"
     "org.opencontainers.image.version"
     "org.opencontainers.image.revision"
@@ -139,9 +166,69 @@ check_dockerfile_contract() {
   for token in "${required[@]}"; do
     grep -Fq -- "$token" "$dockerfile" || fail "Dockerfile missing contract token: $token"
   done
-  if grep -Eq "${legacy_cmd}|${legacy_component}|USER[[:space:]]+root" "$dockerfile"; then
-    fail "Dockerfile contains old manager identity or root runtime user"
-  fi
+  local forbidden=(
+    "${legacy_cmd}"
+    "${legacy_component}"
+    "USER root"
+    "ARG HTTP_PROXY"
+    "ARG HTTPS_PROXY"
+    "ARG http_proxy"
+    "ARG https_proxy"
+    "ARG NO_PROXY"
+    "ARG no_proxy"
+    'HTTP_PROXY="${HTTP_PROXY}"'
+    'HTTPS_PROXY="${HTTPS_PROXY}"'
+    'http_proxy="${http_proxy}"'
+    'https_proxy="${https_proxy}"'
+    'NO_PROXY="${NO_PROXY}"'
+    'no_proxy="${no_proxy}"'
+    "192.168."
+    "pullot"
+    "mirrors.tuna.tsinghua.edu.cn"
+    "mirrors.aliyun.com"
+    "mirrors.cloud.tencent.com"
+    "/etc/apt/sources.list"
+  )
+  for token in "${forbidden[@]}"; do
+    if grep -Fq -- "$token" "$dockerfile"; then
+      fail "Dockerfile contains forbidden release token: $token"
+    fi
+  done
+
+  local release_build_tokens=(
+    'asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"'
+    'asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"'
+    'asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"'
+    '--build-arg "ASBCP_BUILD_HTTP_PROXY=${asbcp_build_http_proxy}"'
+    '--build-arg "ASBCP_BUILD_HTTPS_PROXY=${asbcp_build_https_proxy}"'
+    '--build-arg "ASBCP_BUILD_NO_PROXY=${asbcp_build_no_proxy}"'
+    '--build-arg "HTTP_PROXY="'
+    '--build-arg "HTTPS_PROXY="'
+    '--build-arg "http_proxy="'
+    '--build-arg "https_proxy="'
+    '--build-arg "NO_PROXY="'
+    '--build-arg "no_proxy="'
+  )
+  local release_build_forbidden=(
+    "env -u HTTP_PROXY"
+    "env -u HTTPS_PROXY"
+    "env -u http_proxy"
+    "env -u https_proxy"
+    "env -u ALL_PROXY"
+    "env -u all_proxy"
+  )
+  local release_build_function
+  release_build_function="$(shell_function_stanza build_release_image "${ROOT}/scripts/verify-release.sh")"
+  [ -n "$release_build_function" ] || fail "release verifier missing build_release_image function"
+  for token in "${release_build_tokens[@]}"; do
+    grep -Fq -- "$token" <<<"$release_build_function" || \
+      fail "release image build must clear Dockerfile proxy build args: $token"
+  done
+  for token in "${release_build_forbidden[@]}"; do
+    if grep -Fq -- "$token" <<<"$release_build_function"; then
+      fail "release image build must allow Docker/BuildKit host proxy env and clear only Dockerfile build args: $token"
+    fi
+  done
 }
 
 render_kustomize_overlays() {
@@ -172,18 +259,44 @@ build_release_image() {
   local version="$1"
   local tmpdir="$2"
   require_cmd docker
-  local git_sha build_date image_tag label_version image_user image_cmd
+  local git_sha build_date image_tag label_version image_user image_cmd image_env env_entry
+  local asbcp_build_http_proxy asbcp_build_https_proxy asbcp_build_no_proxy
+  local http_proxy_state https_proxy_state no_proxy_state
+  local docker_build_cmd
   git_sha="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
   build_date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   image_tag="agentsmith-sandbox-control-plane:${version}-release-gate"
+  asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"
+  asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"
+  asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"
+  http_proxy_state="<empty>"
+  https_proxy_state="<empty>"
+  no_proxy_state="<empty>"
+  [ -n "$asbcp_build_http_proxy" ] && http_proxy_state="<set>"
+  [ -n "$asbcp_build_https_proxy" ] && https_proxy_state="<set>"
+  [ -n "$asbcp_build_no_proxy" ] && no_proxy_state="<set>"
 
-  run docker build \
-    --build-arg "VERSION=${version}" \
-    --build-arg "VCS_REF=${git_sha}" \
-    --build-arg "BUILD_DATE=${build_date}" \
-    -t "$image_tag" \
-    -f "${ROOT}/manager-service/Dockerfile" \
+  docker_build_cmd=(
+    docker build
+    --quiet
+    --build-arg "VERSION=${version}"
+    --build-arg "VCS_REF=${git_sha}"
+    --build-arg "BUILD_DATE=${build_date}"
+    --build-arg "ASBCP_BUILD_HTTP_PROXY=${asbcp_build_http_proxy}"
+    --build-arg "ASBCP_BUILD_HTTPS_PROXY=${asbcp_build_https_proxy}"
+    --build-arg "ASBCP_BUILD_NO_PROXY=${asbcp_build_no_proxy}"
+    --build-arg "HTTP_PROXY="
+    --build-arg "HTTPS_PROXY="
+    --build-arg "http_proxy="
+    --build-arg "https_proxy="
+    --build-arg "NO_PROXY="
+    --build-arg "no_proxy="
+    -t "$image_tag"
+    -f "${ROOT}/manager-service/Dockerfile"
     "${ROOT}/manager-service"
+  )
+  echo "==> docker build --quiet --build-arg VERSION=${version} --build-arg VCS_REF=${git_sha} --build-arg BUILD_DATE=${build_date} --build-arg ASBCP_BUILD_HTTP_PROXY=${http_proxy_state} --build-arg ASBCP_BUILD_HTTPS_PROXY=${https_proxy_state} --build-arg ASBCP_BUILD_NO_PROXY=${no_proxy_state} --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy= -t ${image_tag} -f ${ROOT}/manager-service/Dockerfile ${ROOT}/manager-service"
+  "${docker_build_cmd[@]}"
 
   label_version="$(docker image inspect "$image_tag" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
   [ "$label_version" = "$version" ] || fail "image OCI version label mismatch: ${label_version}"
@@ -191,6 +304,14 @@ build_release_image() {
   [ "$image_user" = "10001" ] || fail "image must run as UID 10001, got ${image_user}"
   image_cmd="$(docker image inspect "$image_tag" --format '{{ json .Config.Cmd }}')"
   [[ "$image_cmd" == *"./asbcp"* ]] || fail "image command must start ./asbcp, got ${image_cmd}"
+  image_env="$(docker image inspect "$image_tag" --format '{{ range .Config.Env }}{{ println . }}{{ end }}')"
+  while IFS= read -r env_entry; do
+    case "$env_entry" in
+      ASBCP_BUILD_HTTP_PROXY=*|ASBCP_BUILD_HTTPS_PROXY=*|ASBCP_BUILD_NO_PROXY=*|HTTP_PROXY=*|HTTPS_PROXY=*|http_proxy=*|https_proxy=*|NO_PROXY=*|no_proxy=*)
+        fail "image must not persist proxy env: ${env_entry%%=*}"
+        ;;
+    esac
+  done <<<"$image_env"
   echo "$image_tag" > "${tmpdir}/release-image-tag"
 }
 
