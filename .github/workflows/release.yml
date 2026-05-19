@@ -85,10 +85,13 @@ jobs:
       - name: Verify digest pull
         run: docker pull "${IMAGE_NAME}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}"
 
-      - name: Set GHCR package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh api --method PATCH /orgs/agentsmith-project/packages/container/agentsmith-sandbox-control-plane/visibility -f visibility=public
+      - name: Verify anonymous digest pull
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_docker_config="$(mktemp -d)"
+          trap 'rm -rf "${tmp_docker_config}"' EXIT
+          DOCKER_CONFIG="${tmp_docker_config}" docker manifest inspect "${IMAGE_NAME}:${{ steps.version.outputs.image_tag }}@${{ steps.build.outputs.digest }}" >/dev/null
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

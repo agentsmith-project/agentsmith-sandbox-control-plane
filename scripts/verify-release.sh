@@ -62,10 +62,16 @@ check_release_workflow_lock_output() {
     "asbcp_commit_sha="
     "steps.build.outputs.digest"
     "docker pull"
+    "Verify anonymous digest pull"
+    "DOCKER_CONFIG="
+    "docker manifest inspect"
   )
   for token in "${required[@]}"; do
     grep -Fq "$token" "$workflow" || fail "release workflow missing: $token"
   done
+  if grep -Eq "packages/container/.*/visibility|visibility=public|Set GHCR package public" "$workflow"; then
+    fail "release workflow must verify anonymous digest pull instead of patching GHCR package visibility"
+  fi
 }
 
 check_readiness_evidence() {
