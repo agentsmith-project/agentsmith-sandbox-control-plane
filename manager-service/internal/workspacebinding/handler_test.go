@@ -13,6 +13,7 @@ import (
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,23 @@ type fakeK8sClient struct {
 	listPodsErr  error
 	deletePVErr  error
 	deletePVCErr error
+}
+
+type testErrorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
+	} `json:"error"`
+}
+
+func decodeErrorEnvelope(t *testing.T, rec *httptest.ResponseRecorder) testErrorEnvelope {
+	t.Helper()
+	var body testErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	return body
 }
 
 func (f *fakeK8sClient) EnsurePersistentVolume(_ context.Context, volume *v1.PersistentVolume) error {
@@ -353,7 +371,7 @@ func TestDeleteBinding(t *testing.T) {
 		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
 		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
 	}
-	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
 	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -366,6 +384,18 @@ func TestDeleteBinding(t *testing.T) {
 }
 
 func TestDeleteBindingRejectsActiveWorkload(t *testing.T) {
+	facts := workloadfacts.NewMemoryStore()
+	if err := facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws_demo",
+		ProjectID:          "proj_demo",
+		WorkloadID:         "active",
+		WorkspaceBindingID: "wmb_demo",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            "workload-active",
+	}); err != nil {
+		t.Fatalf("save fact: %v", err)
+	}
 	client := &fakeK8sClient{
 		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
 		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
@@ -385,7 +415,7 @@ func TestDeleteBindingRejectsActiveWorkload(t *testing.T) {
 			},
 		},
 	}
-	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: facts})
 	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	rec := httptest.NewRecorder()
 
@@ -394,8 +424,204 @@ func TestDeleteBindingRejectsActiveWorkload(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
 	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
 	if client.pv == nil || client.pvc == nil {
 		t.Fatalf("active workload must block PV/PVC deletion")
+	}
+}
+
+func TestDeleteBindingBlocksLivePodWithoutFact(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		pods: []v1.Pod{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "workload-live",
+					Labels: map[string]string{
+						"app": "managed-workload",
+					},
+					Annotations: map[string]string{
+						annotationWorkspaceID:         "ws_demo",
+						annotationProjectID:           "proj_demo",
+						annotationAFSCPMountBindingID: "wmb_demo",
+						"mbos.io/workload-id":         "live",
+					},
+				},
+			},
+		},
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("live pod without fact must block PV/PVC deletion")
+	}
+}
+
+func TestDeleteBindingBlocksLivePodByPVCClaimName(t *testing.T) {
+	expectedPVC := PVCName("ws_demo", "proj_demo", "wmb_demo")
+	tests := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name:        "missing annotations",
+			annotations: nil,
+		},
+		{
+			name: "drifted binding annotation",
+			annotations: map[string]string{
+				annotationWorkspaceID:         "ws_demo",
+				annotationProjectID:           "proj_demo",
+				annotationAFSCPMountBindingID: "wmb_other",
+				"mbos.io/workload-id":         "drifted",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeK8sClient{
+				pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+				pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+				pods: []v1.Pod{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:        "workload-live-pvc",
+							Labels:      map[string]string{"app": "managed-workload"},
+							Annotations: tt.annotations,
+						},
+						Spec: v1.PodSpec{
+							Volumes: []v1.Volume{
+								{
+									Name: "workspace",
+									VolumeSource: v1.VolumeSource{
+										PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+											ClaimName: expectedPVC,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
+			req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			body := decodeErrorEnvelope(t, rec)
+			if body.Error.Code != "workspace_binding_release_incomplete" {
+				t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+			}
+			if client.pv == nil || client.pvc == nil {
+				t.Fatalf("pod volume claimName match must block PV/PVC deletion")
+			}
+		})
+	}
+}
+
+func TestDeleteBindingBlocksWhenPodScanFails(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:          &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc:         &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		listPodsErr: errors.New("pod scan unavailable"),
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("pod scan failure must fail closed and keep PV/PVC")
+	}
+}
+
+func TestDeleteBindingBlocksWhenFactStoreUnavailable(t *testing.T) {
+	client := &fakeK8sClient{
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected fact-source-unavailable delete to return 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("fact source unavailable must not delete PV/PVC")
+	}
+}
+
+func TestDeleteBindingBlocksUnreleasedWorkloadEvenWhenNoPodExists(t *testing.T) {
+	facts := workloadfacts.NewMemoryStore()
+	if err := facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws_demo",
+		ProjectID:          "proj_demo",
+		WorkloadID:         "wl_deleted_elsewhere",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		WorkspaceBindingID: "wmb_demo",
+		PodName:            "workload-wl-deleted-elsewhere",
+		PodUID:             "uid-deleted-elsewhere",
+		ReleaseDone:        false,
+		PodDeleted:         true,
+		TerminalStatusDone: false,
+	}); err != nil {
+		t.Fatalf("save fact: %v", err)
+	}
+	client := &fakeK8sClient{
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: facts})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("non-terminal workload fact must block PV/PVC deletion even when no pod exists")
 	}
 }
 
@@ -405,7 +631,7 @@ func TestDeleteBindingReturnsErrorWhenPVCDeleteFails(t *testing.T) {
 		pvc:          &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
 		deletePVCErr: errors.New("pvc delete failed"),
 	}
-	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
 	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	rec := httptest.NewRecorder()
 
@@ -428,7 +654,7 @@ func TestDeleteBindingReturnsErrorWhenPVDeleteFails(t *testing.T) {
 		pvc:         &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
 		deletePVErr: errors.New("pv delete failed"),
 	}
-	handler := NewHandler(client, Options{Namespace: "sandbox-workloads"})
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
 	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
 	rec := httptest.NewRecorder()
 

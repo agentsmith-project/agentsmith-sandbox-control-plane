@@ -99,15 +99,20 @@ func startCreateWorkloadRequest(ctx context.Context, wsID, projID, wlID string, 
 // Labels
 // ---------------------------------------------------------------------------
 
-// TestPodSpec_Labels verifies all four mandatory labels are set correctly.
+// TestPodSpec_Labels verifies labels carry DNS-safe identity and raw IDs stay in annotations.
 func TestPodSpec_Labels(t *testing.T) {
 	wlID, pod := setupPod(t, "spec-labels", CreateRequest{Image: suite.Image})
 
 	labels := pod.Labels
 	assert.Equal(t, "managed-workload", labels["app"], "app label must be 'managed-workload'")
-	assert.Equal(t, wlID, labels["workload_id"], "workload_id label must match the requested ID")
-	assert.Equal(t, testWS, labels["workspace_id"], "workspace_id label must match wsID in the URL")
-	assert.Equal(t, testProj, labels["project_id"], "project_id label must match projID in the URL")
+	assertDNSSafeIdentityLabel(t, labels, "workload_id")
+	assertDNSSafeIdentityLabel(t, labels, "workspace_id")
+	assertDNSSafeIdentityLabel(t, labels, "project_id")
+
+	annotations := pod.Annotations
+	assert.Equal(t, wlID, annotations["mbos.io/workload-id"], "raw workload ID must be retained in annotations")
+	assert.Equal(t, testWS, annotations["mbos.io/workspace-id"], "raw workspace ID must be retained in annotations")
+	assert.Equal(t, testProj, annotations["mbos.io/project-id"], "raw project ID must be retained in annotations")
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +293,9 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	}
 
 	deleteResp := newClient().DeleteWorkload(t, wsID, testProj, wlID)
-	assert.Contains(t, []int{http.StatusOK, http.StatusNotFound}, deleteResp.StatusCode)
+	require.True(t, isConfirmedWorkloadDeleteStatus(deleteResp.StatusCode),
+		"delete inspected workload: expected confirmed release status, got %d: %s",
+		deleteResp.StatusCode, deleteResp.BodyString())
 	select {
 	case err := <-createDone:
 		createDoneDrained = true

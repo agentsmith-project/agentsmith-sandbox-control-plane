@@ -222,7 +222,7 @@ func (m *Manager) setupHTTPServer() {
 
 	v1Mux := http.NewServeMux()
 	v1Mux.Handle("/v1/workspaces/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/workspace-bindings/") {
+		if isWorkspaceBindingRoute(r.URL.Path) {
 			m.workspaceBindingHandler.ServeHTTP(w, r)
 			return
 		}
@@ -256,6 +256,19 @@ func (m *Manager) setupHTTPServer() {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 	}()
+}
+
+func isWorkspaceBindingRoute(urlPath string) bool {
+	const prefix = "/v1/workspaces/"
+	trimmed := strings.TrimPrefix(urlPath, prefix)
+	if trimmed == urlPath {
+		return false
+	}
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 5 {
+		return false
+	}
+	return parts[0] != "" && parts[1] == "projects" && parts[2] != "" && parts[3] == "workspace-bindings" && parts[4] != ""
 }
 
 func (m *Manager) observabilityMiddleware(next http.Handler) http.Handler {

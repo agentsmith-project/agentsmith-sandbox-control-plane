@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 - "${ROOT}" "$@" <<'PY'
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+SCHEMA_ID = "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"
+SCHEMA_VERSION = "v1"
+RISK_STATUS_SOURCE = "docs/RISK_REGISTER.md release_blocking column"
+
+
+def repo_root() -> Path:
+    return Path(sys.argv[1])
+
+
+def require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"{name} is required")
+    return value
+
+
+def run_release_verifier(root: Path, *args: str) -> str:
+    output = subprocess.check_output(
+        ["bash", "scripts/verify-release.sh", *args],
+        cwd=root,
+        text=True,
+    )
+    return output.strip()
+
+
+def write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+
+
+def validate_breaking_changes(changes: object) -> None:
+    if not isinstance(changes, list):
+        raise SystemExit("known_breaking_changes must be an array")
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            raise SystemExit(f"known_breaking_changes[{index}] must be an object")
+        if not str(change.get("id", "")).strip():
+            raise SystemExit(f"known_breaking_changes[{index}].id is required")
+        if not str(change.get("summary", "")).strip():
+            raise SystemExit(f"known_breaking_changes[{index}].summary is required")
+
+
+def validate_schema_required_fields(root: Path, manifest: dict) -> None:
+    schema_path = root / "docs/schemas/asbcp-final-manifest.v1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    if schema.get("$id") != SCHEMA_ID:
+        raise SystemExit("final manifest schema $id mismatch")
+    missing = [field for field in schema.get("required", []) if field not in manifest]
+    if missing:
+        raise SystemExit("final manifest missing required schema fields: " + ", ".join(missing))
+
+    breaking_schema = (
+        schema.get("properties", {})
+        .get("known_breaking_changes", {})
+        .get("items", {})
+    )
+    breaking_required = set(breaking_schema.get("required", []))
+    if not {"id", "summary"}.issubset(breaking_required):
+        raise SystemExit("final manifest schema must require breaking change id and summary")
+
+
+def schema_property(schema: dict, field: str) -> dict:
+    prop = schema.get("properties", {}).get(field)
+    if not isinstance(prop, dict):
+        raise SystemExit(f"final manifest schema missing property {field}")
+    return prop
+
+
+def require_schema_const(schema: dict, manifest: dict, field: str) -> None:
+    prop = schema_property(schema, field)
+    if "const" not in prop:
+        raise SystemExit(f"final manifest schema property {field} must declare const")
+    expected = prop["const"]
+    if manifest.get(field) != expected:
+        raise SystemExit(f"{field} must equal schema const {expected!r}")
+
+
+def require_schema_pattern(schema: dict, manifest: dict, field: str) -> None:
+    prop = schema_property(schema, field)
+    pattern = prop.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise SystemExit(f"final manifest schema property {field} must declare pattern")
+    value = manifest.get(field)
+    if not isinstance(value, str) or not re.search(pattern, value):
+        raise SystemExit(f"{field} must match schema pattern {pattern}")
+
+
+def validate_manifest_against_schema_constraints(root: Path, manifest: dict) -> None:
+    schema_path = root / "docs/schemas/asbcp-final-manifest.v1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    validate_schema_required_fields(root, manifest)
+    require_schema_const(schema, manifest, "schema_id")
+    require_schema_const(schema, manifest, "manifest_schema_version")
+    require_schema_const(schema, manifest, "known_risk_status_source")
+    require_schema_const(schema, manifest, "release_gate")
+
+    for field in (
+        "asbcp_version",
+        "git_tag",
+        "commit_sha",
+        "image_digest",
+        "image_ref",
+        "api_contract_version",
+    ):
+        require_schema_pattern(schema, manifest, field)
+
+    if manifest["asbcp_version"] != manifest["git_tag"]:
+        raise SystemExit("asbcp_version must match git_tag")
+    if not manifest["image_ref"].endswith("@" + manifest["image_digest"]):
+        raise SystemExit("image_ref must include image_digest")
+
+    breaking_schema = schema_property(schema, "known_breaking_changes").get("items", {})
+    breaking_props = breaking_schema.get("properties", {})
+    id_pattern = breaking_props.get("id", {}).get("pattern")
+    summary_min_length = breaking_props.get("summary", {}).get("minLength", 1)
+    if not isinstance(id_pattern, str) or not id_pattern:
+        raise SystemExit("known_breaking_changes schema id must declare pattern")
+    for index, change in enumerate(manifest.get("known_breaking_changes", [])):
+        change_id = change.get("id", "")
+        summary = change.get("summary", "")
+        if not isinstance(change_id, str) or not re.search(id_pattern, change_id):
+            raise SystemExit(f"known_breaking_changes[{index}].id must match schema pattern {id_pattern}")
+        if not isinstance(summary, str) or len(summary.strip()) < summary_min_length:
+            raise SystemExit(f"known_breaking_changes[{index}].summary must satisfy schema minLength")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate ASBCP final release manifest")
+    parser.add_argument("--output", default="dist/asbcp-final-manifest.json")
+    parser.add_argument("--release-notes-output", default="dist/asbcp-release-notes.md")
+    parser.add_argument("--changelog-evidence-json", default="dist/asbcp-changelog-evidence.json")
+    parser.add_argument("--risk-status-json", default="dist/asbcp-risk-status.json")
+    parser.add_argument("--api-contract-version", default="dist/asbcp-api-contract-version.txt")
+    args = parser.parse_args(sys.argv[2:])
+
+    root = repo_root()
+    asbcp_version = require_env("ASBCP_VERSION")
+    git_tag = require_env("ASBCP_GIT_TAG")
+    tag_ref = require_env("ASBCP_TAG_REF")
+    image_ref = require_env("ASBCP_IMAGE_REF")
+    image_digest = require_env("ASBCP_IMAGE_DIGEST")
+    anonymous_pull_result = require_env("ANONYMOUS_PULL_RESULT")
+    tag_resolved_digest = require_env("TAG_RESOLVED_DIGEST")
+    anonymous_digest = require_env("ANONYMOUS_DIGEST")
+    anonymous_docker_config = require_env("ANONYMOUS_DOCKER_CONFIG")
+    commit_sha = require_env("GITHUB_SHA")
+    github_repository = require_env("GITHUB_REPOSITORY")
+
+    same_digest_match = (
+        require_env("SAME_DIGEST_MATCH").lower() == "true"
+        and tag_resolved_digest == image_digest == anonymous_digest
+    )
+    if anonymous_pull_result != "ok":
+        raise SystemExit(f"anonymous pull result must be ok, got {anonymous_pull_result!r}")
+    if anonymous_docker_config != "fresh-empty":
+        raise SystemExit("anonymous pull must use a fresh-empty Docker config")
+    if not same_digest_match:
+        raise SystemExit("same_digest_proof.matches must be true")
+
+    changelog_evidence = json.loads(run_release_verifier(root, "--changelog-evidence-json", git_tag))
+    if changelog_evidence.get("tag") != git_tag:
+        raise SystemExit("CHANGELOG evidence tag must match ASBCP_GIT_TAG")
+    validate_breaking_changes(changelog_evidence.get("known_breaking_changes"))
+    write_text(root / args.changelog_evidence_json, json.dumps(changelog_evidence, ensure_ascii=False, sort_keys=True) + "\n")
+
+    risk_status_evidence = json.loads(run_release_verifier(root, "--risk-status-json"))
+    if risk_status_evidence.get("blocking_risks"):
+        raise SystemExit("release-blocking risks remain: " + ", ".join(risk_status_evidence["blocking_risks"]))
+    write_text(root / args.risk_status_json, json.dumps(risk_status_evidence, ensure_ascii=False, sort_keys=True) + "\n")
+
+    api_contract_version = run_release_verifier(root, "--api-contract-version")
+    if not api_contract_version:
+        raise SystemExit("API contract version evidence must not be empty")
+    write_text(root / args.api_contract_version, api_contract_version + "\n")
+
+    release_url = f"https://github.com/{github_repository}/releases/tag/{git_tag}"
+    runbook_url = f"https://github.com/{github_repository}/blob/{commit_sha}/docs/runbooks/release.md"
+    known_breaking_changes_json = json.dumps(changelog_evidence["known_breaking_changes"], ensure_ascii=False)
+    release_body = f"""## ASBCP Release
+
+Version: {asbcp_version}
+Git tag: {git_tag}
+Commit SHA: {commit_sha}
+API contract version: {api_contract_version}
+Image ref: `{image_ref}`
+Image digest: `{image_digest}`
+Anonymous pull: {anonymous_pull_result} with {anonymous_docker_config} Docker config
+Tag resolved digest: `{tag_resolved_digest}`
+Build-push digest: `{image_digest}`
+Anonymous digest: `{anonymous_digest}`
+Same digest proof: {same_digest_match}
+Final manifest: `asbcp-final-manifest.json`
+Breaking changes: {known_breaking_changes_json}
+Changelog summary: {changelog_evidence["changelog_summary"]}
+Known risk status: {risk_status_evidence["known_risk_status"]}
+Known risk status source: {risk_status_evidence["source"]}
+Runbook: {runbook_url}
+
+Downstream image lock values:
+```text
+asbcp_version={asbcp_version}
+asbcp_source_image={image_ref}
+asbcp_release_url={release_url}
+asbcp_commit_sha={commit_sha}
+```
+
+Release readiness was evaluated by `scripts/verify-release.sh`.
+"""
+    manifest = {
+        "schema_id": SCHEMA_ID,
+        "manifest_schema_version": SCHEMA_VERSION,
+        "asbcp_version": asbcp_version,
+        "git_tag": git_tag,
+        "commit_sha": commit_sha,
+        "image_ref": image_ref,
+        "image_digest": image_digest,
+        "api_contract_version": api_contract_version,
+        "anonymous_pull": {
+            "result": anonymous_pull_result,
+            "tag_ref": tag_ref,
+            "image_ref": image_ref,
+            "tag_resolved_digest": tag_resolved_digest,
+            "build_push_digest": image_digest,
+            "anonymous_digest": anonymous_digest,
+            "docker_config": anonymous_docker_config,
+            "commands": [
+                f"DOCKER_CONFIG=<fresh-empty> docker pull {tag_ref}",
+                f"DOCKER_CONFIG=<fresh-empty> docker pull {image_ref}",
+            ],
+        },
+        "same_digest_proof": {
+            "tag_resolved_digest": tag_resolved_digest,
+            "build_push_digest": image_digest,
+            "anonymous_digest": anonymous_digest,
+            "matches": same_digest_match,
+            "source": "fresh-empty Docker config docker pull image:tag and image:tag@build_push_digest",
+        },
+        "known_breaking_changes": changelog_evidence["known_breaking_changes"],
+        "changelog_summary": changelog_evidence["changelog_summary"],
+        "known_risk_status": risk_status_evidence["known_risk_status"],
+        "known_risk_status_source": RISK_STATUS_SOURCE,
+        "runbook_url": runbook_url,
+        "release_notes": {
+            "body_source": release_body,
+            "github_release_url": release_url,
+        },
+        "release_gate": "scripts/verify-release.sh",
+    }
+    validate_manifest_against_schema_constraints(root, manifest)
+
+    write_text(root / args.output, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    write_text(root / args.release_notes_output, release_body)
+
+
+if __name__ == "__main__":
+    main()
+PY

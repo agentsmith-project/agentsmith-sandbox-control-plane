@@ -20,6 +20,7 @@ import (
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/ratelimit"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workload"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -161,7 +162,9 @@ current-context: test
 }
 
 func newTestWorkloadHandler(client *k8s.Client) *workload.Handler {
-	return workload.NewHandler(client, k8s.NewExecutor(client), workload.Options{})
+	return workload.NewHandler(client, k8s.NewExecutor(client), workload.Options{
+		WorkloadFactStore: workloadfacts.NewMemoryStore(),
+	})
 }
 
 // newAlways404K8s returns a fake K8s server that returns 404 for all requests.
@@ -864,7 +867,7 @@ func TestIntegration_GetOfflineWhenNoPod(t *testing.T) {
 	assert.Equal(t, "offline", status["phase"])
 }
 
-func TestIntegration_DeleteNotFound_Returns404(t *testing.T) {
+func TestIntegration_DeleteNotFoundWithoutTerminalFact_Returns409Conflict(t *testing.T) {
 	fake := newStatefulPodFake(t)
 	srv := buildTestStack(t, fake.makeServer(t).URL, "key", nil)
 
@@ -873,7 +876,11 @@ func TestIntegration_DeleteNotFound_Returns404(t *testing.T) {
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var body testErrorEnvelope
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "terminal fact is missing")
 }
 
 func TestIntegration_KeepaliveNotFound_Returns404(t *testing.T) {

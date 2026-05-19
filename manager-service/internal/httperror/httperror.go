@@ -25,6 +25,7 @@ func Write(w http.ResponseWriter, r *http.Request, status int, code string, mess
 	if strings.TrimSpace(message) == "" {
 		message = http.StatusText(status)
 	}
+	message = observability.RedactLogValue(message)
 	requestID := GetRequestID(r)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

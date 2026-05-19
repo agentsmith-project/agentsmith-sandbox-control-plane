@@ -456,6 +456,7 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 		"check_risk_status_evidence",
 		"check_release_workflow_lock_output",
 		"check_final_manifest_schema",
+		"check_provider_prerequisites_contract",
 		"check_readiness_evidence",
 		"check_dockerfile_contract",
 		"run_release_fixture_smoke",
@@ -514,6 +515,7 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 	}
 	requiredFinalManifestFields := []string{
 		"schema_id",
+		"manifest_schema_version",
 		"asbcp_version",
 		"git_tag",
 		"commit_sha",
@@ -528,6 +530,7 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 		"known_risk_status_source",
 		"runbook_url",
 		"release_notes",
+		"release_gate",
 	}
 	declaredFinalManifestFields := map[string]bool{}
 	for _, field := range manifest.FinalManifestSchema.RequiredFields {
@@ -594,15 +597,618 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 	}
 }
 
-func TestReleaseVersionBumpKeepsPublishedV204Immutable(t *testing.T) {
+func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	schemaPath := filepath.Join(repoRoot, "docs", "schemas", "asbcp-final-manifest.v1.schema.json")
+	schemaBytes, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatalf("read final manifest schema: %v", err)
+	}
+	var schema struct {
+		ID         string                     `json:"$id"`
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+		t.Fatalf("parse final manifest schema: %v", err)
+	}
+	if schema.ID != "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json" {
+		t.Fatalf("schema $id = %q, want canonical final manifest schema id", schema.ID)
+	}
+
+	requiredFields := []string{
+		"schema_id",
+		"manifest_schema_version",
+		"asbcp_version",
+		"git_tag",
+		"commit_sha",
+		"image_ref",
+		"image_digest",
+		"api_contract_version",
+		"known_breaking_changes",
+		"same_digest_proof",
+		"anonymous_pull",
+	}
+	declaredRequired := map[string]bool{}
+	for _, field := range schema.Required {
+		declaredRequired[field] = true
+	}
+	var schemaViolations []string
+	for _, field := range requiredFields {
+		if !declaredRequired[field] {
+			schemaViolations = append(schemaViolations, "schema.required missing "+field)
+		}
+		if _, ok := schema.Properties[field]; !ok {
+			schemaViolations = append(schemaViolations, "schema.properties missing "+field)
+		}
+	}
+	if len(schemaViolations) > 0 {
+		t.Fatalf("final manifest schema missing adoption fields:\n%s", strings.Join(schemaViolations, "\n"))
+	}
+
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "asbcp-final-manifest.json")
+	releaseNotesPath := filepath.Join(tmpDir, "asbcp-release-notes.md")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	cmd := exec.Command("bash", "scripts/generate-final-manifest",
+		"--output", manifestPath,
+		"--release-notes-output", releaseNotesPath,
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"ASBCP_VERSION=v2.0.6",
+		"ASBCP_GIT_TAG=v2.0.6",
+		"ASBCP_TAG_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6",
+		"ASBCP_IMAGE_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6@"+digest,
+		"ASBCP_IMAGE_DIGEST="+digest,
+		"ANONYMOUS_PULL_RESULT=ok",
+		"TAG_RESOLVED_DIGEST="+digest,
+		"ANONYMOUS_DIGEST="+digest,
+		"SAME_DIGEST_MATCH=true",
+		"ANONYMOUS_DOCKER_CONFIG=fresh-empty",
+		"GITHUB_SHA="+strings.Repeat("b", 40),
+		"GITHUB_REPOSITORY=agentsmith-project/agentsmith-sandbox-control-plane",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate final manifest fixture: %v\n%s", err, string(output))
+	}
+
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read generated final manifest: %v", err)
+	}
+	var manifest struct {
+		SchemaID              string `json:"schema_id"`
+		ManifestSchemaVersion string `json:"manifest_schema_version"`
+		ASBCPVersion          string `json:"asbcp_version"`
+		GitTag                string `json:"git_tag"`
+		CommitSHA             string `json:"commit_sha"`
+		ImageRef              string `json:"image_ref"`
+		ImageDigest           string `json:"image_digest"`
+		APIContractVersion    string `json:"api_contract_version"`
+		KnownBreakingChanges  []struct {
+			ID      string `json:"id"`
+			Summary string `json:"summary"`
+		} `json:"known_breaking_changes"`
+		SameDigestProof struct {
+			Matches bool `json:"matches"`
+		} `json:"same_digest_proof"`
+		AnonymousPull struct {
+			Result       string   `json:"result"`
+			DockerConfig string   `json:"docker_config"`
+			Commands     []string `json:"commands"`
+		} `json:"anonymous_pull"`
+		ReleaseNotes struct {
+			BodySource string `json:"body_source"`
+		} `json:"release_notes"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse generated final manifest: %v", err)
+	}
+
+	var violations []string
+	if manifest.SchemaID != schema.ID {
+		violations = append(violations, "schema_id must match schema $id")
+	}
+	if manifest.ManifestSchemaVersion != "v1" {
+		violations = append(violations, "manifest_schema_version must be v1")
+	}
+	if manifest.ASBCPVersion != "v2.0.6" || manifest.GitTag != "v2.0.6" {
+		violations = append(violations, "asbcp_version and git_tag must use the v-prefixed release tag")
+	}
+	if manifest.CommitSHA != strings.Repeat("b", 40) {
+		violations = append(violations, "commit_sha must come from GITHUB_SHA")
+	}
+	if manifest.ImageDigest != digest || !strings.Contains(manifest.ImageRef, "@"+digest) {
+		violations = append(violations, "image_ref/image_digest must preserve immutable digest lock")
+	}
+	if manifest.APIContractVersion != "v1" {
+		violations = append(violations, "api_contract_version must come from docs/contracts/api-contract.md")
+	}
+	if len(manifest.KnownBreakingChanges) == 0 {
+		violations = append(violations, "known_breaking_changes must be structured non-empty objects")
+	}
+	for index, change := range manifest.KnownBreakingChanges {
+		if change.ID == "" || change.Summary == "" {
+			violations = append(violations, "known_breaking_changes entry "+strconv.Itoa(index)+" must contain id and summary")
+		}
+	}
+	if !manifest.SameDigestProof.Matches {
+		violations = append(violations, "same_digest_proof.matches must be true")
+	}
+	if manifest.AnonymousPull.Result != "ok" || manifest.AnonymousPull.DockerConfig != "fresh-empty" || len(manifest.AnonymousPull.Commands) < 2 {
+		violations = append(violations, "anonymous_pull must record fresh anonymous tag and digest pulls")
+	}
+	if !strings.Contains(manifest.ReleaseNotes.BodySource, "Downstream image lock values") {
+		violations = append(violations, "release_notes.body_source must contain downstream image lock values")
+	}
+	if len(violations) > 0 {
+		t.Fatalf("generated final manifest does not satisfy adoption fixture:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	baseEnv := map[string]string{
+		"ASBCP_VERSION":           "v2.0.6",
+		"ASBCP_GIT_TAG":           "v2.0.6",
+		"ASBCP_TAG_REF":           "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6",
+		"ASBCP_IMAGE_REF":         "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6@" + digest,
+		"ASBCP_IMAGE_DIGEST":      digest,
+		"ANONYMOUS_PULL_RESULT":   "ok",
+		"TAG_RESOLVED_DIGEST":     digest,
+		"ANONYMOUS_DIGEST":        digest,
+		"SAME_DIGEST_MATCH":       "true",
+		"ANONYMOUS_DOCKER_CONFIG": "fresh-empty",
+		"GITHUB_SHA":              strings.Repeat("b", 40),
+		"GITHUB_REPOSITORY":       "agentsmith-project/agentsmith-sandbox-control-plane",
+	}
+	cases := []struct {
+		name     string
+		override map[string]string
+		want     string
+	}{
+		{
+			name: "version must match schema pattern",
+			override: map[string]string{
+				"ASBCP_VERSION": "2.0.6",
+			},
+			want: "asbcp_version",
+		},
+		{
+			name: "commit sha must match schema pattern",
+			override: map[string]string{
+				"GITHUB_SHA": "not-a-sha",
+			},
+			want: "commit_sha",
+		},
+		{
+			name: "digest must match schema pattern",
+			override: map[string]string{
+				"ASBCP_IMAGE_DIGEST":  "sha256:" + strings.Repeat("g", 64),
+				"TAG_RESOLVED_DIGEST": "sha256:" + strings.Repeat("g", 64),
+				"ANONYMOUS_DIGEST":    "sha256:" + strings.Repeat("g", 64),
+				"ASBCP_IMAGE_REF":     "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6@sha256:" + strings.Repeat("g", 64),
+			},
+			want: "image_digest",
+		},
+		{
+			name: "image ref must include immutable digest",
+			override: map[string]string{
+				"ASBCP_IMAGE_REF": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.6",
+			},
+			want: "image_ref",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cmd := exec.Command("bash", "scripts/generate-final-manifest",
+				"--output", filepath.Join(tmpDir, "asbcp-final-manifest.json"),
+				"--release-notes-output", filepath.Join(tmpDir, "asbcp-release-notes.md"),
+				"--changelog-evidence-json", filepath.Join(tmpDir, "asbcp-changelog-evidence.json"),
+				"--risk-status-json", filepath.Join(tmpDir, "asbcp-risk-status.json"),
+				"--api-contract-version", filepath.Join(tmpDir, "asbcp-api-contract-version.txt"),
+			)
+			cmd.Dir = repoRoot
+			env := append([]string{}, os.Environ()...)
+			for key, value := range baseEnv {
+				env = append(env, key+"="+value)
+			}
+			for key, value := range tc.override {
+				env = append(env, key+"="+value)
+			}
+			cmd.Env = env
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("generate-final-manifest succeeded with invalid schema input %q; output:\n%s", tc.name, string(output))
+			}
+			if !strings.Contains(string(output), tc.want) {
+				t.Fatalf("generate-final-manifest error should mention %s, got:\n%s", tc.want, string(output))
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowUsesSharedManifestGeneratorAndApiContractParser(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	content := string(data)
+	required := []string{
+		"Generate final manifest",
+		"bash scripts/generate-final-manifest",
+		"--api-contract-version",
+		"dist/asbcp-api-contract-version.txt",
+		"--changelog-evidence-json",
+		"dist/asbcp-changelog-evidence.json",
+		"--risk-status-json",
+		"dist/asbcp-risk-status.json",
+		"dist/asbcp-final-manifest.json",
+		"dist/asbcp-release-notes.md",
+	}
+	var violations []string
+	for _, token := range required {
+		if !strings.Contains(content, token) {
+			violations = append(violations, "release workflow must use shared manifest generator token "+token)
+		}
+	}
+	forbidden := []string{
+		"python3 - <<'PY'",
+		"manifest = {",
+		`api_contract_version = Path("dist/asbcp-api-contract-version.txt").read_text`,
+		`changelog_evidence["known_breaking_changes"]`,
+	}
+	for _, token := range forbidden {
+		if strings.Contains(content, token) {
+			violations = append(violations, "release workflow must not inline final manifest generation via "+strconv.Quote(token))
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release workflow shared generator violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseWorkflowDoesNotRelyOnManifestFieldCommentsForEvidence(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	fieldTokens := []string{
+		`"schema_id"`,
+		`"manifest_schema_version"`,
+		`"asbcp_version"`,
+		`"git_tag"`,
+		`"commit_sha"`,
+		`"image_ref"`,
+		`"image_digest"`,
+		`"api_contract_version"`,
+		`"anonymous_pull"`,
+		`"same_digest_proof"`,
+		`"known_breaking_changes"`,
+		`"changelog_summary"`,
+		`"known_risk_status"`,
+		`"known_risk_status_source"`,
+		`"release_notes"`,
+		`"body_source"`,
+		`manifest["release_notes"]["body_source"]`,
+	}
+	var violations []string
+	for lineNumber, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, token := range fieldTokens {
+			if strings.Contains(trimmed, token) {
+				violations = append(violations, "workflow comment line "+strconv.Itoa(lineNumber+1)+" contains manifest field token "+token)
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release workflow comments must not satisfy manifest field assertions:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestBreakingChangesUseStableIds(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
+	if err != nil {
+		t.Fatalf("read VERSION: %v", err)
+	}
+	tag := "v" + strings.TrimSpace(string(versionBytes))
+	cmd := exec.Command("bash", "scripts/verify-release.sh", "--changelog-evidence-json", tag)
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit changelog evidence: %v\n%s", err, string(output))
+	}
+	var payload struct {
+		Tag                  string `json:"tag"`
+		KnownBreakingChanges []struct {
+			ID      string `json:"id"`
+			Summary string `json:"summary"`
+		} `json:"known_breaking_changes"`
+	}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		t.Fatalf("parse changelog evidence JSON: %v\n%s", err, string(output))
+	}
+	if payload.Tag != tag {
+		t.Fatalf("changelog evidence tag = %q, want %q", payload.Tag, tag)
+	}
+	stableID := regexp.MustCompile(`^ASBCP-BC-[0-9]{4}$`)
+	seen := map[string]bool{}
+	var violations []string
+	for index, change := range payload.KnownBreakingChanges {
+		if !stableID.MatchString(change.ID) {
+			violations = append(violations, "breaking change "+strconv.Itoa(index)+" has unstable id "+strconv.Quote(change.ID))
+		}
+		if strings.TrimSpace(change.Summary) == "" {
+			violations = append(violations, "breaking change "+change.ID+" has empty summary")
+		}
+		if seen[change.ID] {
+			violations = append(violations, "duplicate breaking change id "+change.ID)
+		}
+		seen[change.ID] = true
+	}
+	if len(payload.KnownBreakingChanges) == 0 {
+		violations = append(violations, "known_breaking_changes must not be empty for current release")
+	}
+	if len(violations) > 0 {
+		t.Fatalf("breaking changes must use stable id + summary objects:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestConfigDocsMatchRuntimeEnvAndK8sProjection(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	prereqPath := filepath.Join(repoRoot, "docs", "contracts", "asbcp-provider-prerequisites.v1.json")
+	prereqBytes, err := os.ReadFile(prereqPath)
+	if err != nil {
+		t.Fatalf("read provider prerequisites contract: %v", err)
+	}
+	authContractBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "contracts", "auth-contract.md"))
+	if err != nil {
+		t.Fatalf("read auth contract: %v", err)
+	}
+	appBytes, err := os.ReadFile(filepath.Join(repoRoot, "manager-service", "internal", "app", "app.go"))
+	if err != nil {
+		t.Fatalf("read app runtime config: %v", err)
+	}
+	deploymentBytes, err := os.ReadFile(filepath.Join(repoRoot, "k8s", "base", "asbcp-deployment.yaml"))
+	if err != nil {
+		t.Fatalf("read ASBCP deployment: %v", err)
+	}
+
+	envPattern := regexp.MustCompile(`ASBCP_AFSCP_[A-Z0-9_]+`)
+	runtimeEnv := map[string]bool{}
+	for _, env := range envPattern.FindAllString(string(appBytes), -1) {
+		runtimeEnv[env] = true
+	}
+	prereq := string(prereqBytes)
+	authContract := string(authContractBytes)
+	deployment := string(deploymentBytes)
+	var violations []string
+	for env := range runtimeEnv {
+		if !strings.Contains(prereq, env) {
+			violations = append(violations, "provider prerequisites missing runtime env "+env)
+		}
+		if !strings.Contains(authContract, env) {
+			violations = append(violations, "auth contract missing runtime env "+env)
+		}
+		if !strings.Contains(deployment, "name: "+env) {
+			violations = append(violations, "k8s deployment missing env projection "+env)
+		}
+	}
+	for _, key := range []string{
+		"afscp-internal-base-url",
+		"afscp-orchestrator-token",
+		"afscp-caller-service",
+		"afscp-actor-type",
+		"afscp-actor-id",
+	} {
+		if !strings.Contains(prereq, key) {
+			violations = append(violations, "provider prerequisites missing k8s projection key "+key)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("config docs/runtime/k8s projection mismatch:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestProviderPrerequisitesCoverRBACSecretAFSCPCaller(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	prereqPath := filepath.Join(repoRoot, "docs", "contracts", "asbcp-provider-prerequisites.v1.json")
+	data, err := os.ReadFile(prereqPath)
+	if err != nil {
+		t.Fatalf("read provider prerequisites contract: %v", err)
+	}
+	var prereq struct {
+		SchemaID   string `json:"schema_id"`
+		SchemaVer  string `json:"schema_version"`
+		Service    string `json:"service"`
+		Kubernetes struct {
+			RBAC            []providerPrereqRBACRuleForTest `json:"rbac"`
+			NoPublicIngress bool                            `json:"no_public_ingress"`
+		} `json:"kubernetes"`
+		SecretEnvProjections    []providerPrereqEnvProjectionForTest `json:"secret_env_projections"`
+		ConfigMapEnvProjections []providerPrereqEnvProjectionForTest `json:"config_map_env_projections"`
+		AFSCP                   struct {
+			CallerServiceEnv  string `json:"caller_service_env"`
+			ActorTypeEnv      string `json:"actor_type_env"`
+			ActorIDEnv        string `json:"actor_id_env"`
+			AllowedCaller     string `json:"allowed_caller"`
+			RequiredRole      string `json:"required_role"`
+			OrchestratorToken struct {
+				Env string `json:"env"`
+				Key string `json:"key"`
+			} `json:"orchestrator_token"`
+		} `json:"afscp"`
+	}
+	if err := json.Unmarshal(data, &prereq); err != nil {
+		t.Fatalf("parse provider prerequisites contract: %v", err)
+	}
+
+	var violations []string
+	if prereq.SchemaID != "https://agentsmith.dev/schemas/asbcp/provider-prerequisites.v1.json" || prereq.SchemaVer != "v1" {
+		violations = append(violations, "provider prerequisites must declare canonical schema id/version")
+	}
+	if prereq.Service != asbcpServiceName {
+		violations = append(violations, "provider prerequisites service must be "+asbcpServiceName)
+	}
+	requiredRBAC := []struct {
+		resource string
+		scope    string
+		verbs    []string
+	}{
+		{"persistentvolumes", "cluster", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{"pods", "namespace", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{"pods/exec", "namespace", []string{"create"}},
+		{"pods/status", "namespace", []string{"get", "patch"}},
+		{"persistentvolumeclaims", "namespace", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{"events", "namespace", []string{"create", "patch"}},
+		{"configmaps", "namespace", []string{"get", "list", "create", "update"}},
+	}
+	for _, expected := range requiredRBAC {
+		if !hasRBACRule(prereq.Kubernetes.RBAC, expected.resource, expected.scope, expected.verbs) {
+			violations = append(violations, "provider prerequisites must cover "+expected.scope+" "+expected.resource+" RBAC verbs "+strings.Join(expected.verbs, ","))
+		}
+	}
+	if !prereq.Kubernetes.NoPublicIngress {
+		violations = append(violations, "provider prerequisites must declare no_public_ingress")
+	}
+	for _, expected := range []struct {
+		env string
+		key string
+	}{
+		{"ASBCP_SERVICE_KEYS", "service-keys"},
+		{"ASBCP_AFSCP_ORCHESTRATOR_TOKEN", "afscp-orchestrator-token"},
+	} {
+		if !hasEnvProjection(prereq.SecretEnvProjections, expected.env, expected.key) {
+			violations = append(violations, "missing secret env projection "+expected.env+" from "+expected.key)
+		}
+	}
+	for _, expected := range []struct {
+		env string
+		key string
+	}{
+		{"ASBCP_AFSCP_INTERNAL_BASE_URL", "afscp-internal-base-url"},
+		{"ASBCP_AFSCP_CALLER_SERVICE", "afscp-caller-service"},
+		{"ASBCP_AFSCP_ACTOR_TYPE", "afscp-actor-type"},
+		{"ASBCP_AFSCP_ACTOR_ID", "afscp-actor-id"},
+	} {
+		if !hasEnvProjection(prereq.ConfigMapEnvProjections, expected.env, expected.key) {
+			violations = append(violations, "missing config map env projection "+expected.env+" from "+expected.key)
+		}
+	}
+	if prereq.AFSCP.CallerServiceEnv != "ASBCP_AFSCP_CALLER_SERVICE" ||
+		prereq.AFSCP.ActorTypeEnv != "ASBCP_AFSCP_ACTOR_TYPE" ||
+		prereq.AFSCP.ActorIDEnv != "ASBCP_AFSCP_ACTOR_ID" {
+		violations = append(violations, "AFSCP caller identity must be bound to ASBCP_AFSCP_* envs")
+	}
+	if prereq.AFSCP.AllowedCaller != asbcpServiceName {
+		violations = append(violations, "AFSCP allowed_caller must be "+asbcpServiceName)
+	}
+	if prereq.AFSCP.RequiredRole != "orchestrator_mount" {
+		violations = append(violations, "AFSCP required_role must be orchestrator_mount")
+	}
+	if prereq.AFSCP.OrchestratorToken.Env != "ASBCP_AFSCP_ORCHESTRATOR_TOKEN" ||
+		prereq.AFSCP.OrchestratorToken.Key != "afscp-orchestrator-token" {
+		violations = append(violations, "AFSCP orchestrator token must map to ASBCP_AFSCP_ORCHESTRATOR_TOKEN/afscp-orchestrator-token")
+	}
+	if len(violations) > 0 {
+		t.Fatalf("provider prerequisites contract incomplete:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseVerifierGuardsProviderPrerequisiteRuntimeRBAC(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "verify-release.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read release verifier: %v", err)
+	}
+	stanza := shellFunctionStanza(string(data), "check_provider_prerequisites_contract")
+	if stanza == "" {
+		t.Fatalf("release verifier missing check_provider_prerequisites_contract")
+	}
+	required := []string{
+		"k8s/base/rbac-asbcp.yaml",
+		"k8s/base/workload-rbac.yaml",
+		"persistentvolumes",
+		"pods/exec",
+		"pods/status",
+		"persistentvolumeclaims",
+		"events",
+		"configmaps",
+		`{"get", "list", "create", "update"}`,
+	}
+	var violations []string
+	for _, token := range required {
+		if !strings.Contains(stanza, token) {
+			violations = append(violations, "check_provider_prerequisites_contract missing "+token)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release verifier must guard all runtime RBAC resources:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+type providerPrereqRBACRuleForTest struct {
+	Resource string
+	Scope    string
+	Verbs    []string
+}
+
+type providerPrereqEnvProjectionForTest struct {
+	Env string
+	Key string
+}
+
+func hasRBACRule(rules []providerPrereqRBACRuleForTest, resource string, scope string, verbs []string) bool {
+	for _, rule := range rules {
+		if rule.Resource != resource || rule.Scope != scope {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, verb := range rule.Verbs {
+			seen[verb] = true
+		}
+		for _, verb := range verbs {
+			if !seen[verb] {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env string, key string) bool {
+	for _, projection := range projections {
+		if projection.Env == env && projection.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func TestReleaseVersionBumpKeepsPublishedV205Immutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.5" {
-		t.Fatalf("VERSION must be bumped to 2.0.5 for the post-v2.0.4 clean-cut release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.6" {
+		t.Fatalf("VERSION must be bumped to 2.0.6 for the post-v2.0.5 clean-cut release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -610,9 +1216,27 @@ func TestReleaseVersionBumpKeepsPublishedV204Immutable(t *testing.T) {
 		t.Fatalf("read CHANGELOG.md: %v", err)
 	}
 	changelog := string(changelogBytes)
+	section206 := changelogSection(changelog, "v2.0.6")
+	if section206 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.6 release section instead of retconning v2.0.5")
+	}
+	required206 := []string{
+		"ASBCP-BC-0001",
+		"durable terminal truth",
+		"DELETE 404-to-409 fail-closed",
+		"ConfigMap fact store/RBAC",
+		"workspace-binding uncertainty is fail-closed",
+	}
+	var violations []string
+	for _, token := range required206 {
+		if !strings.Contains(section206, token) {
+			violations = append(violations, "v2.0.6 changelog missing "+token)
+		}
+	}
+
 	section205 := changelogSection(changelog, "v2.0.5")
 	if section205 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.5 release section instead of retconning v2.0.4")
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.5 section")
 	}
 	required205 := []string{
 		"release evidence schema",
@@ -621,10 +1245,21 @@ func TestReleaseVersionBumpKeepsPublishedV204Immutable(t *testing.T) {
 		"old active smoke cleanup",
 		"pre-GA clean cut",
 	}
-	var violations []string
 	for _, token := range required205 {
 		if !strings.Contains(section205, token) {
-			violations = append(violations, "v2.0.5 changelog missing "+token)
+			violations = append(violations, "published v2.0.5 changelog missing "+token)
+		}
+	}
+	forbidden205 := []string{
+		"durable terminal truth",
+		"workload_release_incomplete",
+		"ConfigMap fact store/RBAC",
+		"workspace-binding reconciliation is fail-closed",
+		"workspace-binding uncertainty is fail-closed",
+	}
+	for _, token := range forbidden205 {
+		if strings.Contains(section205, token) {
+			violations = append(violations, "published v2.0.5 section was retconned with "+token)
 		}
 	}
 
@@ -810,10 +1445,14 @@ func TestReleaseGateBuildClearsHostProxyDefaults(t *testing.T) {
 	if buildReleaseImage == "" {
 		t.Fatalf("release verifier missing build_release_image function")
 	}
+	requiredScript := []string{
+		"resolve_build_proxy_arg()",
+		`if [ "${!override_name+x}" = "x" ]; then`,
+		`asbcp_build_http_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"`,
+		`asbcp_build_https_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTPS_PROXY HTTPS_PROXY https_proxy ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"`,
+		`asbcp_build_no_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_NO_PROXY NO_PROXY no_proxy)"`,
+	}
 	required := []string{
-		`asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"`,
-		`asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"`,
-		`asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"`,
 		"--build-arg \"ASBCP_BUILD_HTTP_PROXY=${asbcp_build_http_proxy}\"",
 		"--build-arg \"ASBCP_BUILD_HTTPS_PROXY=${asbcp_build_https_proxy}\"",
 		"--build-arg \"ASBCP_BUILD_NO_PROXY=${asbcp_build_no_proxy}\"",
@@ -835,6 +1474,11 @@ func TestReleaseGateBuildClearsHostProxyDefaults(t *testing.T) {
 		"env -u all_proxy",
 	}
 	var violations []string
+	for _, token := range requiredScript {
+		if !strings.Contains(content, token) {
+			violations = append(violations, "release gate script missing build-only proxy fallback "+token)
+		}
+	}
 	for _, token := range required {
 		if !strings.Contains(buildReleaseImage, token) {
 			violations = append(violations, "release gate build missing empty Dockerfile proxy build arg "+token)
@@ -858,6 +1502,12 @@ func TestReleaseWorkflowEmitsAgentSmithLockFieldsAndValidatesTag(t *testing.T) {
 		t.Fatalf("read release workflow: %v", err)
 	}
 	content := string(data)
+	generatorPath := filepath.Join(repoRoot, "scripts", "generate-final-manifest")
+	generatorBytes, err := os.ReadFile(generatorPath)
+	if err != nil {
+		t.Fatalf("read final manifest generator: %v", err)
+	}
+	generator := string(generatorBytes)
 	required := []string{
 		"Validate release version",
 		"Run authoritative release gate",
@@ -866,17 +1516,24 @@ func TestReleaseWorkflowEmitsAgentSmithLockFieldsAndValidatesTag(t *testing.T) {
 		"steps.version.outputs.image_tag",
 		`ASBCP_VERSION: ${{ steps.version.outputs.image_tag }}`,
 		"ASBCP_GIT_TAG",
-		"asbcp_version=",
-		"asbcp_source_image=",
-		"asbcp_release_url=",
-		"asbcp_commit_sha=",
 		"steps.build.outputs.digest",
-		`asbcp_version={os.environ["ASBCP_VERSION"]}`,
+		"bash scripts/generate-final-manifest",
+	}
+	generatorRequired := []string{
+		"asbcp_version={asbcp_version}",
+		"asbcp_source_image={image_ref}",
+		"asbcp_release_url={release_url}",
+		"asbcp_commit_sha={commit_sha}",
 	}
 	var violations []string
 	for _, token := range required {
 		if !strings.Contains(content, token) {
 			violations = append(violations, "release workflow missing "+token)
+		}
+	}
+	for _, token := range generatorRequired {
+		if !strings.Contains(generator, token) {
+			violations = append(violations, "final manifest generator missing "+token)
 		}
 	}
 	forbidden := []string{
@@ -903,6 +1560,12 @@ func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T
 		t.Fatalf("read release workflow: %v", err)
 	}
 	content := string(data)
+	generatorPath := filepath.Join(repoRoot, "scripts", "generate-final-manifest")
+	generatorBytes, err := os.ReadFile(generatorPath)
+	if err != nil {
+		t.Fatalf("read final manifest generator: %v", err)
+	}
+	generator := string(generatorBytes)
 	required := []string{
 		"Run authoritative release gate",
 		"Build and push ASBCP image",
@@ -914,7 +1577,21 @@ func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T
 		"body_path:",
 		"fail_on_unmatched_files: true",
 		"files:",
+		"bash scripts/generate-final-manifest",
+		"TAG_RESOLVED_DIGEST",
+		"ANONYMOUS_DIGEST",
+		"SAME_DIGEST_MATCH",
+		"fresh-empty",
+		"--changelog-evidence-json",
+		"dist/asbcp-changelog-evidence.json",
+		"--risk-status-json",
+		"dist/asbcp-risk-status.json",
+		"--api-contract-version",
+		"dist/asbcp-api-contract-version.txt",
+	}
+	generatorRequired := []string{
 		`"schema_id"`,
+		`"manifest_schema_version"`,
 		`"asbcp_version"`,
 		`"git_tag"`,
 		`"commit_sha"`,
@@ -930,15 +1607,7 @@ func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T
 		`"runbook_url"`,
 		`"release_notes"`,
 		`"body_source"`,
-		"TAG_RESOLVED_DIGEST",
-		"ANONYMOUS_DIGEST",
-		"SAME_DIGEST_MATCH",
-		"fresh-empty",
-		"--changelog-evidence-json",
-		"dist/asbcp-changelog-evidence.json",
-		"--risk-status-json",
-		"dist/asbcp-risk-status.json",
-		`"schema_id": "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"`,
+		`SCHEMA_ID = "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"`,
 		`"tag_ref"`,
 		`"tag_resolved_digest"`,
 		`"build_push_digest"`,
@@ -947,7 +1616,6 @@ func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T
 		`Changelog summary: {changelog_evidence["changelog_summary"]}`,
 		`risk_status_evidence["known_risk_status"]`,
 		`risk_status_evidence["source"]`,
-		`Path("dist/asbcp-release-notes.md").write_text(manifest["release_notes"]["body_source"]`,
 	}
 	var violations []string
 	for _, token := range required {
@@ -955,8 +1623,15 @@ func TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect(t *testing.T
 			violations = append(violations, "release workflow missing final manifest token "+token)
 		}
 	}
+	for _, token := range generatorRequired {
+		if !strings.Contains(generator, token) {
+			violations = append(violations, "shared final manifest generator missing token "+token)
+		}
+	}
 	forbidden := []string{
 		"\n      - name: Verify digest pull\n",
+		"python3 - <<'PY'",
+		"manifest = {",
 		`"public_inspect_result"`,
 		`"version": os.environ["ASBCP_VERSION"]`,
 		`"tag": os.environ["ASBCP_TAG"]`,
@@ -1323,17 +1998,43 @@ func TestReleaseEvidenceReadsAPIContractVersionFromContract(t *testing.T) {
 	}
 	workflow := string(workflowBytes)
 	for _, token := range []string{
+		"Generate final manifest",
+		"bash scripts/generate-final-manifest",
 		"--api-contract-version",
 		"dist/asbcp-api-contract-version.txt",
-		"api_contract_version = Path(\"dist/asbcp-api-contract-version.txt\").read_text",
-		`"api_contract_version": api_contract_version`,
+		"dist/asbcp-final-manifest.json",
 	} {
 		if !strings.Contains(workflow, token) {
-			violations = append(violations, "release workflow missing API contract parser token "+token)
+			violations = append(violations, "release workflow missing API contract generator handoff token "+token)
 		}
 	}
 	if strings.Contains(workflow, "API_CONTRACT_VERSION: "+contractVersion) {
 		violations = append(violations, "release workflow must not hardcode API_CONTRACT_VERSION "+contractVersion)
+	}
+	for _, token := range []string{
+		`api_contract_version = Path("dist/asbcp-api-contract-version.txt").read_text`,
+		`"api_contract_version": api_contract_version`,
+	} {
+		if strings.Contains(workflow, token) {
+			violations = append(violations, "release workflow must not inline API contract manifest generation via "+token)
+		}
+	}
+
+	generatorBytes, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "generate-final-manifest"))
+	if err != nil {
+		t.Fatalf("read final manifest generator: %v", err)
+	}
+	generator := string(generatorBytes)
+	for _, token := range []string{
+		`parser.add_argument("--api-contract-version", default="dist/asbcp-api-contract-version.txt")`,
+		`api_contract_version = run_release_verifier(root, "--api-contract-version")`,
+		`write_text(root / args.api_contract_version, api_contract_version + "\n")`,
+		`API contract version: {api_contract_version}`,
+		`"api_contract_version": api_contract_version`,
+	} {
+		if !strings.Contains(generator, token) {
+			violations = append(violations, "final manifest generator missing API contract evidence token "+token)
+		}
 	}
 
 	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "release-evidence", "release-manifest.json"))
@@ -1341,13 +2042,26 @@ func TestReleaseEvidenceReadsAPIContractVersionFromContract(t *testing.T) {
 		t.Fatalf("read release evidence manifest: %v", err)
 	}
 	var manifest struct {
-		APIContractVersion string `json:"api_contract_version"`
+		APIContractVersion  string `json:"api_contract_version"`
+		FinalManifestSchema struct {
+			RequiredFields []string `json:"required_fields"`
+		} `json:"final_manifest_schema"`
 	}
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("parse release manifest: %v", err)
 	}
 	if manifest.APIContractVersion != contractVersion {
 		violations = append(violations, "release manifest api_contract_version must match docs contract version "+contractVersion)
+	}
+	hasAPIContractVersionRequiredField := false
+	for _, field := range manifest.FinalManifestSchema.RequiredFields {
+		if field == "api_contract_version" {
+			hasAPIContractVersionRequiredField = true
+			break
+		}
+	}
+	if !hasAPIContractVersionRequiredField {
+		violations = append(violations, "release manifest final_manifest_schema.required_fields missing api_contract_version")
 	}
 	if len(violations) > 0 {
 		t.Fatalf("API contract version evidence violations:\n%s", strings.Join(violations, "\n"))
@@ -1704,19 +2418,40 @@ func TestReleaseRiskStatusComesFromRiskRegister(t *testing.T) {
 	}
 	workflow := string(workflowBytes)
 	requiredWorkflowTokens := []string{
+		"Generate final manifest",
+		"bash scripts/generate-final-manifest",
 		"--risk-status-json",
 		"dist/asbcp-risk-status.json",
-		`risk_status_evidence["known_risk_status"]`,
-		`risk_status_evidence["source"]`,
-		`"known_risk_status_source"`,
+		"files:",
+		"dist/asbcp-final-manifest.json",
 	}
 	for _, token := range requiredWorkflowTokens {
 		if !strings.Contains(workflow, token) {
-			violations = append(violations, "release workflow missing risk-register evidence token "+token)
+			violations = append(violations, "release workflow missing risk-register generator handoff token "+token)
 		}
 	}
 	if strings.Contains(workflow, "KNOWN_RISK_STATUS:") || strings.Contains(workflow, `os.environ["KNOWN_RISK_STATUS"]`) {
 		violations = append(violations, "release workflow must not use a static KNOWN_RISK_STATUS string")
+	}
+
+	generatorBytes, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "generate-final-manifest"))
+	if err != nil {
+		t.Fatalf("read final manifest generator: %v", err)
+	}
+	generator := string(generatorBytes)
+	requiredGeneratorTokens := []string{
+		`parser.add_argument("--risk-status-json", default="dist/asbcp-risk-status.json")`,
+		`risk_status_evidence = json.loads(run_release_verifier(root, "--risk-status-json"))`,
+		`write_text(root / args.risk_status_json, json.dumps(risk_status_evidence`,
+		`Known risk status: {risk_status_evidence["known_risk_status"]}`,
+		`Known risk status source: {risk_status_evidence["source"]}`,
+		`"known_risk_status": risk_status_evidence["known_risk_status"]`,
+		`"known_risk_status_source": RISK_STATUS_SOURCE`,
+	}
+	for _, token := range requiredGeneratorTokens {
+		if !strings.Contains(generator, token) {
+			violations = append(violations, "final manifest generator missing risk-register evidence token "+token)
+		}
 	}
 
 	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "release-evidence", "release-manifest.json"))

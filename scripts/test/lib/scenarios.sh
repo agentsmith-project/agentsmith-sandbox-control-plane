@@ -63,7 +63,19 @@ delete_workload() {
         -H "X-Service-Key: ${SERVICE_KEY}")
 
     local status=$(echo "${response}" | tail -n1)
-    [ "${status}" -eq 200 ] || [ "${status}" -eq 404 ]
+    local body=$(echo "${response}" | head -n-1)
+    echo "${body}"
+
+    if [ "${status}" -eq 200 ]; then
+        return 0
+    fi
+    if [ "${status}" -eq 409 ]; then
+        echo "DELETE retryable conflict: terminal fact is not proven yet; retry after reconcile. Response: ${body}" >&2
+        return 1
+    fi
+
+    echo "DELETE failed with status ${status}: ${body}" >&2
+    return 1
 }
 
 keepalive_workload() {
@@ -130,6 +142,8 @@ cleanup_workload() {
 
     echo "Cleaning up workload ${workload_id}..."
 
+    # Test cleanup is best-effort only. It may tolerate an already reconciled
+    # resource, but delete_workload itself preserves the product DELETE contract.
     delete_workload "${ASBCP_URL}" "${workload_id}" || true
 
     echo "Cleanup complete"

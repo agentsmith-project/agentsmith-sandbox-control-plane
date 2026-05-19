@@ -1,0 +1,168 @@
+{
+  "schema_id": "https://agentsmith.dev/schemas/asbcp/provider-prerequisites.v1.json",
+  "schema_version": "v1",
+  "service": "agentsmith-sandbox-control-plane",
+  "kubernetes": {
+    "service_account": {
+      "name": "agentsmith-sandbox-control-plane",
+      "namespace": "sandbox-system"
+    },
+    "rbac": [
+      {
+        "api_group": "",
+        "resource": "persistentvolumes",
+        "scope": "cluster",
+        "verbs": [
+          "get",
+          "list",
+          "watch",
+          "create",
+          "update",
+          "patch",
+          "delete"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "pods",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "verbs": [
+          "get",
+          "list",
+          "watch",
+          "create",
+          "update",
+          "patch",
+          "delete"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "pods/exec",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "verbs": [
+          "create"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "pods/status",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "verbs": [
+          "get",
+          "patch"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "persistentvolumeclaims",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "verbs": [
+          "get",
+          "list",
+          "watch",
+          "create",
+          "update",
+          "patch",
+          "delete"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "events",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "verbs": [
+          "create",
+          "patch"
+        ]
+      },
+      {
+        "api_group": "",
+        "resource": "configmaps",
+        "scope": "namespace",
+        "namespace_env": "ASBCP_WORKLOAD_NAMESPACE",
+        "purpose": "workload fact store",
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ]
+      }
+    ],
+    "no_public_ingress": true,
+    "default_service_type": "ClusterIP"
+  },
+  "secret_env_projections": [
+    {
+      "secret": "agentsmith-sandbox-control-plane-secrets",
+      "key": "service-keys",
+      "env": "ASBCP_SERVICE_KEYS"
+    },
+    {
+      "secret": "agentsmith-sandbox-control-plane-secrets",
+      "key": "afscp-orchestrator-token",
+      "env": "ASBCP_AFSCP_ORCHESTRATOR_TOKEN"
+    }
+  ],
+  "config_map_env_projections": [
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "workload-namespace",
+      "env": "ASBCP_WORKLOAD_NAMESPACE"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "afscp-internal-base-url",
+      "env": "ASBCP_AFSCP_INTERNAL_BASE_URL"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "afscp-caller-service",
+      "env": "ASBCP_AFSCP_CALLER_SERVICE"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "afscp-actor-type",
+      "env": "ASBCP_AFSCP_ACTOR_TYPE"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "afscp-actor-id",
+      "env": "ASBCP_AFSCP_ACTOR_ID"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "juicefs-csi-driver",
+      "env": "ASBCP_JUICEFS_CSI_DRIVER"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "juicefs-storage-capacity",
+      "env": "ASBCP_JUICEFS_STORAGE_CAPACITY"
+    },
+    {
+      "config_map": "asbcp-runtime-config",
+      "key": "juicefs-storage-class-name",
+      "env": "ASBCP_JUICEFS_STORAGE_CLASS_NAME"
+    }
+  ],
+  "afscp": {
+    "internal_base_url_env": "ASBCP_AFSCP_INTERNAL_BASE_URL",
+    "caller_service_env": "ASBCP_AFSCP_CALLER_SERVICE",
+    "actor_type_env": "ASBCP_AFSCP_ACTOR_TYPE",
+    "actor_id_env": "ASBCP_AFSCP_ACTOR_ID",
+    "allowed_caller": "agentsmith-sandbox-control-plane",
+    "required_role": "orchestrator_mount",
+    "orchestrator_token": {
+      "env": "ASBCP_AFSCP_ORCHESTRATOR_TOKEN",
+      "secret": "agentsmith-sandbox-control-plane-secrets",
+      "key": "afscp-orchestrator-token"
+    }
+  }
+}

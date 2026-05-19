@@ -9,16 +9,19 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 type Handler struct {
@@ -46,7 +49,10 @@ type Options struct {
 	StorageCapacity  string
 	StorageClassName string
 	AFSCPClient      afscpPlanClient
+	WorkloadFacts    workloadfacts.Source
 }
+
+const errorCodeWorkspaceBindingReleaseIncomplete = "workspace_binding_release_incomplete"
 
 type EnsureRequest struct {
 	NamespaceID    string `json:"namespace_id"`
@@ -278,11 +284,12 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspace
 	pvName, pvcName := names(workspaceID, projectID, bindingID)
 	active, err := h.activeWorkloadsForBinding(ctx, workspaceID, projectID, bindingID)
 	if err != nil {
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "check active workloads failed")
+		log.Printf("workspacebinding/%s: release truth check unavailable: %s", bindingID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding release truth is unavailable; retry after workload release state is known")
 		return
 	}
 	if len(active) > 0 {
-		jsonError(w, r, http.StatusConflict, "conflict", "workspace binding has active workloads; delete workloads first: "+strings.Join(active, ","))
+		jsonError(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding release is incomplete; delete workloads first: "+strings.Join(active, ","))
 		return
 	}
 	if err := h.k8sClient.DeletePersistentVolumeClaim(ctx, h.options.Namespace, pvcName); err != nil {
@@ -297,24 +304,116 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspace
 }
 
 func (h *Handler) activeWorkloadsForBinding(ctx context.Context, workspaceID, projectID, bindingID string) ([]string, error) {
+	source, err := h.workloadFactSource()
+	if err != nil {
+		return nil, err
+	}
+	facts, err := source.ListByBinding(ctx, workspaceID, projectID, bindingID)
+	if err != nil {
+		return nil, err
+	}
+	active := make(map[string]struct{})
+	for _, fact := range facts {
+		if fact.Terminal() {
+			continue
+		}
+		addActiveWorkloadName(active, fact.WorkloadID, fact.PodName)
+	}
+
 	pods, err := h.k8sClient.ListPods(ctx, h.options.Namespace, metav1.ListOptions{LabelSelector: "app=managed-workload"})
 	if err != nil {
 		return nil, err
 	}
-	var active []string
 	for _, pod := range pods.Items {
-		if pod.Annotations[annotationAFSCPMountBindingID] != bindingID {
-			continue
+		if name, ok := livePodWorkloadNameForBinding(pod, workspaceID, projectID, bindingID); ok {
+			addActiveWorkloadName(active, name, pod.Name)
 		}
-		if pod.Labels["workspace_id"] != "" && pod.Labels["workspace_id"] != workspaceID {
-			continue
-		}
-		if pod.Labels["project_id"] != "" && pod.Labels["project_id"] != projectID {
-			continue
-		}
-		active = append(active, pod.Name)
 	}
-	return active, nil
+
+	out := make([]string, 0, len(active))
+	for name := range active {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func addActiveWorkloadName(active map[string]struct{}, values ...string) {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			active[value] = struct{}{}
+			return
+		}
+	}
+}
+
+func livePodWorkloadNameForBinding(pod v1.Pod, workspaceID, projectID, bindingID string) (string, bool) {
+	annotations := pod.GetAnnotations()
+	labels := pod.GetLabels()
+	if podReferencesPVCClaim(pod, PVCName(workspaceID, projectID, bindingID)) {
+		return livePodWorkloadName(pod), true
+	}
+	if strings.TrimSpace(annotations[annotationAFSCPMountBindingID]) != bindingID {
+		return "", false
+	}
+	if !podScopeMatches(annotations[annotationWorkspaceID], labels["workspace_id"], workspaceID) {
+		return "", false
+	}
+	if !podScopeMatches(annotations[annotationProjectID], labels["project_id"], projectID) {
+		return "", false
+	}
+	name := livePodWorkloadName(pod)
+	return name, name != ""
+}
+
+func livePodWorkloadName(pod v1.Pod) string {
+	name := strings.TrimSpace(pod.GetAnnotations()["mbos.io/workload-id"])
+	if name == "" {
+		name = pod.GetName()
+	}
+	return name
+}
+
+func podReferencesPVCClaim(pod v1.Pod, pvcName string) bool {
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return false
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		if strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName) == pvcName {
+			return true
+		}
+	}
+	return false
+}
+
+func podScopeMatches(annotationValue, labelValue, want string) bool {
+	annotationValue = strings.TrimSpace(annotationValue)
+	labelValue = strings.TrimSpace(labelValue)
+	want = strings.TrimSpace(want)
+	if annotationValue != "" {
+		return annotationValue == want
+	}
+	return labelValue == want || labelValue == workloadfacts.LabelValue(want)
+}
+
+type configMapClientProvider interface {
+	Clientset() *kubernetes.Clientset
+}
+
+func (h *Handler) workloadFactSource() (workloadfacts.Source, error) {
+	if h.options.WorkloadFacts != nil {
+		return h.options.WorkloadFacts, nil
+	}
+	provider, ok := h.k8sClient.(configMapClientProvider)
+	if !ok {
+		return nil, errors.New("workload fact source is not configured")
+	}
+	return workloadfacts.NewConfigMapStore(provider.Clientset().CoreV1().ConfigMaps(h.options.Namespace)), nil
 }
 
 func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan) *v1.PersistentVolume {
@@ -324,7 +423,7 @@ func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan
 			Name: status.PVName,
 			Labels: map[string]string{
 				labelManagedBy:             labelManagedByOwner,
-				"mbos.io/mount-binding-id": status.MountBindingID,
+				"mbos.io/mount-binding-id": workloadfacts.LabelValue(status.MountBindingID),
 			},
 			Annotations: map[string]string{
 				annotationWorkspaceID:              status.WorkspaceID,
@@ -373,7 +472,7 @@ func (h *Handler) buildPVC(status BindingStatus, plan afscp.OrchestratorMountPla
 			Namespace: h.options.Namespace,
 			Labels: map[string]string{
 				labelManagedBy:             labelManagedByOwner,
-				"mbos.io/mount-binding-id": status.MountBindingID,
+				"mbos.io/mount-binding-id": workloadfacts.LabelValue(status.MountBindingID),
 			},
 			Annotations: map[string]string{
 				annotationWorkspaceID:              status.WorkspaceID,
@@ -430,8 +529,8 @@ func sanitizeK8sName(value string, fallback string) string {
 }
 
 func names(workspaceID, projectID, bindingID string) (pvName, pvcName string) {
-	suffix := sanitizeK8sName(fmt.Sprintf("%s-%s-%s", workspaceID, projectID, bindingID), "binding")
-	return "juicefs-pv-" + suffix, "juicefs-pvc-" + suffix
+	return workloadfacts.ObjectName("juicefs-pv", workspaceID, projectID, bindingID),
+		workloadfacts.ObjectName("juicefs-pvc", workspaceID, projectID, bindingID)
 }
 
 func PVCName(workspaceID, projectID, bindingID string) string {
@@ -440,7 +539,7 @@ func PVCName(workspaceID, projectID, bindingID string) string {
 }
 
 func volumeHandle(workspaceID, projectID, bindingID string) string {
-	return sanitizeK8sName(fmt.Sprintf("juicefs-%s-%s-%s", workspaceID, projectID, bindingID), "juicefs-volume")
+	return workloadfacts.ObjectName("juicefs", workspaceID, projectID, bindingID)
 }
 
 func firstNonEmpty(values ...string) string {

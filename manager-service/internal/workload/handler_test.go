@@ -15,6 +15,7 @@ import (
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -216,10 +217,10 @@ func decodeError(t *testing.T, rec *httptest.ResponseRecorder) testErrorEnvelope
 // ---------------------------------------------------------------------------
 
 func TestPodName(t *testing.T) {
-	assert.Equal(t, "workload-abc-123", PodName("abc-123"))
-	assert.Equal(t, "workload-", PodName(""))
-	assert.Equal(t, "workload-x", PodName("x"))
-	assert.Equal(t, "workload-with spaces", PodName("with spaces"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "abc-123"), PodName("abc-123"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", ""), PodName(""))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "x"), PodName("x"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "with spaces"), PodName("with spaces"))
 }
 
 // ---------------------------------------------------------------------------
@@ -508,10 +509,10 @@ func TestRouteRequest_ValidRoutes(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "DELETE workload → 404 (pod not found)",
+			name:       "DELETE workload → 409 (missing terminal fact)",
 			method:     http.MethodDelete,
 			path:       "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1",
-			wantStatus: http.StatusNotFound,
+			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "POST keepalive → 404 (pod not found)",
@@ -547,6 +548,21 @@ func TestRouteRequest_WorkloadIDExtracted(t *testing.T) {
 	var got PodStatus
 	decodeJSON(t, rec, &got)
 	assert.Equal(t, "offline", got.Phase)
+}
+
+func TestRouteRequest_DangerousTailDeleteDoesNotDeletePod(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}}
+	reg := newPodRegistry(pod)
+	h := newHandlerWithRegistry(t, reg)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/extra/tail", nil)
+	rec := httptest.NewRecorder()
+	h.routeRequest(rec, req)
+
+	assert.NotEqual(t, http.StatusOK, rec.Code)
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods[PodName("wl-1")], "extra route tail must not hit workload DELETE handler")
 }
 
 // ---------------------------------------------------------------------------
@@ -758,9 +774,10 @@ func TestHandleDeletePod_NotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "nonexistent")
 
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusConflict, rec.Code)
 	body := decodeError(t, rec)
-	assert.Equal(t, "pod not found", body.Error.Message)
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "workload terminal fact")
 }
 
 // ---------------------------------------------------------------------------
@@ -798,9 +815,9 @@ func TestBuildPod_BasicFields(t *testing.T) {
 	assert.Equal(t, "test-ns", pod.Namespace)
 
 	assert.Equal(t, WorkloadLabel, pod.Labels["app"])
-	assert.Equal(t, "wl-1", pod.Labels["workload_id"])
-	assert.Equal(t, "ws-1", pod.Labels["workspace_id"])
-	assert.Equal(t, "proj-1", pod.Labels["project_id"])
+	assert.Equal(t, workloadfacts.LabelValue("wl-1"), pod.Labels["workload_id"])
+	assert.Equal(t, workloadfacts.LabelValue("ws-1"), pod.Labels["workspace_id"])
+	assert.Equal(t, workloadfacts.LabelValue("proj-1"), pod.Labels["project_id"])
 
 	assert.Equal(t, v1.RestartPolicyNever, pod.Spec.RestartPolicy)
 	require.NotNil(t, pod.Spec.TerminationGracePeriodSeconds)
@@ -1394,7 +1411,7 @@ func TestHandleCreatePod_UsesBindingPVC(t *testing.T) {
 
 	client := newTestK8sClient(t, fakeAPI.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor)
+	h := NewHandler(client, executor, Options{WorkloadFactStore: workloadfacts.NewMemoryStore()})
 
 	payload, _ := json.Marshal(validCreateRequest(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))

@@ -14,11 +14,13 @@ This ledger records ASBCP release-readiness evidence. It is intentionally lightw
 | Workload lifecycle and exec route/error smoke | Yes | Fake-fixture smoke covers create, keepalive, exec route/error contract, AFSCP release, and delete paths |
 | Kubernetes render check | Yes | Enforced by `scripts/verify-release.sh` |
 | Dockerfile contract and image build | Yes | Enforced by `scripts/verify-release.sh` |
-| CHANGELOG release evidence | Yes | `scripts/verify-release.sh` parses the current tag section into `known_breaking_changes` and `changelog_summary` before image publication; the workflow reuses that JSON for the final manifest |
+| CHANGELOG release evidence | Yes | `scripts/verify-release.sh` parses the current tag section into structured `known_breaking_changes` objects and `changelog_summary` before image publication; the workflow reuses that JSON for the final manifest |
 | Risk register release status | Yes | `scripts/verify-release.sh --risk-status-json` reads `docs/RISK_REGISTER.md`, fails on release-blocking rows, and preserves open non-release-blocking risks in `known_risk_status` |
 | Anonymous pull | Workflow-gated | Tag release workflow uses a fresh Docker config to pull the published `image:tag`, record `tag_resolved_digest`, pull `image:tag@build_push_digest`, and record `anonymous_digest` before release notes |
 | Same digest proof | Workflow-gated | Final manifest records `same_digest_proof` comparing `tag_resolved_digest`, `build_push_digest`, and `anonymous_digest`; it is published image identity evidence, not post-push container behavior evidence |
-| Final manifest | Workflow-gated | Tag release workflow generates `asbcp-final-manifest.json` with `https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json` fields, including CHANGELOG-derived `changelog_summary` and the complete GitHub Release body in `release_notes.body_source`, and uploads only the manifest as a GitHub Release asset |
+| Final manifest | Workflow-gated | Tag release workflow calls `scripts/generate-final-manifest` to generate `asbcp-final-manifest.json` conforming to `docs/schemas/asbcp-final-manifest.v1.schema.json`, including CHANGELOG-derived `changelog_summary` and the complete GitHub Release body in `release_notes.body_source`, and uploads only the manifest as a GitHub Release asset |
+| Provider prerequisites contract | Yes | `docs/contracts/asbcp-provider-prerequisites.v1.json` covers ASBCP service RBAC verbs, secret/env projections, `ASBCP_AFSCP_*`, AFSCP caller identity, allowed caller, `orchestrator_mount`, and no-public-ingress |
+| Public error redaction | Yes | `httperror.Write` redacts credential-like dependency messages before returning public JSON error envelopes |
 | Retired naming guard | Yes | Added for governed release surface |
 | Raw storage credential exclusion | Yes | Contract and active guard added |
 | Runner artifact classification | Yes | ADR and active release-surface guard added |

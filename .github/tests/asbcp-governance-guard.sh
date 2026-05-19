@@ -38,7 +38,9 @@ required_files=(
   docs/contracts/api-contract.md
   docs/contracts/auth-contract.md
   docs/contracts/afscp-mount-plan-contract.md
+  docs/contracts/asbcp-provider-prerequisites.v1.json
   docs/contracts/operations-and-errors.md
+  docs/schemas/asbcp-final-manifest.v1.schema.json
   docs/runbooks/local-development.md
   docs/runbooks/release.md
   docs/runbooks/rollback-rollforward.md
@@ -52,6 +54,7 @@ required_files=(
   docs/adr/0006-runner-artifact-classification.md
   docs/release-evidence/release-manifest.json
   scripts/verify-release.sh
+  scripts/generate-final-manifest
   Makefile
   manager-service/scripts/test-asbcp-api.sh
   k8s/overlays/production/access/README.md
@@ -83,29 +86,9 @@ require_contains .github/workflows/release.yml "asbcp-release-notes\\.md" "relea
 require_contains .github/workflows/release.yml "body_path:" "release notes file upload"
 require_contains .github/workflows/release.yml "fail_on_unmatched_files:[[:space:]]*true" "hard failure when final manifest asset is missing"
 require_contains .github/workflows/release.yml "files:" "GitHub Release asset upload"
-require_contains .github/workflows/release.yml "\"schema_id\"" "final manifest schema id field"
-require_contains .github/workflows/release.yml "https://agentsmith\\.dev/schemas/asbcp/final-manifest\\.v1\\.json" "planned final manifest schema id"
-require_contains .github/workflows/release.yml "\"asbcp_version\"" "final manifest ASBCP version field"
-require_contains .github/workflows/release.yml "\"git_tag\"" "final manifest git tag field"
-require_contains .github/workflows/release.yml "\"commit_sha\"" "final manifest commit SHA field"
-require_contains .github/workflows/release.yml "\"image_ref\"" "final manifest image ref field"
-require_contains .github/workflows/release.yml "\"image_digest\"" "final manifest image digest field"
-require_contains .github/workflows/release.yml "\"api_contract_version\"" "final manifest API contract version field"
-require_contains .github/workflows/release.yml "\"anonymous_pull\"" "final manifest anonymous pull field"
-require_contains .github/workflows/release.yml "\"same_digest_proof\"" "final manifest same digest proof field"
-require_contains .github/workflows/release.yml "\"known_breaking_changes\"" "final manifest breaking changes field"
-require_contains .github/workflows/release.yml "\"changelog_summary\"" "final manifest changelog summary field"
-require_contains .github/workflows/release.yml "\"known_risk_status\"" "final manifest risk status field"
-require_contains .github/workflows/release.yml "\"runbook_url\"" "final manifest runbook link field"
-require_contains .github/workflows/release.yml "\"release_notes\"" "final manifest release notes evidence field"
-require_contains .github/workflows/release.yml "\"body_source\"" "GitHub Release body source field"
-require_contains .github/workflows/release.yml "\"tag_resolved_digest\"" "same digest proof tag-resolved digest field"
-require_contains .github/workflows/release.yml "\"build_push_digest\"" "same digest proof build-push digest field"
-require_contains .github/workflows/release.yml "\"anonymous_digest\"" "same digest proof anonymous digest field"
 require_contains .github/workflows/release.yml "TAG_RESOLVED_DIGEST" "tag-resolved digest workflow output"
 require_contains .github/workflows/release.yml "ANONYMOUS_DIGEST" "anonymous tag@digest workflow output"
 require_contains .github/workflows/release.yml "fresh-empty" "fresh anonymous Docker config evidence"
-require_contains .github/workflows/release.yml "manifest\\[\"release_notes\"\\]\\[\"body_source\"\\]" "release notes file derived from manifest body_source"
 require_contains scripts/verify-release.sh "check_changelog_release_evidence" "pre-push CHANGELOG release evidence gate"
 require_contains scripts/verify-release.sh "emit_changelog_release_evidence" "shared CHANGELOG release evidence parser"
 require_contains scripts/verify-release.sh "--changelog-evidence-json" "shared CHANGELOG evidence JSON command"
@@ -115,12 +98,20 @@ require_contains .github/workflows/release.yml "--risk-status-json" "risk regist
 require_contains .github/workflows/release.yml "dist/asbcp-risk-status\\.json" "risk status evidence handoff"
 require_contains .github/workflows/release.yml "--api-contract-version" "API contract version parser"
 require_contains .github/workflows/release.yml "dist/asbcp-api-contract-version\\.txt" "parsed API contract version handoff"
-require_contains .github/workflows/release.yml "\"known_risk_status_source\"" "final manifest risk status source field"
 require_contains scripts/verify-release.sh "read_api_contract_version" "API contract version reader"
 require_contains scripts/verify-release.sh "check_api_contract_version_evidence" "API contract version evidence gate"
 require_contains scripts/verify-release.sh "### Breaking Changes" "CHANGELOG breaking changes subsection parser"
 require_contains scripts/verify-release.sh "emit_risk_status_evidence" "risk register release status evidence parser"
 require_contains scripts/verify-release.sh "docs/RISK_REGISTER\\.md" "risk register status source"
+require_contains scripts/generate-final-manifest "validate_manifest_against_schema_constraints" "final manifest schema-key validation"
+require_contains scripts/generate-final-manifest "require_schema_const" "schema const validation"
+require_contains scripts/generate-final-manifest "require_schema_pattern" "schema pattern validation"
+require_contains scripts/generate-final-manifest "known_breaking_changes\\[\\{index\\}\\]\\.id" "breaking change id schema validation"
+require_contains docs/schemas/asbcp-final-manifest.v1.schema.json "\"schema_id\"" "final manifest schema_id property"
+require_contains docs/schemas/asbcp-final-manifest.v1.schema.json "\"commit_sha\"" "final manifest commit_sha property"
+require_contains docs/schemas/asbcp-final-manifest.v1.schema.json "\"image_ref\"" "final manifest image_ref property"
+require_contains docs/schemas/asbcp-final-manifest.v1.schema.json "\"image_digest\"" "final manifest image_digest property"
+require_contains docs/schemas/asbcp-final-manifest.v1.schema.json "\"known_breaking_changes\"" "final manifest known_breaking_changes property"
 require_contains docs/RISK_REGISTER.md "Release-blocking" "release-blocking classification column"
 require_contains docs/RISK_REGISTER.md "non-release-blocking" "non-blocking open risk classification"
 require_contains k8s/overlays/production/README.md "internal-only by default" "production internal-only default"
@@ -147,6 +138,15 @@ if grep -Eq "test-manager\\.sh" "${ROOT}/Makefile" "${ROOT}/manager-service/READ
   fail "Makefile and manager-service README must use test-asbcp-api.sh, not test-manager.sh"
 fi
 
+delete_smoke_block="$(awk '
+  /^# 8\. Delete workload/ { in_delete = 1 }
+  /^# 9\. / { in_delete = 0 }
+  in_delete { print }
+' "${ROOT}/manager-service/scripts/test-asbcp-api.sh")"
+if printf '%s\n' "${delete_smoke_block}" | grep -Eq 'HTTP_CODE[^[:cntrl:]]*200[^[:cntrl:]]*\|\|[^[:cntrl:]]*HTTP_CODE[^[:cntrl:]]*404|HTTP_CODE[^[:cntrl:]]*404[^[:cntrl:]]*\|\|[^[:cntrl:]]*HTTP_CODE[^[:cntrl:]]*200|200[[:space:]]*\|[[:space:]]*404|404[[:space:]]*\|[[:space:]]*200|test_result[[:space:]]+0[^[:cntrl:]]*404|404[^[:cntrl:]]*test_result[[:space:]]+0'; then
+  fail "canonical ASBCP workload DELETE smoke must not accept 404 as success"
+fi
+
 if grep -Eq '(^|[[:space:]])build-manager([[:space:]:]|$)' "${ROOT}/Makefile"; then
   fail "Makefile must not keep the build-manager old alias"
 fi
@@ -157,6 +157,10 @@ fi
 
 if grep -Eq "API_CONTRACT_VERSION:[[:space:]]*['\"]?v[0-9]+" "${ROOT}/.github/workflows/release.yml"; then
   fail "release workflow must derive api_contract_version from docs/contracts/api-contract.md"
+fi
+
+if grep -Eq '^[[:space:]]*#[^[:cntrl:]]*("schema_id"|"manifest_schema_version"|"asbcp_version"|"git_tag"|"commit_sha"|"image_ref"|"image_digest"|"api_contract_version"|"anonymous_pull"|"same_digest_proof"|"known_breaking_changes"|"changelog_summary"|"known_risk_status"|"known_risk_status_source"|"release_notes"|"body_source"|manifest\["release_notes"\]\["body_source"\])' "${ROOT}/.github/workflows/release.yml"; then
+  fail "release workflow comments must not satisfy final manifest field assertions"
 fi
 
 active_operator_surface_paths=(

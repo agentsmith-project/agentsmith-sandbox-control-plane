@@ -16,6 +16,7 @@
     "risk_status_source": "docs/RISK_REGISTER.md release_blocking column",
     "required_fields": [
       "schema_id",
+      "manifest_schema_version",
       "asbcp_version",
       "git_tag",
       "commit_sha",
@@ -29,9 +30,14 @@
       "known_risk_status",
       "known_risk_status_source",
       "runbook_url",
-      "release_notes"
+      "release_notes",
+      "release_gate"
     ],
     "nested_required_fields": {
+      "known_breaking_changes": [
+        "id",
+        "summary"
+      ],
       "anonymous_pull": [
         "result",
         "tag_ref",
@@ -120,9 +126,19 @@
     },
     {
       "id": "final_manifest",
-      "description": "Tag release workflow emits the canonical final manifest with planned schema id, same-digest evidence field names, and the complete GitHub Release body in release_notes.body_source.",
+      "description": "Tag release workflow emits the canonical final manifest with the independent docs/schemas/asbcp-final-manifest.v1.schema.json schema, same-digest evidence field names, structured breaking-change objects, and the complete GitHub Release body in release_notes.body_source.",
       "status": "workflow-gated",
-      "rationale": "The release workflow generates dist/asbcp-final-manifest.json after anonymous pull and same-digest proof, then uploads it as a GitHub Release asset."
+      "rationale": "The release workflow calls scripts/generate-final-manifest after anonymous pull and same-digest proof, then uploads dist/asbcp-final-manifest.json as a GitHub Release asset."
+    },
+    {
+      "id": "provider_prerequisites_contract",
+      "description": "Machine-readable ASBCP service prerequisites cover Kubernetes RBAC, secrets/env projections, AFSCP caller identity, allowed caller, orchestrator token role, and no-public-ingress.",
+      "status": "added"
+    },
+    {
+      "id": "public_error_redaction",
+      "description": "Public HTTP error writer redacts credential-like dependency messages before emitting JSON error envelopes.",
+      "status": "added"
     },
     {
       "id": "raw_storage_exclusion",

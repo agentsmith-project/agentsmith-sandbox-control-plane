@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json",
+  "title": "ASBCP final release manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "manifest_schema_version",
+    "asbcp_version",
+    "git_tag",
+    "commit_sha",
+    "image_ref",
+    "image_digest",
+    "api_contract_version",
+    "anonymous_pull",
+    "same_digest_proof",
+    "known_breaking_changes",
+    "changelog_summary",
+    "known_risk_status",
+    "known_risk_status_source",
+    "runbook_url",
+    "release_notes",
+    "release_gate"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"
+    },
+    "manifest_schema_version": {
+      "const": "v1"
+    },
+    "asbcp_version": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z]+)*$"
+    },
+    "git_tag": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z]+)*$"
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "image_ref": {
+      "type": "string",
+      "pattern": "@sha256:[0-9a-f]{64}$"
+    },
+    "image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "api_contract_version": {
+      "type": "string",
+      "pattern": "^v[0-9]+$"
+    },
+    "anonymous_pull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "tag_ref",
+        "image_ref",
+        "tag_resolved_digest",
+        "build_push_digest",
+        "anonymous_digest",
+        "docker_config",
+        "commands"
+      ],
+      "properties": {
+        "result": {
+          "const": "ok"
+        },
+        "tag_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_ref": {
+          "type": "string",
+          "pattern": "@sha256:[0-9a-f]{64}$"
+        },
+        "tag_resolved_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "build_push_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "anonymous_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "docker_config": {
+          "const": "fresh-empty"
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "same_digest_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag_resolved_digest",
+        "build_push_digest",
+        "anonymous_digest",
+        "matches",
+        "source"
+      ],
+      "properties": {
+        "tag_resolved_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "build_push_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "anonymous_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "matches": {
+          "const": true
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "known_breaking_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "summary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^ASBCP-BC-[0-9]{4}$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "changelog_summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "known_risk_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "known_risk_status_source": {
+      "const": "docs/RISK_REGISTER.md release_blocking column"
+    },
+    "runbook_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "release_notes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "body_source",
+        "github_release_url"
+      ],
+      "properties": {
+        "body_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "github_release_url": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "release_gate": {
+      "const": "scripts/verify-release.sh"
+    }
+  }
+}

@@ -21,11 +21,13 @@ import (
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // ---------------------------------------------------------------------------
@@ -37,6 +39,7 @@ import (
 type podRegistry struct {
 	mu         sync.Mutex
 	pods       map[string]*v1.Pod
+	configMaps map[string]*v1.ConfigMap
 	events     *eventRecorder
 	bindingPVC *v1.PersistentVolumeClaim
 	bindingPV  *v1.PersistentVolume
@@ -126,6 +129,50 @@ func (noopStorageFlushBarrier) FlushWorkloadMount(context.Context, *v1.Pod, stri
 	return nil
 }
 
+type alwaysFailSaveFactStore struct {
+	*workloadfacts.MemoryStore
+}
+
+func (s *alwaysFailSaveFactStore) Save(context.Context, workloadfacts.Fact) error {
+	return errors.New("fact save failed")
+}
+
+type bindingDeleteClientForWorkloadTest struct {
+	pv   *v1.PersistentVolume
+	pvc  *v1.PersistentVolumeClaim
+	pods []v1.Pod
+}
+
+func (f *bindingDeleteClientForWorkloadTest) EnsurePersistentVolume(context.Context, *v1.PersistentVolume) error {
+	return nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) GetPersistentVolume(context.Context, string) (*v1.PersistentVolume, error) {
+	return f.pv, nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) DeletePersistentVolume(context.Context, string) error {
+	f.pv = nil
+	return nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) EnsurePersistentVolumeClaim(context.Context, string, *v1.PersistentVolumeClaim) error {
+	return nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) GetPersistentVolumeClaim(context.Context, string, string) (*v1.PersistentVolumeClaim, error) {
+	return f.pvc, nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) DeletePersistentVolumeClaim(context.Context, string, string) error {
+	f.pvc = nil
+	return nil
+}
+
+func (f *bindingDeleteClientForWorkloadTest) ListPods(context.Context, string, metav1.ListOptions) (*v1.PodList, error) {
+	return &v1.PodList{Items: append([]v1.Pod(nil), f.pods...)}, nil
+}
+
 func (f *fakeMountLifecycleClient) GetOrchestratorMountPlan(_ context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error) {
 	f.planNamespaceID = namespaceID
 	f.planMountBindingID = mountBindingID
@@ -193,9 +240,15 @@ func validAFSCPMountPlan(bindingID string) afscp.OrchestratorMountPlan {
 }
 
 func newPodRegistry(initial ...*v1.Pod) *podRegistry {
-	r := &podRegistry{pods: make(map[string]*v1.Pod)}
+	r := &podRegistry{
+		pods:       make(map[string]*v1.Pod),
+		configMaps: make(map[string]*v1.ConfigMap),
+	}
 	for _, p := range initial {
 		r.pods[p.Name] = p
+		if alias := legacyWorkloadPodAlias(p.Name); alias != "" {
+			r.pods[alias] = p
+		}
 	}
 	return r
 }
@@ -216,6 +269,9 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	path := req.URL.Path
 
 	if writeTestBindingResourceIfRequested(w, req, r.bindingPVC, r.bindingPV, "ws-1", "proj-1", "wmb_demo") {
+		return
+	}
+	if r.writeConfigMapIfRequested(w, req) {
 		return
 	}
 
@@ -267,19 +323,19 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Error injection for handler error-path tests.
 	switch req.Method {
 	case http.MethodGet:
-		if name == r.forceGetErrorFor {
+		if testPodNameMatches(name, r.forceGetErrorFor) {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(&metav1.Status{Code: 500, Message: "injected get error"})
 			return
 		}
 	case http.MethodDelete:
-		if name == r.forceDeleteErrorFor {
+		if testPodNameMatches(name, r.forceDeleteErrorFor) {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(&metav1.Status{Code: 500, Message: "injected delete error"})
 			return
 		}
 	case http.MethodPatch:
-		if name == r.forcePatchErrorFor {
+		if testPodNameMatches(name, r.forcePatchErrorFor) {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(&metav1.Status{Code: 500, Message: "injected patch error"})
 			return
@@ -332,6 +388,109 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (r *podRegistry) writeConfigMapIfRequested(w http.ResponseWriter, req *http.Request) bool {
+	path := req.URL.Path
+	idx := strings.LastIndex(path, "/configmaps")
+	if idx < 0 {
+		return false
+	}
+
+	if req.Method == http.MethodPost && strings.HasSuffix(path, "/configmaps") {
+		var cm v1.ConfigMap
+		if err := json.NewDecoder(req.Body).Decode(&cm); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return true
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if _, exists := r.configMaps[cm.Name]; exists {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(&metav1.Status{Reason: metav1.StatusReasonAlreadyExists, Code: http.StatusConflict})
+			return true
+		}
+		cm.ResourceVersion = "1"
+		r.configMaps[cm.Name] = cm.DeepCopy()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(&cm)
+		return true
+	}
+
+	if req.Method == http.MethodGet && strings.HasSuffix(path, "/configmaps") {
+		selector, err := labels.Parse(req.URL.Query().Get("labelSelector"))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return true
+		}
+		list := &v1.ConfigMapList{}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, cm := range r.configMaps {
+			if selector.Empty() || selector.Matches(labels.Set(cm.Labels)) {
+				list.Items = append(list.Items, *cm.DeepCopy())
+			}
+		}
+		_ = json.NewEncoder(w).Encode(list)
+		return true
+	}
+
+	name := strings.TrimPrefix(path[idx+len("/configmaps"):], "/")
+	if name == "" || strings.Contains(name, "/") {
+		r.writeNotFound(w)
+		return true
+	}
+
+	r.mu.Lock()
+	cm := r.configMaps[name]
+	r.mu.Unlock()
+
+	switch req.Method {
+	case http.MethodGet:
+		if cm == nil {
+			r.writeNotFound(w)
+			return true
+		}
+		_ = json.NewEncoder(w).Encode(cm)
+	case http.MethodPut:
+		if cm == nil {
+			r.writeNotFound(w)
+			return true
+		}
+		var updated v1.ConfigMap
+		if err := json.NewDecoder(req.Body).Decode(&updated); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return true
+		}
+		updated.ResourceVersion = "2"
+		r.mu.Lock()
+		r.configMaps[name] = updated.DeepCopy()
+		r.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(&updated)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+	return true
+}
+
+func legacyWorkloadPodAlias(name string) string {
+	const prefix = "workload-"
+	if !strings.HasPrefix(name, prefix) {
+		return ""
+	}
+	workloadID := strings.TrimPrefix(name, prefix)
+	alias := PodName(workloadID)
+	if alias == name {
+		return ""
+	}
+	return alias
+}
+
+func testPodNameMatches(got, configured string) bool {
+	if got == configured {
+		return true
+	}
+	return got == legacyWorkloadPodAlias(configured)
 }
 
 func (r *podRegistry) writeNotFound(w http.ResponseWriter) {
@@ -412,7 +571,7 @@ func TestHandleCreatePod_Returns201WithPodName(t *testing.T) {
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, "workload-wl-1", got.PodName)
+	assert.Equal(t, PodName("wl-1"), got.PodName)
 	assert.NotEmpty(t, got.StartedAt)
 	assert.NotEmpty(t, got.ExpiresAt)
 }
@@ -472,7 +631,7 @@ func TestHandleCreatePod_CustomCommandInPodSpec(t *testing.T) {
 
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor)
+	h := NewHandler(client, executor, Options{WorkloadFactStore: workloadfacts.NewMemoryStore()})
 
 	customCmd := []string{"python3", "-m", "http.server", "8080"}
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "python:3.12", Command: customCmd}))
@@ -514,7 +673,7 @@ func TestHandleCreatePod_RuntimeEnvAlwaysInjected(t *testing.T) {
 
 	client := newTestK8sClient(t, srv.URL)
 	executor := k8s.NewExecutor(client)
-	h := NewHandler(client, executor)
+	h := NewHandler(client, executor, Options{WorkloadFactStore: workloadfacts.NewMemoryStore()})
 
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{
 		Image: "ubuntu:22.04",
@@ -657,6 +816,116 @@ func TestHandleCreatePod_FailsClosedWhenBindingActiveCheckUnavailable(t *testing
 	assert.Empty(t, reg.pods, "AFSCP active check failures must fail closed before pod creation")
 }
 
+func TestHandleCreatePod_FactSaveFailureDoesNotAllowBindingDeleteToMissLivePod(t *testing.T) {
+	reg := newPodRegistry()
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		WorkloadFactStore: &alwaysFailSaveFactStore{MemoryStore: workloadfacts.NewMemoryStore()},
+	})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	reg.mu.Lock()
+	livePods := make([]v1.Pod, 0, len(reg.pods))
+	for _, pod := range reg.pods {
+		livePods = append(livePods, *pod.DeepCopy())
+	}
+	reg.mu.Unlock()
+
+	bindingClient := &bindingDeleteClientForWorkloadTest{
+		pv:   &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc:  &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		pods: livePods,
+	}
+	bindingHandler := workspacebinding.NewHandler(bindingClient, workspacebinding.Options{
+		Namespace:     "test-ns",
+		WorkloadFacts: workloadfacts.NewMemoryStore(),
+	})
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws-1/projects/proj-1/workspace-bindings/wmb_demo", nil)
+	deleteRec := httptest.NewRecorder()
+	bindingHandler.ServeHTTP(deleteRec, deleteReq)
+
+	if len(livePods) > 0 && deleteRec.Code == http.StatusOK {
+		t.Fatalf("binding delete missed live pod after create fact save failure; body=%s", deleteRec.Body.String())
+	}
+	if len(livePods) > 0 && (bindingClient.pv == nil || bindingClient.pvc == nil) {
+		t.Fatalf("binding delete must not remove PV/PVC while an untracked live pod exists")
+	}
+}
+
+func TestHandleCreatePodSlowReadyReturnsBeforeWriteTimeout(t *testing.T) {
+	var podReadyPolls int
+	facts := workloadfacts.NewMemoryStore()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if writeTestBindingResourceIfRequested(w, r, nil, nil, "ws-1", "proj-1", "wmb_demo") {
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pods") {
+			var pod v1.Pod
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&pod))
+			pod.CreationTimestamp = metav1.Now()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(&pod)
+			return
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pods/") {
+			podReadyPolls++
+			time.Sleep(650 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(&v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")},
+				Status:     v1.PodStatus{Phase: v1.PodPending},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(&metav1.Status{Reason: metav1.StatusReasonNotFound, Code: http.StatusNotFound})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := newTestK8sClient(t, srv.URL)
+	h := NewHandler(client, k8s.NewExecutor(client), Options{WorkloadFactStore: facts})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Less(t, elapsed, 250*time.Millisecond, "PUT ensure must not wait for pod readiness polling")
+	assert.Zero(t, podReadyPolls, "Ready must be observed by GET polling, not PUT ensure")
+}
+
+func TestCreateResponseContainsWorkloadIDCorrelationIDStatus(t *testing.T) {
+	facts := workloadfacts.NewMemoryStore()
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(), Options{WorkloadFactStore: facts})
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
+	req.Header.Set("X-Correlation-Id", "corr-create")
+	rec := httptest.NewRecorder()
+
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var got PodStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "wl-1", got.WorkloadID)
+	assert.Equal(t, PodName("wl-1"), got.PodName)
+	assert.Equal(t, "corr-create", got.CorrelationID)
+	assert.Equal(t, "pending", got.Status)
+}
+
 // ---------------------------------------------------------------------------
 // handleCreatePod – pod already exists
 // ---------------------------------------------------------------------------
@@ -664,7 +933,7 @@ func TestHandleCreatePod_FailsClosedWhenBindingActiveCheckUnavailable(t *testing
 func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 	existing := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-1",
+			Name:              PodName("wl-1"),
 			CreationTimestamp: metav1.Now(),
 		},
 		Spec: v1.PodSpec{
@@ -707,7 +976,7 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, "workload-wl-1", got.PodName)
+	assert.Equal(t, PodName("wl-1"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "pod already exists", got.Message)
 }
@@ -715,7 +984,7 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
 	existing := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-1",
+			Name:              PodName("wl-1"),
 			CreationTimestamp: metav1.Now(),
 		},
 		Spec: v1.PodSpec{
@@ -885,7 +1154,7 @@ func TestHandleGetPod_MissingAnnotationsOmittedFromResponse(t *testing.T) {
 
 func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
 	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"},
+		ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")},
 	}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
@@ -902,7 +1171,7 @@ func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
 func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	reg := newPodRegistry(workloadPodWithMountAnnotations(PodName("wl-1")))
 	reg.events = events
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
@@ -928,7 +1197,8 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	flush := &fakeStorageFlushBarrier{events: events}
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	podName := PodName("wl-1")
+	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
 	reg.events = events
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
 
@@ -938,14 +1208,15 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "workload-wl-1", flush.podName)
+	assert.Equal(t, podName, flush.podName)
 	assert.Equal(t, "/home/task-plan", flush.mountPath)
-	assert.Equal(t, []string{"release", "flush-workload-wl-1:/home/task-plan", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+	assert.Equal(t, []string{"release", "flush-" + podName + ":/home/task-plan", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
 }
 
 func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 	events := &eventRecorder{}
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	podName := PodName("wl-1")
+	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
 	reg.events = events
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	flush := &fakeStorageFlushBarrier{events: events, err: errors.New("sync failed")}
@@ -958,16 +1229,17 @@ func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "storage flush barrier failed")
-	assert.Equal(t, []string{"release", "flush-workload-wl-1:/home/task-plan"}, events.snapshot())
+	assert.Equal(t, []string{"release", "flush-" + podName + ":/home/task-plan"}, events.snapshot())
 	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when storage flush fails")
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	assert.NotNil(t, reg.pods["workload-wl-1"], "failed storage flush must leave pod available for retry")
+	assert.NotNil(t, reg.pods[podName], "failed storage flush must leave pod available for retry")
 }
 
 func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	podName := PodName("wl-1")
+	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
 	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
@@ -983,7 +1255,7 @@ func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "raw-secret")
 
 	logOutput := logs.String()
-	for _, token := range []string{"AFSCP workload mount release failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
+	for _, token := range []string{"AFSCP workload mount release failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=" + podName, "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
 		assert.Contains(t, logOutput, token)
 	}
 	assert.NotContains(t, logOutput, "raw-secret")
@@ -991,12 +1263,13 @@ func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	assert.NotNil(t, reg.pods["workload-wl-1"], "pod annotations must remain available so DELETE can retry AFSCP release")
+	assert.NotNil(t, reg.pods[podName], "pod annotations must remain available so DELETE can retry AFSCP release")
 }
 
 func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	events := &eventRecorder{}
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	podName := PodName("wl-1")
+	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
 	reg.events = events
 	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
@@ -1014,7 +1287,7 @@ func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
 
 	logOutput := logs.String()
-	for _, token := range []string{"AFSCP workload mount released status failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
+	for _, token := range []string{"AFSCP workload mount released status failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=" + podName, "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
 		assert.Contains(t, logOutput, token)
 	}
 	assert.NotContains(t, logOutput, "raw-secret")
@@ -1022,12 +1295,99 @@ func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	assert.Nil(t, reg.pods["workload-wl-1"], "released status must only be attempted after the pod is gone")
+	assert.Nil(t, reg.pods[podName], "released status must only be attempted after the pod is gone")
+}
+
+func TestDeleteWorkload_StatusFailureThenRetryContinuesTerminalMarkFromDurableFact(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	reg := newPodRegistry(workloadPodWithMountAnnotations(PodName("wl-1")))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		AFSCPClient:       lifecycle,
+		WorkloadFactStore: facts,
+	})
+
+	firstReq := httptest.NewRequest(http.MethodDelete, "/", nil)
+	firstReq.Header.Set("X-Correlation-Id", "corr-delete")
+	firstRec := httptest.NewRecorder()
+	h.handleDeletePod(firstRec, firstReq, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, firstRec.Code)
+	firstFact, err := facts.Get(context.Background(), workloadfacts.Key{WorkspaceID: "ws-1", ProjectID: "proj-1", WorkloadID: "wl-1"})
+	require.NoError(t, err)
+	assert.True(t, firstFact.ReleaseDone)
+	assert.True(t, firstFact.PodDeleted)
+	assert.False(t, firstFact.TerminalStatusDone)
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+
+	lifecycle.statusErr = nil
+	events.mu.Lock()
+	events.events = nil
+	events.mu.Unlock()
+
+	secondReq := httptest.NewRequest(http.MethodDelete, "/", nil)
+	secondReq.Header.Set("X-Correlation-Id", "corr-delete")
+	secondRec := httptest.NewRecorder()
+	h.handleDeletePod(secondRec, secondReq, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, secondRec.Code, secondRec.Body.String())
+	secondFact, err := facts.Get(context.Background(), workloadfacts.Key{WorkspaceID: "ws-1", ProjectID: "proj-1", WorkloadID: "wl-1"})
+	require.NoError(t, err)
+	assert.True(t, secondFact.Terminal())
+	assert.Equal(t, []string{"status-released"}, events.snapshot(), "retry must resume from durable facts instead of re-releasing or re-deleting")
+}
+
+func TestDeleteWorkload_PodNotFoundWithoutTerminalFactFailsClosed(t *testing.T) {
+	facts := workloadfacts.NewMemoryStore()
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(), Options{WorkloadFactStore: facts})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	body := decodeError(t, rec)
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "workload terminal fact")
+}
+
+func TestDeleteWorkload_AllTerminalFactsSecondDeleteIsIdempotent(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-1",
+		ProjectID:          "proj-1",
+		WorkloadID:         "wl-1",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            PodName("wl-1"),
+		PodUID:             "uid-1",
+		ReleaseDone:        true,
+		PodDeleted:         true,
+		TerminalStatusDone: true,
+		WorkspaceBindingID: "wmb_demo",
+	}))
+	reg := newPodRegistry()
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		AFSCPClient:       lifecycle,
+		WorkloadFactStore: facts,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, events.snapshot(), "terminal fact retry must be idempotent and avoid live pod or AFSCP calls")
 }
 
 func TestHandleDeletePod_GetPodReturnsInternalError_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"}})
-	reg.setForceGetErrorFor("workload-wl-1")
+	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}})
+	reg.setForceGetErrorFor(PodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -1038,8 +1398,8 @@ func TestHandleDeletePod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 }
 
 func TestHandleDeletePod_DeletePodFails_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"}})
-	reg.setForceDeleteErrorFor("workload-wl-1")
+	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}})
+	reg.setForceDeleteErrorFor(PodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -1052,9 +1412,10 @@ func TestHandleDeletePod_DeletePodFails_Returns500(t *testing.T) {
 
 func TestHandleDeletePod_DeletePodFailsDoesNotPatchReleasedAndKeepsPodForRetry(t *testing.T) {
 	events := &eventRecorder{}
-	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
+	podName := PodName("wl-1")
+	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
 	reg.events = events
-	reg.setForceDeleteErrorFor("workload-wl-1")
+	reg.setForceDeleteErrorFor(podName)
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
@@ -1070,7 +1431,7 @@ func TestHandleDeletePod_DeletePodFailsDoesNotPatchReleasedAndKeepsPodForRetry(t
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	assert.NotNil(t, reg.pods["workload-wl-1"], "failed pod deletion must leave pod available for retry")
+	assert.NotNil(t, reg.pods[podName], "failed pod deletion must leave pod available for retry")
 }
 
 // ---------------------------------------------------------------------------

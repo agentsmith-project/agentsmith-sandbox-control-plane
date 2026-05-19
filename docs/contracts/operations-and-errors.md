@@ -8,7 +8,7 @@ ASBCP operations must be safe to retry unless explicitly documented otherwise.
 - Workload ensure should create or reuse the workload Pod for the same workload identifier.
 - Keepalive should extend ASBCP and AFSCP lifecycle state.
 - Exec should run against an existing workload Pod and return command output or stream status according to implementation capability.
-- Delete should release AFSCP lifecycle state before reporting the workload released.
+- Delete should release AFSCP lifecycle state before reporting the workload released. If both the durable workload terminal fact and Pod are missing, Delete must fail closed with retryable `409` code `workload_release_incomplete`; Pod absence alone is not terminal truth.
 
 ## Error Shape
 
@@ -32,13 +32,21 @@ The envelope must include a stable machine-readable `code`, a human-readable `me
 | --- | --- |
 | `400` | Invalid request or unsupported contract field |
 | `401` | Missing or invalid service key |
-| `404` | Binding or workload not found |
-| `409` | Lifecycle conflict or incompatible existing resource |
+| `404` | Binding or non-delete workload operation target not found |
+| `409` | Retryable lifecycle conflict, incompatible existing resource, or missing durable workload terminal truth |
 | `422` | Valid request shape but invalid lifecycle state |
 | `429` | Rate limited |
 | `500` | Internal ASBCP failure |
 | `502` | AFSCP or Kubernetes dependency failure |
 | `503` | ASBCP not ready |
+
+## Stable 409 Codes
+
+| Code | Meaning |
+| --- | --- |
+| `workload_release_incomplete` | Workload DELETE cannot yet prove durable release terminal truth. Retry the workload release/delete path. |
+| `workspace_binding_release_incomplete` | Workspace binding DELETE cannot prove every workload for the binding is released, or the fact source needed for that proof is unavailable. Retry after workload release state is reconciled. |
+| `conflict` | Generic non-release conflict, such as incompatible existing resources. Do not treat every `409` as release retryable. |
 
 ## Operational Logging
 

@@ -56,6 +56,24 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required for release mode"
 }
 
+resolve_build_proxy_arg() {
+  local override_name="$1"
+  shift
+  local candidate_name
+
+  if [ "${!override_name+x}" = "x" ]; then
+    printf '%s' "${!override_name}"
+    return
+  fi
+
+  for candidate_name in "$@"; do
+    if [ -n "${!candidate_name:-}" ]; then
+      printf '%s' "${!candidate_name}"
+      return
+    fi
+  done
+}
+
 shell_function_stanza() {
   local function_name="$1"
   local path="$2"
@@ -110,6 +128,7 @@ emit_changelog_release_evidence() {
   require_cmd python3
   python3 - "${ROOT}/CHANGELOG.md" "$tag" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -142,7 +161,7 @@ def read_changelog_release_section(path: Path, release_tag: str) -> list[str]:
     return lines[section_start:section_end]
 
 
-def parse_known_breaking_changes(section: list[str], release_tag: str) -> list[str]:
+def parse_known_breaking_changes(section: list[str], release_tag: str) -> list[dict[str, str]]:
     breaking_start = None
     for index, line in enumerate(section):
         if line.strip() == "### Breaking Changes":
@@ -152,6 +171,7 @@ def parse_known_breaking_changes(section: list[str], release_tag: str) -> list[s
         return []
 
     breaking_changes = []
+    seen_ids = set()
     for line in section[breaking_start:]:
         stripped = line.strip()
         if stripped.startswith("### ") or stripped.startswith("## "):
@@ -164,7 +184,17 @@ def parse_known_breaking_changes(section: list[str], release_tag: str) -> list[s
             )
         entry = stripped[2:].strip()
         if entry:
-            breaking_changes.append(entry)
+            match = re.fullmatch(r"(ASBCP-BC-[0-9]{4}):\s*(.+)", entry)
+            if not match:
+                raise SystemExit(
+                    f"CHANGELOG.md release section for {release_tag} Breaking Changes entries "
+                    "must use 'ASBCP-BC-0001: summary'"
+                )
+            change_id = match.group(1)
+            if change_id in seen_ids:
+                raise SystemExit(f"CHANGELOG.md release section for {release_tag} repeats {change_id}")
+            seen_ids.add(change_id)
+            breaking_changes.append({"id": change_id, "summary": match.group(2).strip()})
     if not breaking_changes:
         raise SystemExit(f"CHANGELOG.md release section for {release_tag} has an empty Breaking Changes subsection")
     return breaking_changes
@@ -345,7 +375,8 @@ PY
 check_release_workflow_lock_output() {
   require_cmd python3
   local workflow="${ROOT}/.github/workflows/release.yml"
-  local required=(
+  local generator="${ROOT}/scripts/generate-final-manifest"
+  local workflow_required=(
     "Validate release version"
     "Run authoritative release gate"
     'v${version}'
@@ -353,10 +384,6 @@ check_release_workflow_lock_output() {
     "steps.version.outputs.image_tag"
     'ASBCP_VERSION: ${{ steps.version.outputs.image_tag }}'
     "ASBCP_GIT_TAG"
-    "asbcp_version="
-    "asbcp_source_image="
-    "asbcp_release_url="
-    "asbcp_commit_sha="
     "steps.build.outputs.digest"
     "docker pull"
     "Verify anonymous digest pull"
@@ -367,7 +394,25 @@ check_release_workflow_lock_output() {
     "body_path:"
     "fail_on_unmatched_files: true"
     "files:"
+    "TAG_RESOLVED_DIGEST"
+    "ANONYMOUS_DIGEST"
+    "SAME_DIGEST_MATCH"
+    "fresh-empty"
+    "bash scripts/generate-final-manifest"
+    "--changelog-evidence-json"
+    "dist/asbcp-changelog-evidence.json"
+    "--risk-status-json"
+    "dist/asbcp-risk-status.json"
+    "--api-contract-version"
+    "dist/asbcp-api-contract-version.txt"
+  )
+  local generator_required=(
+    "scripts/verify-release.sh"
+    "--api-contract-version"
+    "--changelog-evidence-json"
+    "--risk-status-json"
     '"schema_id"'
+    '"manifest_schema_version"'
     '"asbcp_version"'
     '"git_tag"'
     '"commit_sha"'
@@ -383,18 +428,7 @@ check_release_workflow_lock_output() {
     '"runbook_url"'
     '"release_notes"'
     '"body_source"'
-    "TAG_RESOLVED_DIGEST"
-    "ANONYMOUS_DIGEST"
-    "SAME_DIGEST_MATCH"
-    "fresh-empty"
-    "--changelog-evidence-json"
-    "dist/asbcp-changelog-evidence.json"
-    "--risk-status-json"
-    "dist/asbcp-risk-status.json"
-    "--api-contract-version"
-    "dist/asbcp-api-contract-version.txt"
-    'api_contract_version = Path("dist/asbcp-api-contract-version.txt").read_text'
-    '"schema_id": "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"'
+    'SCHEMA_ID = "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"'
     '"tag_ref"'
     '"tag_resolved_digest"'
     '"build_push_digest"'
@@ -404,11 +438,16 @@ check_release_workflow_lock_output() {
     'risk_status_evidence["known_risk_status"]'
     'risk_status_evidence["source"]'
     'API contract version: {api_contract_version}'
-    'asbcp_version={os.environ["ASBCP_VERSION"]}'
-    'Path("dist/asbcp-release-notes.md").write_text(manifest["release_notes"]["body_source"]'
+    "asbcp_version={asbcp_version}"
+    "asbcp_source_image={image_ref}"
+    "asbcp_release_url={release_url}"
+    "asbcp_commit_sha={commit_sha}"
   )
-  for token in "${required[@]}"; do
+  for token in "${workflow_required[@]}"; do
     grep -Fq -- "$token" "$workflow" || fail "release workflow missing: $token"
+  done
+  for token in "${generator_required[@]}"; do
+    grep -Fq -- "$token" "$generator" || fail "shared final manifest generator missing: $token"
   done
   if grep -Eq "packages/container/.*/visibility|visibility=public|Set GHCR package public" "$workflow"; then
     fail "release workflow must verify anonymous digest pull instead of patching GHCR package visibility"
@@ -421,6 +460,9 @@ check_release_workflow_lock_output() {
   fi
   if grep -Fq "docker manifest inspect" "$workflow"; then
     fail "release workflow must not use docker manifest inspect as release evidence fallback"
+  fi
+  if grep -Fq "python3 - <<'PY'" "$workflow" || grep -Fq "manifest = {" "$workflow"; then
+    fail "release workflow must use scripts/generate-final-manifest instead of inline final manifest generation"
   fi
   if grep -Eq '"public_inspect_result"|"version":[[:space:]]*os\\.environ\\["ASBCP_VERSION"\\]|"tag":[[:space:]]*os\\.environ\\["ASBCP_TAG"\\]|"commit":[[:space:]]*os\\.environ\\["GITHUB_SHA"\\]' "$workflow"; then
     fail "release workflow final manifest uses stale field names"
@@ -483,17 +525,21 @@ PY
 
 check_final_manifest_schema() {
   require_cmd python3
-  python3 - "${ROOT}/docs/release-evidence/release-manifest.json" <<'PY'
+  python3 - "${ROOT}/docs/release-evidence/release-manifest.json" "${ROOT}/docs/schemas/asbcp-final-manifest.v1.schema.json" <<'PY'
 import json
 import sys
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as fh:
     manifest = json.load(fh)
+schema_path = sys.argv[2]
+with open(schema_path, "r", encoding="utf-8") as fh:
+    json_schema = json.load(fh)
 
 schema = manifest.get("final_manifest_schema") or {}
 required_fields = {
     "schema_id",
+    "manifest_schema_version",
     "asbcp_version",
     "git_tag",
     "commit_sha",
@@ -508,6 +554,7 @@ required_fields = {
     "known_risk_status_source",
     "runbook_url",
     "release_notes",
+    "release_gate",
 }
 required_nested_fields = {
     "anonymous_pull": {
@@ -535,6 +582,8 @@ required_nested_fields = {
 failures = []
 if schema.get("schema_id") != "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json":
     failures.append("final_manifest_schema.schema_id must be https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json")
+if json_schema.get("$id") != "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json":
+    failures.append("docs/schemas/asbcp-final-manifest.v1.schema.json must use the canonical $id")
 if schema.get("asset") != "asbcp-final-manifest.json":
     failures.append("final_manifest_schema.asset must be asbcp-final-manifest.json")
 if schema.get("image_identity_evidence_field") != "same_digest_proof":
@@ -546,6 +595,22 @@ if schema.get("runtime_evidence_field"):
 missing = sorted(required_fields - set(schema.get("required_fields") or []))
 if missing:
     failures.append("final_manifest_schema.required_fields missing: " + ", ".join(missing))
+schema_required = set(json_schema.get("required") or [])
+schema_missing = sorted(required_fields - schema_required)
+if schema_missing:
+    failures.append("docs/schemas/asbcp-final-manifest.v1.schema.json required missing: " + ", ".join(schema_missing))
+schema_properties = set((json_schema.get("properties") or {}).keys())
+property_missing = sorted(required_fields - schema_properties)
+if property_missing:
+    failures.append("docs/schemas/asbcp-final-manifest.v1.schema.json properties missing: " + ", ".join(property_missing))
+breaking_required = set(
+    ((json_schema.get("properties") or {})
+     .get("known_breaking_changes") or {})
+    .get("items", {})
+    .get("required", [])
+)
+if not {"id", "summary"}.issubset(breaking_required):
+    failures.append("known_breaking_changes schema items must require id and summary")
 nested_fields = schema.get("nested_required_fields") or {}
 for object_name, fields in required_nested_fields.items():
     missing_nested = sorted(fields - set(nested_fields.get(object_name) or []))
@@ -569,6 +634,147 @@ for object_name, forbidden_fields in {
             + " contains stale fields: "
             + ", ".join(present_forbidden)
         )
+
+if failures:
+    print("\n".join(failures), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+check_provider_prerequisites_contract() {
+  require_cmd python3
+  python3 - \
+    "${ROOT}/docs/contracts/asbcp-provider-prerequisites.v1.json" \
+    "${ROOT}/docs/contracts/auth-contract.md" \
+    "${ROOT}/manager-service/internal/app/app.go" \
+    "${ROOT}/k8s/base/asbcp-deployment.yaml" \
+    "${ROOT}/k8s/base/rbac-asbcp.yaml" \
+    "${ROOT}/k8s/base/workload-rbac.yaml" \
+    "${ROOT}/k8s/base/asbcp-service.yaml" \
+    "${ROOT}/k8s/overlays/production/kustomization.yaml" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+(
+    prereq_path,
+    auth_contract_path,
+    app_path,
+    deployment_path,
+    rbac_path,
+    workload_rbac_path,
+    service_path,
+    production_kustomization_path,
+) = [Path(arg) for arg in sys.argv[1:]]
+
+prereq = json.loads(prereq_path.read_text(encoding="utf-8"))
+auth_contract = auth_contract_path.read_text(encoding="utf-8")
+app = app_path.read_text(encoding="utf-8")
+deployment = deployment_path.read_text(encoding="utf-8")
+cluster_rbac = rbac_path.read_text(encoding="utf-8")
+workload_rbac = workload_rbac_path.read_text(encoding="utf-8")
+service = service_path.read_text(encoding="utf-8")
+production_kustomization = production_kustomization_path.read_text(encoding="utf-8")
+
+failures = []
+service_name = "agentsmith-sandbox-control-plane"
+if prereq.get("schema_id") != "https://agentsmith.dev/schemas/asbcp/provider-prerequisites.v1.json":
+    failures.append("provider prerequisites schema_id mismatch")
+if prereq.get("schema_version") != "v1":
+    failures.append("provider prerequisites schema_version must be v1")
+if prereq.get("service") != service_name:
+    failures.append("provider prerequisites service must be " + service_name)
+
+runtime_afscp_env = sorted(set(re.findall(r"ASBCP_AFSCP_[A-Z0-9_]+", app)))
+prereq_text = json.dumps(prereq, sort_keys=True)
+for env in runtime_afscp_env:
+    if env not in prereq_text:
+        failures.append("provider prerequisites missing runtime env " + env)
+    if env not in auth_contract:
+        failures.append("auth contract missing runtime env " + env)
+    if f"name: {env}" not in deployment:
+        failures.append("deployment missing env projection " + env)
+
+secret_projection = {(item.get("env"), item.get("key")) for item in prereq.get("secret_env_projections", [])}
+for env, key in {
+    ("ASBCP_SERVICE_KEYS", "service-keys"),
+    ("ASBCP_AFSCP_ORCHESTRATOR_TOKEN", "afscp-orchestrator-token"),
+}:
+    if (env, key) not in secret_projection:
+        failures.append(f"provider prerequisites missing secret projection {env}/{key}")
+
+config_projection = {(item.get("env"), item.get("key")) for item in prereq.get("config_map_env_projections", [])}
+for env, key in {
+    ("ASBCP_AFSCP_INTERNAL_BASE_URL", "afscp-internal-base-url"),
+    ("ASBCP_AFSCP_CALLER_SERVICE", "afscp-caller-service"),
+    ("ASBCP_AFSCP_ACTOR_TYPE", "afscp-actor-type"),
+    ("ASBCP_AFSCP_ACTOR_ID", "afscp-actor-id"),
+}:
+    if (env, key) not in config_projection:
+        failures.append(f"provider prerequisites missing config projection {env}/{key}")
+
+rbac_rules = prereq.get("kubernetes", {}).get("rbac", [])
+required_rbac_rules = [
+    ("persistentvolumes", "cluster", {"get", "list", "watch", "create", "update", "patch", "delete"}, cluster_rbac),
+    ("pods", "namespace", {"get", "list", "watch", "create", "update", "patch", "delete"}, workload_rbac),
+    ("pods/exec", "namespace", {"create"}, workload_rbac),
+    ("pods/status", "namespace", {"get", "patch"}, workload_rbac),
+    ("persistentvolumeclaims", "namespace", {"get", "list", "watch", "create", "update", "patch", "delete"}, workload_rbac),
+    ("events", "namespace", {"create", "patch"}, workload_rbac),
+    ("configmaps", "namespace", {"get", "list", "create", "update"}, workload_rbac),
+]
+
+
+def find_prereq_rule(resource: str, scope: str) -> dict | None:
+    for rule in rbac_rules:
+        if rule.get("api_group", "") == "" and rule.get("resource") == resource and rule.get("scope") == scope:
+            return rule
+    return None
+
+
+def k8s_manifest_has_rule(manifest: str, resource: str, verbs: set[str]) -> bool:
+    resource_token = f'resources: ["{resource}"]'
+    start = manifest.find(resource_token)
+    if start == -1:
+        return False
+    next_rule = manifest.find("\n  - apiGroups:", start + len(resource_token))
+    stanza = manifest[start:] if next_rule == -1 else manifest[start:next_rule]
+    return all(f'"{verb}"' in stanza for verb in verbs)
+
+
+for resource, scope, verbs, k8s_manifest in required_rbac_rules:
+    rule = find_prereq_rule(resource, scope)
+    if not rule:
+        failures.append(f"provider prerequisites missing {scope} {resource} RBAC rule")
+        continue
+    missing_verbs = sorted(verbs - set(rule.get("verbs", [])))
+    if missing_verbs:
+        failures.append(f"provider prerequisites {scope} {resource} RBAC missing verbs: " + ", ".join(missing_verbs))
+    if not k8s_manifest_has_rule(k8s_manifest, resource, verbs):
+        failures.append(f"k8s RBAC missing {scope} {resource} verbs: " + ", ".join(sorted(verbs)))
+
+afscp = prereq.get("afscp", {})
+if afscp.get("allowed_caller") != service_name:
+    failures.append("AFSCP allowed_caller must be " + service_name)
+if afscp.get("required_role") != "orchestrator_mount":
+    failures.append("AFSCP required_role must be orchestrator_mount")
+if afscp.get("orchestrator_token", {}).get("env") != "ASBCP_AFSCP_ORCHESTRATOR_TOKEN":
+    failures.append("AFSCP orchestrator token env mismatch")
+for key, expected in {
+    "caller_service_env": "ASBCP_AFSCP_CALLER_SERVICE",
+    "actor_type_env": "ASBCP_AFSCP_ACTOR_TYPE",
+    "actor_id_env": "ASBCP_AFSCP_ACTOR_ID",
+}.items():
+    if afscp.get(key) != expected:
+        failures.append(f"AFSCP {key} must be {expected}")
+
+if prereq.get("kubernetes", {}).get("no_public_ingress") is not True:
+    failures.append("provider prerequisites must declare no_public_ingress=true")
+if "type: ClusterIP" not in service:
+    failures.append("ASBCP base service must stay ClusterIP")
+if re.search(r"access/(ingress|nodeport|loadbalancer)\.yaml", production_kustomization, re.IGNORECASE):
+    failures.append("production kustomization must not include public ingress/nodeport/loadbalancer resources")
 
 if failures:
     print("\n".join(failures), file=sys.stderr)
@@ -604,6 +810,8 @@ required_ids = {
     "same_digest_proof",
     "risk_register_release_status",
     "final_manifest",
+    "provider_prerequisites_contract",
+    "public_error_redaction",
     "raw_storage_exclusion",
     "runner_artifact_classification",
 }
@@ -678,10 +886,14 @@ check_dockerfile_contract() {
     fi
   done
 
+  local release_proxy_helper_tokens=(
+    "resolve_build_proxy_arg()"
+    'if [ "${!override_name+x}" = "x" ]; then'
+  )
   local release_build_tokens=(
-    'asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"'
-    'asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"'
-    'asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"'
+    'asbcp_build_http_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"'
+    'asbcp_build_https_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTPS_PROXY HTTPS_PROXY https_proxy ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"'
+    'asbcp_build_no_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_NO_PROXY NO_PROXY no_proxy)"'
     '--build-arg "ASBCP_BUILD_HTTP_PROXY=${asbcp_build_http_proxy}"'
     '--build-arg "ASBCP_BUILD_HTTPS_PROXY=${asbcp_build_https_proxy}"'
     '--build-arg "ASBCP_BUILD_NO_PROXY=${asbcp_build_no_proxy}"'
@@ -703,6 +915,10 @@ check_dockerfile_contract() {
   local release_build_function
   release_build_function="$(shell_function_stanza build_release_image "${ROOT}/scripts/verify-release.sh")"
   [ -n "$release_build_function" ] || fail "release verifier missing build_release_image function"
+  for token in "${release_proxy_helper_tokens[@]}"; do
+    grep -Fq -- "$token" "${ROOT}/scripts/verify-release.sh" || \
+      fail "release image build must resolve proxy env through build-only args: $token"
+  done
   for token in "${release_build_tokens[@]}"; do
     grep -Fq -- "$token" <<<"$release_build_function" || \
       fail "release image build must clear Dockerfile proxy build args: $token"
@@ -759,9 +975,9 @@ build_release_image() {
   git_sha="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
   build_date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   image_tag="agentsmith-sandbox-control-plane:${version}-release-gate"
-  asbcp_build_http_proxy="${ASBCP_BUILD_HTTP_PROXY:-}"
-  asbcp_build_https_proxy="${ASBCP_BUILD_HTTPS_PROXY:-}"
-  asbcp_build_no_proxy="${ASBCP_BUILD_NO_PROXY:-}"
+  asbcp_build_http_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"
+  asbcp_build_https_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_HTTPS_PROXY HTTPS_PROXY https_proxy ASBCP_BUILD_HTTP_PROXY HTTP_PROXY http_proxy)"
+  asbcp_build_no_proxy="$(resolve_build_proxy_arg ASBCP_BUILD_NO_PROXY NO_PROXY no_proxy)"
   http_proxy_state="<empty>"
   https_proxy_state="<empty>"
   no_proxy_state="<empty>"
@@ -833,6 +1049,7 @@ fi
 
 run bash "${ROOT}/.github/tests/asbcp-governance-guard.sh"
 run bash -n "${ROOT}/scripts/verify-release.sh"
+run bash -n "${ROOT}/scripts/generate-final-manifest"
 run bash -n "${ROOT}/.github/tests/asbcp-governance-guard.sh"
 
 VERSION="$(read_version)"
@@ -843,6 +1060,7 @@ check_risk_status_evidence
 check_api_contract_version_evidence
 check_release_workflow_lock_output
 check_final_manifest_schema
+check_provider_prerequisites_contract
 check_readiness_evidence
 check_raw_storage_sdk_dependency_absent
 
@@ -864,7 +1082,7 @@ require_cmd go
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
-run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/app -run 'TestActiveSurfaceUsesCanonicalASBCPIdentifiers|TestRunnerImageIsNotASBCPActiveReleaseSurface|TestRunnerFixtureAllowlistIsDocumented|TestActiveK8sFilenamesUseCanonicalASBCPNames|TestReleaseGateIsSingleAuthority|TestReleaseVerifierCoversBlockingReleaseEvidence|TestCanonicalASBCPConfigPathIsConsistent|TestDockerfileReleaseContract|TestReleaseWorkflowEmitsAgentSmithLockFieldsAndValidatesTag|TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect|TestGovernanceGuardCoversTrackedOldNamePaths|TestKustomizeRendersASBCPReleaseControls'"
+run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/app -run 'TestActiveSurfaceUsesCanonicalASBCPIdentifiers|TestRunnerImageIsNotASBCPActiveReleaseSurface|TestRunnerFixtureAllowlistIsDocumented|TestActiveK8sFilenamesUseCanonicalASBCPNames|TestReleaseGateIsSingleAuthority|TestReleaseVerifierCoversBlockingReleaseEvidence|TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields|TestReleaseWorkflowUsesSharedManifestGeneratorAndApiContractParser|TestBreakingChangesUseStableIds|TestConfigDocsMatchRuntimeEnvAndK8sProjection|TestProviderPrerequisitesCoverRBACSecretAFSCPCaller|TestCanonicalASBCPConfigPathIsConsistent|TestDockerfileReleaseContract|TestReleaseWorkflowEmitsAgentSmithLockFieldsAndValidatesTag|TestReleaseWorkflowPublishesFinalManifestAfterAnonymousInspect|TestGovernanceGuardCoversTrackedOldNamePaths|TestKustomizeRendersASBCPReleaseControls'"
 run_release_fixture_smoke
 run bash -c "cd '${ROOT}/manager-service' && go test -tags=short -count=1 ./..."
 run bash -c "cd '${ROOT}/manager-service' && CGO_ENABLED=0 go build -o '${TMP_DIR}/asbcp' ./cmd/asbcp"

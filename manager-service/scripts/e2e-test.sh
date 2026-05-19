@@ -439,13 +439,19 @@ test_19_delete_workload() {
         "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
         -H "X-Service-Key: $SERVICE_KEY")
     local status=$(echo "$response" | tail -n1)
+    local body=$(echo "$response" | head -n-1)
 
-    # Should succeed even if pod doesn't exist
-    # 204 No Content is the correct response for successful DELETE
-    if [ "$status" != "200" ] && [ "$status" != "202" ] && [ "$status" != "204" ] && [ "$status" != "404" ]; then
-        log_error "Unexpected status: $status"
+    # Missing pod without terminal truth must fail closed as retryable conflict.
+    if [ "$status" != "409" ]; then
+        log_error "Expected DELETE retryable conflict (409), got status=$status, body=$body"
         return 1
     fi
+
+    assert_contains "$body" "workload_release_incomplete" "DELETE retryable conflict should use stable workload_release_incomplete error code" || return 1
+    assert_contains "$body" "terminal fact" "DELETE retryable conflict should mention missing terminal fact" || return 1
+    assert_contains "$body" "pod absence" "DELETE retryable conflict should not treat pod absence as success" || return 1
+    assert_contains "$body" "not terminal truth" "DELETE retryable conflict should explain terminal truth requirement" || return 1
+    log_info "DELETE returned expected retryable conflict: terminal truth is not proven yet; retry after reconcile"
 }
 
 test_20_request_id_propagation() {

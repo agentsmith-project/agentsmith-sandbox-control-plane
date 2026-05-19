@@ -15,6 +15,7 @@ import (
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workloadfacts"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +38,8 @@ const (
 	workspaceVolumeName         = "workspace"
 	workspaceInitContainerName  = "workspace-init"
 	workspaceArtifactsDirectory = ".artifacts"
+
+	errorCodeWorkloadReleaseIncomplete = "workload_release_incomplete"
 )
 
 type workloadPaths struct {
@@ -68,6 +71,7 @@ type Options struct {
 	DefaultTolerations  []v1.Toleration
 	AFSCPClient         mountLifecycleClient
 	StorageFlushBarrier WorkloadStorageFlushBarrier
+	WorkloadFactStore   workloadfacts.Store
 }
 
 type responseStatusError struct {
@@ -110,7 +114,7 @@ func parseRoute(path string) (workspaceID, projectID, workloadID, action string,
 	}
 
 	parts := strings.Split(trimmed, "/")
-	if len(parts) < 5 {
+	if len(parts) != 5 && len(parts) != 6 {
 		return
 	}
 	if parts[1] != "projects" || parts[3] != "workloads" {
@@ -122,6 +126,9 @@ func parseRoute(path string) (workspaceID, projectID, workloadID, action string,
 	workloadID = parts[4]
 
 	if len(parts) == 6 {
+		if parts[5] == "" {
+			return
+		}
 		action = parts[5]
 	}
 
@@ -224,12 +231,20 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 					jsonError(w, r, http.StatusConflict, "conflict", "existing pod spec drift: "+drift)
 					return
 				}
+				if err := h.recordWorkloadFact(ctx, workspaceID, projectID, workloadID, req.WorkspaceBindingID, existingPod); err != nil {
+					log.Printf("workload/%s: workload fact write failed: %s", workloadID, observability.RedactLogValue(err))
+					jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+					return
+				}
 				jsonResponse(w, http.StatusOK, PodStatus{
-					PodName:   existingPod.Name,
-					Phase:     string(existingPod.Status.Phase),
-					IP:        existingPod.Status.PodIP,
-					StartedAt: existingPod.CreationTimestamp.Format(time.RFC3339),
-					Message:   "pod already exists",
+					WorkloadID:    workloadID,
+					PodName:       existingPod.Name,
+					Status:        workloadStatusForPod(existingPod),
+					Phase:         podPhaseString(existingPod),
+					IP:            existingPod.Status.PodIP,
+					StartedAt:     existingPod.CreationTimestamp.Format(time.RFC3339),
+					CorrelationID: requestCorrelationID(r),
+					Message:       "pod already exists",
 				})
 				return
 			}
@@ -239,23 +254,21 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 
-	ready, err := h.k8sClient.WaitForPodReady(ctx, podName, 300*time.Second, 2*time.Second)
-	if err != nil {
-		log.Printf("workload/%s: pod not ready: %s", workloadID, observability.RedactLogValue(err))
+	if err := h.recordWorkloadFact(ctx, workspaceID, projectID, workloadID, req.WorkspaceBindingID, createdPod); err != nil {
+		log.Printf("workload/%s: workload fact write failed: %s", workloadID, observability.RedactLogValue(err))
+		h.rollbackCreatedPodAfterFactFailure(ctx, workloadID, createdPod.GetName())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+		return
 	}
 
 	status := PodStatus{
-		PodName:   createdPod.Name,
-		Phase:     string(createdPod.Status.Phase),
-		StartedAt: createdPod.CreationTimestamp.Format(time.RFC3339),
-		ExpiresAt: expiresAt.Format(time.RFC3339),
-	}
-	if ready {
-		refreshedPod, err := h.k8sClient.GetPod(ctx, podName)
-		if err == nil {
-			status.Phase = string(refreshedPod.Status.Phase)
-			status.IP = refreshedPod.Status.PodIP
-		}
+		WorkloadID:    workloadID,
+		PodName:       createdPod.Name,
+		Status:        workloadStatusForPod(createdPod),
+		Phase:         podPhaseString(createdPod),
+		StartedAt:     createdPod.CreationTimestamp.Format(time.RFC3339),
+		ExpiresAt:     expiresAt.Format(time.RFC3339),
+		CorrelationID: requestCorrelationID(r),
 	}
 
 	observability.GetMetrics().RecordWorkloadCreate()
@@ -271,47 +284,122 @@ func decodeCreateRequest(r *http.Request, req *CreateRequest) error {
 func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
 	podName := PodName(workloadID)
+	store := h.workloadFactStore()
 
-	pod, err := h.k8sClient.GetPod(ctx, podName)
+	fact, hasFact, err := h.loadWorkloadFact(ctx, store, workspaceID, projectID, workloadID)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
+		log.Printf("workload/%s: workload fact lookup failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact lookup failed")
+		return
+	}
+	if hasFact && fact.Terminal() {
+		observability.GetMetrics().RecordWorkloadDelete()
+		jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
+		return
+	}
+
+	var pod *v1.Pod
+	podMissing := false
+	if !hasFact || !fact.PodDeleted {
+		pod, err = h.k8sClient.GetPod(ctx, podName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				podMissing = true
+			} else {
+				log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
+				return
+			}
+		}
+	}
+
+	if !hasFact {
+		if podMissing {
+			jsonError(w, r, http.StatusConflict, errorCodeWorkloadReleaseIncomplete, "workload terminal fact is missing; pod absence alone is not terminal truth")
 			return
 		}
-		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
-		return
+		fact, err = h.workloadFactFromPod(workspaceID, projectID, workloadID, "", pod)
+		if err != nil {
+			logWorkloadMountDependencyFailure(r, "workload terminal fact initialization failed", err, workspaceID, projectID, workloadID, pod)
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact initialization failed")
+			return
+		}
+		if err := store.Save(ctx, fact); err != nil {
+			log.Printf("workload/%s: workload fact write failed: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+			return
+		}
+		hasFact = true
 	}
 
-	if err := h.releaseWorkloadMount(ctx, r, pod); err != nil {
-		logWorkloadMountDependencyFailure(r, "AFSCP workload mount release failed", err, workspaceID, projectID, workloadID, pod)
-		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
-		return
+	if !fact.ReleaseDone {
+		if err := h.releaseWorkloadMountFromFact(ctx, r, fact); err != nil {
+			logWorkloadFactDependencyFailure(r, "AFSCP workload mount release failed", err, workspaceID, projectID, workloadID, fact)
+			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
+			return
+		}
+		fact.ReleaseDone = true
+		if err := store.Save(ctx, fact); err != nil {
+			log.Printf("workload/%s: workload release fact write failed: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+			return
+		}
 	}
 
-	if err := h.flushWorkloadStorage(ctx, pod); err != nil {
-		log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
-		return
+	if !fact.PodDeleted {
+		if podMissing {
+			fact.PodDeleted = true
+			if err := store.Save(ctx, fact); err != nil {
+				log.Printf("workload/%s: workload pod-deleted fact write failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+				return
+			}
+		} else {
+			if err := h.flushWorkloadStorage(ctx, pod); err != nil {
+				log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
+				return
+			}
+
+			if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
+				return h.k8sClient.DeletePod(ctx, podName, 10)
+			}); err != nil {
+				log.Printf("workload/%s: pod deletion failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion failed")
+				return
+			}
+
+			if err := h.waitForPodDeletion(ctx, podName, 30*time.Second); err != nil {
+				log.Printf("workload/%s: pod deletion not confirmed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion not confirmed")
+				return
+			}
+
+			fact.PodDeleted = true
+			if err := store.Save(ctx, fact); err != nil {
+				log.Printf("workload/%s: workload pod-deleted fact write failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+				return
+			}
+		}
 	}
 
-	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
-		return h.k8sClient.DeletePod(ctx, podName, 10)
-	}); err != nil {
-		log.Printf("workload/%s: pod deletion failed: %s", workloadID, observability.RedactLogValue(err))
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion failed")
-		return
+	if !fact.TerminalStatusDone {
+		if err := h.markWorkloadMountReleasedFromFact(ctx, r, fact); err != nil {
+			logWorkloadFactDependencyFailure(r, "AFSCP workload mount released status failed", err, workspaceID, projectID, workloadID, fact)
+			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount released status failed")
+			return
+		}
+		fact.TerminalStatusDone = true
+		if err := store.Save(ctx, fact); err != nil {
+			log.Printf("workload/%s: workload terminal-status fact write failed: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
+			return
+		}
 	}
 
-	if err := h.waitForPodDeletion(ctx, podName, 30*time.Second); err != nil {
-		log.Printf("workload/%s: pod deletion not confirmed: %s", workloadID, observability.RedactLogValue(err))
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion not confirmed")
-		return
-	}
-
-	if err := h.markWorkloadMountReleased(ctx, r, pod); err != nil {
-		logWorkloadMountDependencyFailure(r, "AFSCP workload mount released status failed", err, workspaceID, projectID, workloadID, pod)
-		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount released status failed")
+	if !fact.Terminal() {
+		jsonError(w, r, http.StatusConflict, errorCodeWorkloadReleaseIncomplete, "workload release is incomplete")
 		return
 	}
 
@@ -326,7 +414,7 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			jsonResponse(w, http.StatusOK, PodStatus{Phase: "offline"})
+			jsonResponse(w, http.StatusOK, PodStatus{Status: "offline", Phase: "offline"})
 			return
 		}
 		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
@@ -336,7 +424,8 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 
 	status := PodStatus{
 		PodName:   pod.Name,
-		Phase:     string(pod.Status.Phase),
+		Status:    workloadStatusForPod(pod),
+		Phase:     podPhaseString(pod),
 		IP:        pod.Status.PodIP,
 		StartedAt: pod.CreationTimestamp.Format(time.RFC3339),
 	}
@@ -508,9 +597,9 @@ func (h *Handler) buildPod(
 ) (*v1.Pod, error) {
 	labels := map[string]string{
 		"app":          WorkloadLabel,
-		"workload_id":  workloadID,
-		"workspace_id": workspaceID,
-		"project_id":   projectID,
+		"workload_id":  workloadfacts.LabelValue(workloadID),
+		"workspace_id": workloadfacts.LabelValue(workspaceID),
+		"project_id":   workloadfacts.LabelValue(projectID),
 	}
 
 	idleTimeoutSec := int(DefaultIdleTimeout.Seconds())
@@ -529,6 +618,9 @@ func (h *Handler) buildPod(
 		"workload/idleTimeoutSec": strconv.Itoa(idleTimeoutSec),
 		"workload/maxLifetimeSec": strconv.Itoa(maxLifetimeSec),
 		"workload/maxExpiresAt":   maxExpiresAt.Format(time.RFC3339),
+		"mbos.io/workspace-id":    workspaceID,
+		"mbos.io/project-id":      projectID,
+		"mbos.io/workload-id":     workloadID,
 	}
 
 	paths, err := resolveWorkloadPaths(req)
@@ -1026,6 +1118,95 @@ func envVarMap(vars []v1.EnvVar) map[string]string {
 	return out
 }
 
+func (h *Handler) workloadFactStore() workloadfacts.Store {
+	if h.options.WorkloadFactStore != nil {
+		return h.options.WorkloadFactStore
+	}
+	return workloadfacts.NewConfigMapStore(h.k8sClient.Clientset().CoreV1().ConfigMaps(h.k8sClient.Namespace()))
+}
+
+func (h *Handler) loadWorkloadFact(ctx context.Context, store workloadfacts.Store, workspaceID, projectID, workloadID string) (workloadfacts.Fact, bool, error) {
+	fact, err := store.Get(ctx, workloadfacts.Key{WorkspaceID: workspaceID, ProjectID: projectID, WorkloadID: workloadID})
+	if err != nil {
+		if stderrors.Is(err, workloadfacts.ErrNotFound) {
+			return workloadfacts.Fact{}, false, nil
+		}
+		return workloadfacts.Fact{}, false, err
+	}
+	return fact, true, nil
+}
+
+func (h *Handler) recordWorkloadFact(ctx context.Context, workspaceID, projectID, workloadID, bindingID string, pod *v1.Pod) error {
+	fact, err := h.workloadFactFromPod(workspaceID, projectID, workloadID, bindingID, pod)
+	if err != nil {
+		return err
+	}
+	return h.workloadFactStore().Save(ctx, fact)
+}
+
+func (h *Handler) rollbackCreatedPodAfterFactFailure(ctx context.Context, workloadID, podName string) {
+	podName = strings.TrimSpace(podName)
+	if podName == "" {
+		return
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := h.k8sClient.DeletePod(rollbackCtx, podName, 0); err != nil {
+		log.Printf("workload/%s: pod rollback after workload fact write failure failed: %s", workloadID, observability.RedactLogValue(err))
+	}
+}
+
+func (h *Handler) workloadFactFromPod(workspaceID, projectID, workloadID, bindingID string, pod *v1.Pod) (workloadfacts.Fact, error) {
+	if pod == nil {
+		return workloadfacts.Fact{}, fmt.Errorf("pod is required")
+	}
+	namespaceID := ""
+	mountBindingID := strings.TrimSpace(bindingID)
+	if ref, ok := workloadMountRefFromPod(pod); ok {
+		namespaceID = ref.namespaceID
+		mountBindingID = ref.mountBindingID
+	}
+	if h.options.AFSCPClient != nil && (namespaceID == "" || mountBindingID == "") {
+		return workloadfacts.Fact{}, fmt.Errorf("pod is missing AFSCP workload mount annotations")
+	}
+	return workloadfacts.Fact{
+		WorkspaceID:        workspaceID,
+		ProjectID:          projectID,
+		WorkloadID:         workloadID,
+		WorkspaceBindingID: mountBindingID,
+		NamespaceID:        namespaceID,
+		MountBindingID:     mountBindingID,
+		PodName:            pod.GetName(),
+		PodUID:             string(pod.GetUID()),
+	}, nil
+}
+
+func (h *Handler) releaseWorkloadMountFromFact(ctx context.Context, r *http.Request, fact workloadfacts.Fact) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	ref, ok := workloadMountRefFromFact(fact)
+	if !ok {
+		return fmt.Errorf("workload terminal fact is missing AFSCP mount ref")
+	}
+	correlationID := requestCorrelationID(r)
+	_, err := h.options.AFSCPClient.ReleaseWorkloadMountBinding(ctx, ref.namespaceID, ref.mountBindingID, correlationID, factLifecycleIdempotencyKey("release", fact))
+	return err
+}
+
+func (h *Handler) markWorkloadMountReleasedFromFact(ctx context.Context, r *http.Request, fact workloadfacts.Fact) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	ref, ok := workloadMountRefFromFact(fact)
+	if !ok {
+		return fmt.Errorf("workload terminal fact is missing AFSCP mount ref")
+	}
+	correlationID := requestCorrelationID(r)
+	_, err := h.options.AFSCPClient.UpdateWorkloadMountStatus(ctx, ref.namespaceID, ref.mountBindingID, "released", "workload pod deleted", time.Now().UTC(), correlationID, factLifecycleIdempotencyKey("status-released", fact))
+	return err
+}
+
 type workloadMountRef struct {
 	namespaceID    string
 	mountBindingID string
@@ -1096,6 +1277,15 @@ func workloadMountRefFromPod(pod *v1.Pod) (workloadMountRef, bool) {
 	}
 	namespaceID := strings.TrimSpace(pod.Annotations["mbos.io/afscp-namespace-id"])
 	mountBindingID := strings.TrimSpace(pod.Annotations["mbos.io/afscp-mount-binding-id"])
+	if namespaceID == "" || mountBindingID == "" {
+		return workloadMountRef{}, false
+	}
+	return workloadMountRef{namespaceID: namespaceID, mountBindingID: mountBindingID}, true
+}
+
+func workloadMountRefFromFact(fact workloadfacts.Fact) (workloadMountRef, bool) {
+	namespaceID := strings.TrimSpace(fact.NamespaceID)
+	mountBindingID := strings.TrimSpace(fact.MountBindingID)
 	if namespaceID == "" || mountBindingID == "" {
 		return workloadMountRef{}, false
 	}
@@ -1181,6 +1371,10 @@ func podLifecycleIdempotencyKey(action string, pod *v1.Pod) string {
 	return sanitizeIdempotencyKey("workload", action, name, uid)
 }
 
+func factLifecycleIdempotencyKey(action string, fact workloadfacts.Fact) string {
+	return sanitizeIdempotencyKey("workload", action, fact.PodName, fact.PodUID)
+}
+
 func logWorkloadMountDependencyFailure(r *http.Request, message string, err error, workspaceID, projectID, workloadID string, pod *v1.Pod) {
 	ref, _ := workloadMountRefFromPod(pod)
 	podName := ""
@@ -1194,6 +1388,23 @@ func logWorkloadMountDependencyFailure(r *http.Request, message string, err erro
 		projectID,
 		workloadID,
 		podName,
+		ref.namespaceID,
+		ref.mountBindingID,
+		observability.GetRequestID(r),
+		requestCorrelationID(r),
+		observability.RedactLogValue(err),
+	)
+}
+
+func logWorkloadFactDependencyFailure(r *http.Request, message string, err error, workspaceID, projectID, workloadID string, fact workloadfacts.Fact) {
+	ref, _ := workloadMountRefFromFact(fact)
+	log.Printf("workload/%s: %s: workspace=%s project=%s workload=%s pod=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+		workloadID,
+		message,
+		workspaceID,
+		projectID,
+		workloadID,
+		fact.PodName,
 		ref.namespaceID,
 		ref.mountBindingID,
 		observability.GetRequestID(r),
@@ -1257,9 +1468,35 @@ func (h *Handler) waitForPodDeletion(ctx context.Context, podName string, timeou
 	return fmt.Errorf("pod %s still exists", podName)
 }
 
+func workloadStatusForPod(pod *v1.Pod) string {
+	if pod == nil {
+		return "offline"
+	}
+	switch pod.Status.Phase {
+	case v1.PodRunning:
+		return "running"
+	case v1.PodFailed:
+		return "failed"
+	case v1.PodSucceeded:
+		return "offline"
+	default:
+		return "pending"
+	}
+}
+
+func podPhaseString(pod *v1.Pod) string {
+	if pod == nil {
+		return "offline"
+	}
+	if pod.Status.Phase == "" {
+		return string(v1.PodPending)
+	}
+	return string(pod.Status.Phase)
+}
+
 // PodName returns the pod name for a workload.
 func PodName(workloadID string) string {
-	return fmt.Sprintf("workload-%s", workloadID)
+	return workloadfacts.ObjectName("workload", workloadID)
 }
 
 func boolPtr(b bool) *bool {

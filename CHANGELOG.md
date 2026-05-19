@@ -6,6 +6,17 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.6] - 2026-05-19
+
+### Breaking Changes
+
+- ASBCP-BC-0001: pre-GA clean cut makes durable terminal truth the workload DELETE authority; missing durable release fact plus pod absence now returns fail-closed retryable `409` code `workload_release_incomplete` instead of absence/404 completion, release facts require the ConfigMap fact store/RBAC path, and workspace-binding reconciliation is fail-closed when provider prerequisites or binding state cannot be proven.
+
+### Changed
+
+- Moved the current release-impacting workload truth evidence to the new `v2.0.6` release track because the existing `v2.0.5` tag is already published at an older commit.
+- Recorded release-impacting workload truth changes: durable terminal truth is required before DELETE success, the DELETE 404-to-409 fail-closed contract is explicit, ConfigMap fact store/RBAC is part of the provider prerequisite surface, and workspace-binding uncertainty is fail-closed.
+
 ## [v2.0.5] - 2026-05-19
 
 ### Breaking Changes

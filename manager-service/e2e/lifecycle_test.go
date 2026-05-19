@@ -77,10 +77,22 @@ func TestGet_OfflineWhenPodDoesNotExist(t *testing.T) {
 	assert.Empty(t, ps.PodName)
 }
 
-// TestDelete_NotFound verifies DELETE on a non-existent workload returns 404.
+// TestDelete_NotFound verifies DELETE fails closed when no pod or terminal fact exists.
 func TestDelete_NotFound(t *testing.T) {
-	resp := newClient().DeleteWorkload(t, testWS, testProj, uniqueID("del-404"))
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp := newClient().DeleteWorkload(t, testWS, testProj, uniqueID("del-missing-terminal-fact"))
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "delete: %s", resp.BodyString())
+
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, resp.DecodeJSON(&body))
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "terminal fact")
+	assert.Contains(t, body.Error.Message, "pod absence")
+	assert.Contains(t, body.Error.Message, "not terminal truth")
 }
 
 // TestKeepalive_NotFound verifies keepalive on a non-existent workload returns 404.
@@ -145,7 +157,8 @@ func TestFullLifecycle_CreateGetDeleteGet(t *testing.T) {
 		context.Background(), podName, metav1.GetOptions{})
 	require.NoError(t, err, "pod must exist in K8s")
 	assert.Equal(t, "managed-workload", pod.Labels["app"])
-	assert.Equal(t, wlID, pod.Labels["workload_id"])
+	assertDNSSafeIdentityLabel(t, pod.Labels, "workload_id")
+	assert.Equal(t, wlID, pod.Annotations["mbos.io/workload-id"])
 
 	// Delete the workload.
 	t.Logf("deleting workload %s", wlID)

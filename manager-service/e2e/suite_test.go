@@ -371,10 +371,8 @@ func purgeTestWorkloads(cli *kubernetes.Clientset, ns string) {
 	}
 	client := &http.Client{Timeout: 20 * time.Second}
 	for _, pod := range pods.Items {
-		wsID := strings.TrimSpace(pod.Labels["workspace_id"])
-		projID := strings.TrimSpace(pod.Labels["project_id"])
-		wlID := strings.TrimSpace(pod.Labels["workload_id"])
-		if wsID == "" || projID == "" || wlID == "" {
+		wsID, projID, wlID, ok := cleanupIdentityFromPod(pod)
+		if !ok {
 			continue
 		}
 		url := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s", suite.ASBCPURL, wsID, projID, wlID)
@@ -391,7 +389,16 @@ func purgeTestWorkloads(cli *kubernetes.Clientset, ns string) {
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		if isConfirmedWorkloadDeleteStatus(resp.StatusCode) {
+			continue
+		}
+		if isTestCleanupOnlyWorkloadDeleteTolerated(resp.StatusCode) {
+			log.Printf("E2E: test-cleanup-only tolerated workload %s status 404 as already absent; product DELETE success still requires 200", pod.Name)
+			continue
+		}
+		if resp.StatusCode == http.StatusConflict {
+			log.Printf("E2E: cleanup workload %s returned retryable conflict: terminal truth is not proven yet", pod.Name)
+		} else {
 			log.Printf("E2E: warning – cleanup workload %s returned status %d", pod.Name, resp.StatusCode)
 		}
 	}
@@ -475,16 +482,20 @@ func releaseExpiredWorkloadsViaASBCP(t *testing.T, ns string) int {
 		if err != nil || !now.After(exp) {
 			continue
 		}
-		wsID := strings.TrimSpace(pod.Labels["workspace_id"])
-		projID := strings.TrimSpace(pod.Labels["project_id"])
-		wlID := strings.TrimSpace(pod.Labels["workload_id"])
-		if wsID == "" || projID == "" || wlID == "" {
+		wsID, projID, wlID, ok := cleanupIdentityFromPod(pod)
+		if !ok {
 			continue
 		}
 		t.Logf("releasing expired workload %s (expired %s ago)", pod.Name, now.Sub(exp).Round(time.Second))
 		resp := newClient().DeleteWorkload(t, wsID, projID, wlID)
-		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+		if isConfirmedWorkloadDeleteStatus(resp.StatusCode) {
 			deleted++
+			continue
+		}
+		if resp.StatusCode == http.StatusConflict {
+			t.Logf("expired workload %s not released yet: retryable conflict: %s", pod.Name, resp.BodyString())
+		} else {
+			t.Logf("expired workload %s delete returned status %d: %s", pod.Name, resp.StatusCode, resp.BodyString())
 		}
 	}
 	return deleted

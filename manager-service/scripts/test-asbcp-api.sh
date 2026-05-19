@@ -149,11 +149,12 @@ echo "8. Testing DELETE /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}
 RESPONSE=$(curl -s -w "\n%{http_code}" -X DELETE "${ASBCP_URL}/v1/workspaces/${WS_ID}/projects/${PROJ_ID}/workloads/${WL_ID}" \
   -H "X-Service-Key: ${SERVICE_KEY}")
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | head -n-1)
 
-if [ "$HTTP_CODE" == "200" ] || [ "$HTTP_CODE" == "404" ]; then
-  test_result 0 "Delete returned $HTTP_CODE"
+if [ "$HTTP_CODE" == "200" ]; then
+  test_result 0 "Delete returned 200 (release confirmed)"
 else
-  test_result 1 "Delete returned unexpected status: $HTTP_CODE"
+  test_result 1 "Delete expected confirmed release success (200), got: $HTTP_CODE - $BODY"
 fi
 
 # 9. Test auth failure

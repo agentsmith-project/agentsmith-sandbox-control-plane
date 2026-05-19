@@ -22,9 +22,10 @@ Required ASBCP values:
 - `ASBCP_AFSCP_INTERNAL_BASE_URL`
 - `ASBCP_AFSCP_ORCHESTRATOR_TOKEN`
 - `ASBCP_AFSCP_CALLER_SERVICE=agentsmith-sandbox-control-plane`
+- `ASBCP_AFSCP_ACTOR_TYPE=system`
 - `ASBCP_AFSCP_ACTOR_ID=agentsmith-sandbox-control-plane`
 
-ASBCP must use the canonical caller identity consistently across configuration, AFSCP allowlists, logs, and release evidence.
+ASBCP must use the canonical caller identity consistently across configuration, AFSCP allowlists, logs, and release evidence. The machine-readable ASBCP service prerequisite list is `docs/contracts/asbcp-provider-prerequisites.v1.json`; it records the required `orchestrator_mount` role, allowed caller, Kubernetes RBAC verbs, secret keys, environment projections, and no-public-ingress requirement.
 
 ## Secret Rules
 
