@@ -178,7 +178,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	}
 
 	ctx := r.Context()
-	mount, err := h.resolveWorkspaceMount(ctx, r, workspaceID, projectID, req.WorkspaceBindingID)
+	mount, err := h.resolveWorkspaceMount(ctx, r, workspaceID, projectID, workloadID, req.WorkspaceBindingID)
 	if err != nil {
 		status := statusCodeForError(err, http.StatusBadRequest)
 		jsonError(w, r, status, httperror.CodeForStatus(status), err.Error())
@@ -284,6 +284,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 	}
 
 	if err := h.releaseWorkloadMount(ctx, r, pod); err != nil {
+		logWorkloadMountDependencyFailure(r, "AFSCP workload mount release failed", err, workspaceID, projectID, workloadID, pod)
 		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
 		return
 	}
@@ -309,6 +310,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 	}
 
 	if err := h.markWorkloadMountReleased(ctx, r, pod); err != nil {
+		logWorkloadMountDependencyFailure(r, "AFSCP workload mount released status failed", err, workspaceID, projectID, workloadID, pod)
 		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount released status failed")
 		return
 	}
@@ -382,6 +384,7 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 	}
 
 	if err := h.heartbeatWorkloadMount(ctx, r, pod); err != nil {
+		logWorkloadMountDependencyFailure(r, "AFSCP workload mount heartbeat failed", err, "", "", workloadID, pod)
 		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount heartbeat failed")
 		return
 	}
@@ -695,7 +698,7 @@ func resolveWorkloadPaths(req CreateRequest) (workloadPaths, error) {
 	}, nil
 }
 
-func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, workspaceID, projectID, bindingID string) (workspacebinding.ResolvedMount, error) {
+func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, workspaceID, projectID, workloadID, bindingID string) (workspacebinding.ResolvedMount, error) {
 	pvcName := workspacebinding.PVCName(workspaceID, projectID, bindingID)
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.k8sClient.Namespace(), pvcName)
 	if err != nil {
@@ -732,8 +735,21 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 		}
 	}
 	if h.options.AFSCPClient != nil {
-		plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(ctx, mount.NamespaceID, mount.MountBindingID, requestCorrelationID(r))
+		correlationID := requestCorrelationID(r)
+		plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(ctx, mount.NamespaceID, mount.MountBindingID, correlationID)
 		if err != nil {
+			log.Printf("workload/%s: workspace binding active check failed: workspace=%s project=%s workload=%s binding=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+				workloadID,
+				workspaceID,
+				projectID,
+				workloadID,
+				bindingID,
+				mount.NamespaceID,
+				mount.MountBindingID,
+				observability.GetRequestID(r),
+				correlationID,
+				observability.RedactLogValue(err),
+			)
 			return workspacebinding.ResolvedMount{}, responseStatusError{
 				status:  http.StatusBadGateway,
 				message: "workspace binding active check failed",
@@ -1148,16 +1164,11 @@ func (barrier podExecStorageFlushBarrier) FlushWorkloadMount(ctx context.Context
 }
 
 func requestCorrelationID(r *http.Request) string {
-	for _, header := range []string{"X-Correlation-Id", "X-Request-Id", "X-Request-ID", "Request-Id"} {
-		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
-			return value
-		}
-	}
-	return "sandbox-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	return observability.RequestCorrelationID(r, "workload")
 }
 
 func idempotencyKey(action, podName, correlationID string) string {
-	return sanitizeIdempotencyKey("sandbox", action, podName, correlationID)
+	return sanitizeIdempotencyKey("workload", action, podName, correlationID)
 }
 
 func podLifecycleIdempotencyKey(action string, pod *v1.Pod) string {
@@ -1167,7 +1178,28 @@ func podLifecycleIdempotencyKey(action string, pod *v1.Pod) string {
 		name = pod.GetName()
 		uid = string(pod.UID)
 	}
-	return sanitizeIdempotencyKey("sandbox", action, name, uid)
+	return sanitizeIdempotencyKey("workload", action, name, uid)
+}
+
+func logWorkloadMountDependencyFailure(r *http.Request, message string, err error, workspaceID, projectID, workloadID string, pod *v1.Pod) {
+	ref, _ := workloadMountRefFromPod(pod)
+	podName := ""
+	if pod != nil {
+		podName = pod.GetName()
+	}
+	log.Printf("workload/%s: %s: workspace=%s project=%s workload=%s pod=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+		workloadID,
+		message,
+		workspaceID,
+		projectID,
+		workloadID,
+		podName,
+		ref.namespaceID,
+		ref.mountBindingID,
+		observability.GetRequestID(r),
+		requestCorrelationID(r),
+		observability.RedactLogValue(err),
+	)
 }
 
 func sanitizeIdempotencyKey(parts ...string) string {

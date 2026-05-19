@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -42,6 +44,7 @@ func RequestIDFromContext(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	requestID, ok := ctx.Value(requestIDContextKey{}).(string)
+	requestID = strings.TrimSpace(requestID)
 	return requestID, ok && requestID != ""
 }
 
@@ -83,4 +86,41 @@ func RequestIDMiddleware(headerName string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequestCorrelationID returns the service correlation ID for outbound dependency calls.
+// It follows the request ID chosen by middleware first so custom server.requestIdHeader
+// values stay aligned with error envelopes, then falls back to accepted legacy headers.
+func RequestCorrelationID(r *http.Request, generatedPrefix string) string {
+	if r != nil {
+		if id, ok := RequestIDFromContext(r.Context()); ok {
+			return id
+		}
+		for _, header := range []string{"X-Correlation-Id", RequestIDHeader, "X-Request-ID", "Request-Id"} {
+			if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+				return value
+			}
+		}
+	}
+	prefix := cleanCorrelationPrefix(generatedPrefix)
+	if prefix == "" {
+		prefix = "asbcp"
+	}
+	return prefix + "-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+}
+
+func cleanCorrelationPrefix(prefix string) string {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, prefix)
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +67,15 @@ func (r *eventRecorder) snapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.events...)
+}
+
+func captureStandardLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return buf
 }
 
 type fakeMountLifecycleClient struct {
@@ -620,16 +631,26 @@ func TestHandleCreatePod_RejectsPVPlanDriftBeforeCreate(t *testing.T) {
 
 func TestHandleCreatePod_FailsClosedWhenBindingActiveCheckUnavailable(t *testing.T) {
 	reg := newPodRegistry()
-	lifecycle := &fakeMountLifecycleClient{planErr: errors.New("afscp unavailable")}
+	lifecycle := &fakeMountLifecycleClient{planErr: errors.New("afscp unavailable token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
 	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	req.Header.Set("X-Request-Id", "req-create")
 	rec := httptest.NewRecorder()
+	logs := captureStandardLog(t)
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "workspace binding active check failed")
+	assert.NotContains(t, rec.Body.String(), "raw-secret")
+
+	logOutput := logs.String()
+	for _, token := range []string{"workspace binding active check failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "mount_binding_id=wmb_demo", "request_id=req-create", "[REDACTED]"} {
+		assert.Contains(t, logOutput, token)
+	}
+	assert.NotContains(t, logOutput, "raw-secret")
+	assert.NotContains(t, logOutput, "p@ss")
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -947,16 +968,26 @@ func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 
 func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
-	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed")}
+	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
 	req.Header.Set("X-Correlation-Id", "corr-delete")
+	req.Header.Set("X-Request-Id", "req-delete")
 	rec := httptest.NewRecorder()
+	logs := captureStandardLog(t)
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "release failed")
+	assert.NotContains(t, rec.Body.String(), "raw-secret")
+
+	logOutput := logs.String()
+	for _, token := range []string{"AFSCP workload mount release failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
+		assert.Contains(t, logOutput, token)
+	}
+	assert.NotContains(t, logOutput, "raw-secret")
+	assert.NotContains(t, logOutput, "p@ss")
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -967,17 +998,27 @@ func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	events := &eventRecorder{}
 	reg := newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1"))
 	reg.events = events
-	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed")}
+	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
 	req.Header.Set("X-Correlation-Id", "corr-delete")
+	req.Header.Set("X-Request-Id", "req-delete")
 	rec := httptest.NewRecorder()
+	logs := captureStandardLog(t)
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "status failed")
+	assert.NotContains(t, rec.Body.String(), "raw-secret")
 	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+
+	logOutput := logs.String()
+	for _, token := range []string{"AFSCP workload mount released status failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
+		assert.Contains(t, logOutput, token)
+	}
+	assert.NotContains(t, logOutput, "raw-secret")
+	assert.NotContains(t, logOutput, "p@ss")
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -1111,6 +1152,46 @@ func TestHandleKeepaliveHeartbeatsAFSCPMount(t *testing.T) {
 	assert.Equal(t, "wmb_demo", lifecycle.heartbeatMountBindingID)
 	assert.Equal(t, "corr-heartbeat", lifecycle.heartbeatCorrelationID)
 	assert.Contains(t, lifecycle.heartbeatIdempotencyKey, "heartbeat")
+}
+
+func TestHandleKeepaliveUsesRequestIDContextForAFSCPCorrelationAndIdempotency(t *testing.T) {
+	lifecycle := &fakeMountLifecycleClient{}
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+	wrapped := observability.RequestIDMiddleware("X-ASBCP-Request-ID")(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/keepalive", nil)
+	req.Header.Set("X-ASBCP-Request-ID", "custom-request-id")
+	req.Header.Set("X-Correlation-Id", "stale-correlation-id")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "custom-request-id", lifecycle.heartbeatCorrelationID)
+	assert.Contains(t, lifecycle.heartbeatIdempotencyKey, "custom-request-id")
+	assert.NotContains(t, lifecycle.heartbeatIdempotencyKey, "sandbox")
+}
+
+func TestHandleKeepalive_AFSCPHeartbeatFailureLogsRedactedEvidence(t *testing.T) {
+	lifecycle := &fakeMountLifecycleClient{heartbeatErr: errors.New("heartbeat failed token=raw-secret password=p@ss")}
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-heartbeat")
+	req.Header.Set("X-Request-Id", "req-heartbeat")
+	rec := httptest.NewRecorder()
+	logs := captureStandardLog(t)
+	h.handleKeepalive(rec, req, "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "AFSCP workload mount heartbeat failed")
+	assert.NotContains(t, rec.Body.String(), "raw-secret")
+
+	logOutput := logs.String()
+	for _, token := range []string{"AFSCP workload mount heartbeat failed", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-heartbeat", "correlation_id=corr-heartbeat", "[REDACTED]"} {
+		assert.Contains(t, logOutput, token)
+	}
+	assert.NotContains(t, logOutput, "raw-secret")
+	assert.NotContains(t, logOutput, "p@ss")
 }
 
 func TestHandleKeepalive_UsesCustomIdleTimeoutFromAnnotation(t *testing.T) {

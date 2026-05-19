@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -177,12 +179,33 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 		jsonError(w, r, http.StatusBadRequest, "invalid_request", "binding_id and mount_binding_id must match")
 		return
 	}
-	plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(r.Context(), req.NamespaceID, mountBindingID, correlationID(r))
+	correlationID := observability.RequestCorrelationID(r, "asbcp")
+	plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(r.Context(), req.NamespaceID, mountBindingID, correlationID)
 	if err != nil {
+		log.Printf("workspace_binding/%s: AFSCP orchestrator mount plan is unavailable: workspace=%s project=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+			bindingID,
+			workspaceID,
+			projectID,
+			req.NamespaceID,
+			mountBindingID,
+			observability.GetRequestID(r),
+			correlationID,
+			observability.RedactLogValue(err),
+		)
 		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP orchestrator mount plan is unavailable")
 		return
 	}
 	if err := validatePlan(req.NamespaceID, mountBindingID, plan); err != nil {
+		log.Printf("workspace_binding/%s: AFSCP orchestrator mount plan is invalid: workspace=%s project=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+			bindingID,
+			workspaceID,
+			projectID,
+			req.NamespaceID,
+			mountBindingID,
+			observability.GetRequestID(r),
+			correlationID,
+			observability.RedactLogValue(err),
+		)
 		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP orchestrator mount plan is invalid")
 		return
 	}
@@ -688,13 +711,4 @@ func boolString(value bool) string {
 		return "true"
 	}
 	return "false"
-}
-
-func correlationID(r *http.Request) string {
-	for _, header := range []string{"X-Correlation-Id", "X-Request-Id", "X-Request-ID", "Request-Id"} {
-		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
-			return value
-		}
-	}
-	return "sandbox-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 }

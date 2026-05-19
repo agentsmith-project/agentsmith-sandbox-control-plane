@@ -597,3 +597,24 @@ func TestRequestIDMiddleware(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestCorrelationIDUsesMiddlewareContextBeforeHeaders(t *testing.T) {
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Correlation-Id", "legacy-correlation")
+	req = req.WithContext(WithRequestID(req.Context(), "custom-request-id"))
+
+	if got := RequestCorrelationID(req, "asbcp"); got != "custom-request-id" {
+		t.Fatalf("RequestCorrelationID() = %q, want middleware context request id", got)
+	}
+}
+
+func TestRequestCorrelationIDFallbackUsesCleanPrefix(t *testing.T) {
+	got := RequestCorrelationID(httptest.NewRequest("GET", "/test", nil), "workload")
+
+	if !strings.HasPrefix(got, "workload-") {
+		t.Fatalf("RequestCorrelationID() = %q, want workload-prefixed generated id", got)
+	}
+	if strings.HasPrefix(got, "sandbox-") {
+		t.Fatalf("RequestCorrelationID() must not use legacy sandbox prefix, got %q", got)
+	}
+}

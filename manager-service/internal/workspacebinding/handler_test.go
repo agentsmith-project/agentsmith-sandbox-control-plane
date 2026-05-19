@@ -1,15 +1,18 @@
 package workspacebinding
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,6 +87,15 @@ func (f *fakeAFSCPClient) GetOrchestratorMountPlan(_ context.Context, namespaceI
 		return afscp.OrchestratorMountPlan{}, f.err
 	}
 	return f.plan, nil
+}
+
+func captureStandardLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return buf
 }
 
 func validPlan() afscp.OrchestratorMountPlan {
@@ -176,6 +188,34 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	}
 }
 
+func TestEnsureBindingUsesRequestIDContextForAFSCPCorrelation(t *testing.T) {
+	client := &fakeK8sClient{}
+	afscpClient := &fakeAFSCPClient{plan: validPlan()}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      afscpClient,
+	})
+	wrapped := observability.RequestIDMiddleware("X-ASBCP-Request-ID")(handler)
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	req.Header.Set("X-ASBCP-Request-ID", "custom-request-id")
+	req.Header.Set("X-Correlation-Id", "stale-correlation-id")
+	rec := httptest.NewRecorder()
+
+	wrapped.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if afscpClient.correlationID != "custom-request-id" {
+		t.Fatalf("AFSCP correlation id = %q, want custom request id from middleware context", afscpClient.correlationID)
+	}
+}
+
 func TestEnsureBindingMountOptionsAreRepoPayloadScoped(t *testing.T) {
 	firstPlan := validPlan()
 	firstPlan.MountBindingID = "wmb_repo_a"
@@ -258,14 +298,16 @@ func TestEnsureBindingRejectsRawJuiceFSFields(t *testing.T) {
 
 func TestEnsureBindingFailsClosedWhenAFSCPPlanUnavailable(t *testing.T) {
 	client := &fakeK8sClient{}
+	afscpErr := errors.New("afscp dependency failed token=raw-secret password=p@ss for mount wmb_demo")
 	handler := NewHandler(client, Options{
 		Namespace:   "sandbox-workloads",
-		AFSCPClient: &fakeAFSCPClient{plan: validPlan(), err: errors.New("afscp token raw-secret failed for mount wmb_demo")},
+		AFSCPClient: &fakeAFSCPClient{plan: validPlan(), err: afscpErr},
 	})
 	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
 	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
 	req.Header.Set("X-Request-Id", "req-afscp")
 	rec := httptest.NewRecorder()
+	logs := captureStandardLog(t)
 
 	handler.ServeHTTP(rec, req)
 
@@ -292,6 +334,17 @@ func TestEnsureBindingFailsClosedWhenAFSCPPlanUnavailable(t *testing.T) {
 	}
 	if client.pv != nil || client.pvc != nil {
 		t.Fatalf("expected no k8s resources when AFSCP plan is unavailable")
+	}
+	logOutput := logs.String()
+	for _, token := range []string{"AFSCP orchestrator mount plan is unavailable", "workspace=ws_demo", "project=proj_demo", "mount_binding_id=wmb_demo", "request_id=req-afscp", "[REDACTED]"} {
+		if !strings.Contains(logOutput, token) {
+			t.Fatalf("expected redacted AFSCP failure log token %q in %q", token, logOutput)
+		}
+	}
+	for _, leaked := range []string{"raw-secret", "p@ss"} {
+		if strings.Contains(logOutput, leaked) {
+			t.Fatalf("AFSCP failure log leaked %q in %q", leaked, logOutput)
+		}
 	}
 }
 
