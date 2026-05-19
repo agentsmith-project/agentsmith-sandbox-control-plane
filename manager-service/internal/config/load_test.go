@@ -269,18 +269,18 @@ func TestConfig_Clone(t *testing.T) {
 					HTTPPort:        9090,
 					RequestIDHeader: "X-Custom-Id",
 				},
-			Auth: AuthConfig{
-				HeaderName: "X-Auth-Key",
+				Auth: AuthConfig{
+					HeaderName: "X-Auth-Key",
+				},
 			},
 		},
-	},
-	{
-		name: "config with all fields",
-		cfg: &Config{
-			Version: 1,
-			Auth: AuthConfig{
-				HeaderName: "X-Auth-Key",
-			},
+		{
+			name: "config with all fields",
+			cfg: &Config{
+				Version: 1,
+				Auth: AuthConfig{
+					HeaderName: "X-Auth-Key",
+				},
 				RateLimit: RateLimitConfig{
 					RequestsPerMinute: 120,
 				},

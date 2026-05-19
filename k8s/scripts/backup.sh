@@ -29,7 +29,7 @@ cat > "${BACKUP_DIR}/versions.txt" <<EOF
 # Sandbox 版本信息
 # 备份时间: $(date)
 
-Manager: $(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
+ASBCP: $(kubectl get deployment agentsmith-sandbox-control-plane -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
 EOF
 
 echo ""

@@ -106,18 +106,18 @@ if ! kubectl apply -k "$OVERLAY_DIR"; then
 fi
 log_success "配置已应用"
 
-# 等待 Manager 就绪
+# 等待 ASBCP 就绪
 echo ""
-log_info "等待 Manager Deployment 就绪..."
+log_info "等待 ASBCP Deployment 就绪..."
 if ! kubectl wait --for=condition=available \
     --timeout=120s \
-    deployment/sandbox-manager -n sandbox-system; then
-    log_error "Manager Deployment 未在 120 秒内就绪"
+    deployment/agentsmith-sandbox-control-plane -n sandbox-system; then
+    log_error "ASBCP Deployment 未在 120 秒内就绪"
     log_error "检查状态: kubectl get pods -n sandbox-system"
-    log_error "查看日志: kubectl logs -n sandbox-system -l app=sandbox-manager --tail=50"
+    log_error "查看日志: kubectl logs -n sandbox-system -l app=agentsmith-sandbox-control-plane --tail=50"
     exit 1
 fi
-log_success "Manager Deployment 已就绪"
+log_success "ASBCP Deployment 已就绪"
 
 echo ""
 log_success "=== 部署完成 ==="
@@ -127,8 +127,8 @@ kubectl get pods -n sandbox-system
 kubectl get pods -n sandbox-workloads
 
 echo ""
-log_info "访问 Manager:"
-echo "  本地开发: kubectl -n sandbox-system port-forward svc/sandbox-manager 8080:80"
+log_info "访问 ASBCP:"
+echo "  本地开发: kubectl -n sandbox-system port-forward svc/agentsmith-sandbox-control-plane 8080:80"
 echo "  生产环境: 查看 Ingress/NodePort/LoadBalancer 配置"
 echo ""
-log_info "查看日志: kubectl logs -n sandbox-system -l app=sandbox-manager --tail=50 -f"
+log_info "查看日志: kubectl logs -n sandbox-system -l app=agentsmith-sandbox-control-plane --tail=50 -f"

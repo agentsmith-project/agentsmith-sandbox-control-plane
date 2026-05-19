@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Manager 镜像构建脚本
+# ASBCP 镜像构建脚本
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,8 +41,8 @@ fi
 
 # 默认值
 REGISTRY="${REGISTRY:-localhost:5001}"
-IMAGE_NAME="${IMAGE_NAME:-sandbox-manager}"
-VERSION="${VERSION:-$(cat "${SERVICE_DIR}/VERSION" 2>/dev/null || echo "2.0.0")}"
+IMAGE_NAME="${IMAGE_NAME:-agentsmith-sandbox-control-plane}"
+VERSION="${VERSION:-$(cat "${SERVICE_DIR}/../VERSION" 2>/dev/null || echo "dev")}"
 BUILDX_BUILDER="${BUILDX_BUILDER:-sandbox-builder}"
 CACHE_DIR="${CACHE_DIR:-/tmp/.buildx-cache-${IMAGE_NAME}}"
 PLATFORM="${PLATFORM:-linux/amd64}"
@@ -118,6 +118,7 @@ fi
 echo "[${IMAGE_NAME}] Starting build..."
 BUILD_CMD="docker buildx build \
     --platform $PLATFORM \
+    --build-arg VERSION=$VERSION \
     --tag ${REGISTRY}/${IMAGE_NAME}:${VERSION} \
     --load"
 

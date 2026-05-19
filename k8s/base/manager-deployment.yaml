@@ -1,99 +1,102 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandbox-manager
+  name: agentsmith-sandbox-control-plane
   namespace: sandbox-system
+  labels:
+    app.kubernetes.io/component: asbcp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: sandbox-manager
+      app: agentsmith-sandbox-control-plane
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: sandbox-manager
+        app: agentsmith-sandbox-control-plane
+        app.kubernetes.io/component: asbcp
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: sandbox-manager
+      serviceAccountName: agentsmith-sandbox-control-plane
       # imagePullSecrets 在 overlays 中根据环境配置
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - name: manager
-        image: sandbox-manager:2.0.3
+      - name: asbcp
+        image: agentsmith-sandbox-control-plane:2.0.3
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
           containerPort: 8080
         env:
         # Boot configuration
-        - name: CONFIG_PATH
-          value: "/etc/sandbox-manager/manager-config.yaml"
+        - name: ASBCP_CONFIG_PATH
+          value: "/etc/asbcp/asbcp-config.yaml"
         - name: DEBUG
           value: "false"
-        - name: SERVICE_KEYS
+        - name: ASBCP_SERVICE_KEYS
           valueFrom:
             secretKeyRef:
-              name: sandbox-manager-secrets
+              name: agentsmith-sandbox-control-plane-secrets
               key: service-keys
-        - name: K8S_NAMESPACE
+        - name: ASBCP_WORKLOAD_NAMESPACE
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: workload-namespace
         # AFSCP workload mount plan client
-        - name: AFSCP_INTERNAL_BASE_URL
+        - name: ASBCP_AFSCP_INTERNAL_BASE_URL
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: afscp-internal-base-url
-        - name: AFSCP_ORCHESTRATOR_TOKEN
+        - name: ASBCP_AFSCP_ORCHESTRATOR_TOKEN
           valueFrom:
             secretKeyRef:
-              name: sandbox-manager-secrets
+              name: agentsmith-sandbox-control-plane-secrets
               key: afscp-orchestrator-token
-        - name: AFSCP_CALLER_SERVICE
+        - name: ASBCP_AFSCP_CALLER_SERVICE
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: afscp-caller-service
-        - name: AFSCP_ACTOR_TYPE
+        - name: ASBCP_AFSCP_ACTOR_TYPE
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: afscp-actor-type
-        - name: AFSCP_ACTOR_ID
+        - name: ASBCP_AFSCP_ACTOR_ID
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: afscp-actor-id
         # CSI materialization knobs; backend auth and payload subdir come only from AFSCP plans.
-        - name: JUICEFS_CSI_DRIVER
+        - name: ASBCP_JUICEFS_CSI_DRIVER
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: juicefs-csi-driver
-        - name: JUICEFS_STORAGE_CAPACITY
+        - name: ASBCP_JUICEFS_STORAGE_CAPACITY
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: juicefs-storage-capacity
-        - name: JUICEFS_STORAGE_CLASS_NAME
+        - name: ASBCP_JUICEFS_STORAGE_CLASS_NAME
           valueFrom:
             configMapKeyRef:
-              name: sandbox-config
+              name: asbcp-runtime-config
               key: juicefs-storage-class-name
         # Mount config file
         volumeMounts:
-        - name: manager-config
-          mountPath: /etc/sandbox-manager/manager-config.yaml
-          subPath: manager-config.yaml
+        - name: asbcp-config
+          mountPath: /etc/asbcp/asbcp-config.yaml
+          subPath: asbcp-config.yaml
           readOnly: true
         # Probes
         readinessProbe:
@@ -129,6 +132,6 @@ spec:
             drop: ["ALL"]
       # Volumes
       volumes:
-      - name: manager-config
+      - name: asbcp-config
         configMap:
-          name: sandbox-manager-config
+          name: asbcp-config

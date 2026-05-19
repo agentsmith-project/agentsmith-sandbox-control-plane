@@ -27,7 +27,7 @@ metadata:
   namespace: sandbox-workloads
 subjects:
   - kind: ServiceAccount
-    name: sandbox-manager
+    name: agentsmith-sandbox-control-plane
     namespace: sandbox-system
 roleRef:
   kind: Role

@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandbox-manager
+  name: agentsmith-sandbox-control-plane
   namespace: sandbox-system
 spec:
   replicas: 2  # 预发布环境 2 个副本

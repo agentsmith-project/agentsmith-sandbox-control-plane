@@ -7,14 +7,14 @@ import (
 )
 
 // Config contains rate limiter configuration.
-// Sandbox Manager is a server-to-server API called only by AgentSmith,
+// ASBCP is a server-to-server API called only by AgentSmith,
 // so only a global rate limit is needed as a safety net.
 type Config struct {
 	GlobalRPS   float64 `yaml:"globalRPS"`
 	GlobalBurst int     `yaml:"globalBurst"`
 }
 
-// Limiter implements global rate limiting for the sandbox manager API.
+// Limiter implements global rate limiting for the ASBCP API.
 type Limiter struct {
 	global *rate.Limiter
 }

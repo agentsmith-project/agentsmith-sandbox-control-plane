@@ -1,48 +1,32 @@
-# Sandbox Pre-Launch Checklist
+# ASBCP Pre-Launch Checklist
 
-This checklist is for the current production model only:
+This checklist is for the ASBCP public release model.
 
-- JuiceFS CSI workspace bindings
-- workload pods mounted from AFSCP workload mount plans
-- keepalive-driven AFSCP heartbeat and reclaim of compute pods
+## Must-Pass Checks
 
-## Must-pass checks
+### Binding Lifecycle
 
-### Binding lifecycle
+- [ ] `PUT /workspace-bindings/{binding_id}` creates or reuses a stable binding.
+- [ ] Binding ensure fetches an AFSCP orchestrator plan with ASBCP service identity.
+- [ ] `GET /workspace-bindings/{binding_id}` returns current binding state.
+- [ ] `DELETE /workspace-bindings/{binding_id}` removes ASBCP-managed binding resources cleanly.
+- [ ] Caller-provided storage backend settings and storage auth material are rejected.
 
-- [ ] `PUT /workspace-bindings/{bindingId}` creates or reuses a stable binding
-- [ ] binding ensure fetches AFSCP orchestrator plan with sandbox orchestrator identity
-- [ ] `GET /workspace-bindings/{bindingId}` returns the current binding state
-- [ ] `DELETE /workspace-bindings/{bindingId}` removes the binding resources cleanly
-- [ ] ensuring the same binding twice returns the same stable PVC identity
-- [ ] caller-provided storage backend settings and storage auth material are rejected
+### Workload Lifecycle
 
-### Workload lifecycle
+- [ ] `PUT /workloads/{workload_id}` requires `workspace_binding_id`.
+- [ ] Workload Pod mount path and read-only mode come from the AFSCP plan.
+- [ ] Workload container working directory is `<mount_path>/workspace`.
+- [ ] Workload env contains `TASK_HOME`, `HOME`, and `WORKSPACE_PATH`.
+- [ ] Pod reaches running state.
+- [ ] `POST /exec` works against the running Pod.
+- [ ] `POST /keepalive` heartbeats AFSCP and extends expiry.
+- [ ] `DELETE /workloads/{workload_id}` removes compute and closes AFSCP mount lifecycle.
 
-- [ ] `PUT /workloads/{wlId}` requires `workspace_binding_id`
-- [ ] workload pod mount path and read-only mode come from AFSCP plan
-- [ ] workload container `workingDir` is `<mount_path>/workspace`
-- [ ] workload env contains `TASK_HOME`, `HOME`, and `WORKSPACE_PATH`
-- [ ] pod reaches `Running`
-- [ ] `POST /exec` works against the running pod
-- [ ] `POST /keepalive` heartbeats AFSCP and extends `expires_at`
-- [ ] `DELETE /workloads/{wlId}` removes compute and closes AFSCP mount lifecycle
+### Release Evidence
 
-### Persistence
-
-- [ ] files written under the plan-provided `WORKSPACE_PATH` survive workload deletion and recreation when the AFSCP binding remains available; deletion runs the mounted payload flush barrier before terminal release
-- [ ] expired compute reclaim goes through the manager workload lifecycle, not direct pod deletion
-- [ ] the same binding can be reused across multiple workloads and tasks
-
-### Configuration
-
-- [ ] manager is configured with AFSCP internal base URL and orchestrator token
-- [ ] manager uses only CSI driver, capacity, and storage class as local storage knobs
-- [ ] documentation and scripts use the same AFSCP plan consumer model
-
-### Release evidence
-
-- [ ] API reference matches the live request/response shape
-- [ ] integration contract matches AgentSmith’s current request body
-- [ ] real workload runbook is up to date
-- [ ] no current docs or smoke scripts mention removed persistence concepts
+- [ ] `bash scripts/verify-release.sh` passes.
+- [ ] API reference matches the live request/response shape.
+- [ ] AgentSmith integration contract matches current request bodies.
+- [ ] GHCR digest pull is verified.
+- [ ] Risk register has no release-blocking open risks.

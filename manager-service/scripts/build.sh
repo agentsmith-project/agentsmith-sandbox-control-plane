@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Manager 本地构建脚本（Go 二进制）
+# ASBCP 本地构建脚本（Go 二进制）
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "$SERVICE_DIR"
 
-echo "[manager] Building Go binary..."
+echo "[asbcp] Building Go binary..."
 
 ensure_writable_gocache() {
   if [ -n "${GOCACHE:-}" ]; then
@@ -35,7 +35,7 @@ ensure_writable_gocache() {
 ensure_writable_gocache
 
 # 构建
-VERSION="$(cat "${SERVICE_DIR}/VERSION" 2>/dev/null || echo "dev")"
-go build -ldflags "-X github.com/sandbox/manager/internal/app.version=${VERSION}" -o manager ./cmd/manager
+VERSION="$(cat "${SERVICE_DIR}/../VERSION" 2>/dev/null || echo "dev")"
+go build -ldflags "-X github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/app.version=${VERSION}" -o asbcp ./cmd/asbcp
 
-echo "[manager] ✓ Build completed: ${SERVICE_DIR}/manager"
+echo "[asbcp] ✓ Build completed: ${SERVICE_DIR}/asbcp"

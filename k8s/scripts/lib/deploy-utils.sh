@@ -57,7 +57,7 @@ deploy_to_environment() {
 cleanup_kind_images() {
     local cluster_name="${1:-sandbox-cluster}"
     local registry="${2:-localhost:5001}"
-    local image_pattern="${3:-sandbox-runner}"
+    local image_pattern="${3:-agentsmith-sandbox-control-plane}"
     local old_tags="${4:-}"
     
     log_info "清理 Kind 集群中的旧镜像: $image_pattern"

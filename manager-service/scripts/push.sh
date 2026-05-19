@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${IMAGE_DIR}/.." && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${IMAGE_DIR}/config.env}"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -12,8 +13,8 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 REGISTRY="${REGISTRY:-localhost:5001}"
-IMAGE_NAME="${IMAGE_NAME:-sandbox-manager}"
-VERSION="${VERSION:-$(cat "${IMAGE_DIR}/VERSION" 2>/dev/null || echo "1.0.0")}"
+IMAGE_NAME="${IMAGE_NAME:-agentsmith-sandbox-control-plane}"
+VERSION="${VERSION:-$(cat "${ROOT_DIR}/VERSION" 2>/dev/null || echo "dev")}"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
 
 echo "[${IMAGE_NAME}] Pushing image: ${FULL_IMAGE}"

@@ -24,7 +24,7 @@ images_build() {
       --builder) builder="${2:-}"; shift 2 ;;
       --only) only="${2:-}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only manager|runner]"
+        echo "Usage: ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only asbcp|runner] (runner fixture only)"
         return 0
         ;;
       *)
@@ -32,6 +32,10 @@ images_build() {
         ;;
     esac
   done
+
+  if [ -z "$only" ]; then
+    only="asbcp"
+  fi
 
   docker_buildx_require
   local pull_enabled
@@ -55,11 +59,11 @@ images_build() {
     build_args="--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg NO_PROXY= --build-arg no_proxy="
   fi
 
-  local manager_ver runner_ver
-  manager_ver="$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)"
+  local asbcp_ver runner_ver
+  asbcp_ver="$(cat "${root}/VERSION" 2>/dev/null || echo dev)"
   runner_ver="$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)"
 
-  local tag_manager="sandbox-manager:${manager_ver}"
+  local tag_asbcp="agentsmith-sandbox-control-plane:${asbcp_ver}"
   local tag_runner="sandbox-runner:${runner_ver}"
 
   # shellcheck disable=SC2206
@@ -69,15 +73,12 @@ images_build() {
   log_info "Build args proxy: $build_proxy_enabled (mode=$build_proxy_mode)"
 
   case "$only" in
-    "" )
-      docker_build_image "${root}/images/runner" "${root}/images/runner/Dockerfile" "$tag_runner" "$platform" "${build_arg_array[@]}"
-      docker_build_image "${root}/manager-service" "${root}/manager-service/Dockerfile" "$tag_manager" "$platform" "${build_arg_array[@]}"
+    asbcp)
+      docker_build_image "${root}/manager-service" "${root}/manager-service/Dockerfile" "$tag_asbcp" "$platform" --build-arg "VERSION=${asbcp_ver}" "${build_arg_array[@]}"
       ;;
     runner)
+      # Runner is a non-active fixture image; build it only when explicitly requested.
       docker_build_image "${root}/images/runner" "${root}/images/runner/Dockerfile" "$tag_runner" "$platform" "${build_arg_array[@]}"
-      ;;
-    manager)
-      docker_build_image "${root}/manager-service" "${root}/manager-service/Dockerfile" "$tag_manager" "$platform" "${build_arg_array[@]}"
       ;;
     *)
       die "Unknown --only value: $only"
@@ -85,8 +86,8 @@ images_build() {
   esac
 
   log_info "Built images:"
-  echo "  $tag_manager"
-  echo "  $tag_runner"
+  if [ "$only" = "asbcp" ]; then echo "  $tag_asbcp"; fi
+  if [ "$only" = "runner" ]; then echo "  $tag_runner"; fi
 }
 
 images_push_harbor() {
@@ -115,7 +116,7 @@ images_push_harbor() {
       --build-proxy) build_proxy_mode="${2:-auto}"; shift 2 ;;
       --only) only="${2:-}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only manager|runner]"
+        echo "Usage: ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only asbcp|runner] (runner fixture only)"
         return 0
         ;;
       *)
@@ -129,28 +130,32 @@ images_push_harbor() {
   [ -n "$username" ] || die "--username is required"
   [ -n "$password" ] || die "--password is required"
 
-  local manager_ver runner_ver
-  manager_ver="$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)"
+  if [ -z "$only" ]; then
+    only="asbcp"
+  fi
+
+  local asbcp_ver runner_ver
+  asbcp_ver="$(cat "${root}/VERSION" 2>/dev/null || echo dev)"
   runner_ver="$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)"
 
-  local src_manager="docker-daemon:sandbox-manager:${manager_ver}"
+  local src_asbcp="docker-daemon:agentsmith-sandbox-control-plane:${asbcp_ver}"
   local src_runner="docker-daemon:sandbox-runner:${runner_ver}"
 
   case "$only" in
-    ""|manager|runner) : ;;
-    *) die "--only must be one of: manager|runner" ;;
+    asbcp|runner) : ;;
+    *) die "--only must be one of: asbcp|runner" ;;
   esac
 
   if [ "$source_mode" != "archive" ]; then
-    if [ -z "$only" ] || [ "$only" = "manager" ]; then
-      docker_image_exists "sandbox-manager:${manager_ver}" || die "Missing local image sandbox-manager:${manager_ver} (run: ./sbx images build --only manager)"
+    if [ "$only" = "asbcp" ]; then
+      docker_image_exists "agentsmith-sandbox-control-plane:${asbcp_ver}" || die "Missing local image agentsmith-sandbox-control-plane:${asbcp_ver} (run: ./sbx images build --only asbcp)"
     fi
-    if [ -z "$only" ] || [ "$only" = "runner" ]; then
+    if [ "$only" = "runner" ]; then
       docker_image_exists "sandbox-runner:${runner_ver}" || die "Missing local image sandbox-runner:${runner_ver} (run: ./sbx images build --only runner)"
     fi
   fi
 
-  local dest_manager="docker://${registry}/${project}/sandbox-manager:${manager_ver}"
+  local dest_asbcp="docker://${registry}/${project}/agentsmith-sandbox-control-plane:${asbcp_ver}"
   local dest_runner="docker://${registry}/${project}/sandbox-runner:${runner_ver}"
 
   log_info "Pushing images to harbor: ${registry}/${project}"
@@ -177,16 +182,17 @@ images_push_harbor() {
       no_proxy_skopeo="true"
     fi
 
-    if [ -z "$only" ] || [ "$only" = "manager" ]; then
-      docker_build_archive "${root}/manager-service" "${root}/manager-service/Dockerfile" "sandbox-manager:${manager_ver}" "$platform" "${tmpdir}/sandbox-manager.tar" "${args_build[@]}"
+    if [ "$only" = "asbcp" ]; then
+      docker_build_archive "${root}/manager-service" "${root}/manager-service/Dockerfile" "agentsmith-sandbox-control-plane:${asbcp_ver}" "$platform" "${tmpdir}/agentsmith-sandbox-control-plane.tar" --build-arg "VERSION=${asbcp_ver}" "${args_build[@]}"
       if [ "$no_proxy_skopeo" = "true" ]; then
-        SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-manager.tar" "$dest_manager" --dest-creds "${username}:${password}"
+        SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "docker-archive:${tmpdir}/agentsmith-sandbox-control-plane.tar" "$dest_asbcp" --dest-creds "${username}:${password}"
       else
-        skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-manager.tar" "$dest_manager" --dest-creds "${username}:${password}"
+        skopeo_copy "$root" "docker-archive:${tmpdir}/agentsmith-sandbox-control-plane.tar" "$dest_asbcp" --dest-creds "${username}:${password}"
       fi
     fi
 
-    if [ -z "$only" ] || [ "$only" = "runner" ]; then
+    if [ "$only" = "runner" ]; then
+      # Runner is a non-active fixture image; push it only when explicitly requested.
       docker_build_archive "${root}/images/runner" "${root}/images/runner/Dockerfile" "sandbox-runner:${runner_ver}" "$platform" "${tmpdir}/sandbox-runner.tar" "${args_build[@]}"
       if [ "$no_proxy_skopeo" = "true" ]; then
         SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "docker-archive:${tmpdir}/sandbox-runner.tar" "$dest_runner" --dest-creds "${username}:${password}"
@@ -196,22 +202,25 @@ images_push_harbor() {
     fi
   else
     if [ "$(proxy_effective_enabled "$proxy_mode")" = "false" ]; then
-      if [ -z "$only" ] || [ "$only" = "manager" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_manager" "$dest_manager" --dest-creds "${username}:${password}"; fi
-      if [ -z "$only" ] || [ "$only" = "runner" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
+      if [ "$only" = "asbcp" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_asbcp" "$dest_asbcp" --dest-creds "${username}:${password}"; fi
+      if [ "$only" = "runner" ]; then SBX_SKOPEO_NO_PROXY=true skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
     else
-      if [ -z "$only" ] || [ "$only" = "manager" ]; then skopeo_copy "$root" "$src_manager" "$dest_manager" --dest-creds "${username}:${password}"; fi
-      if [ -z "$only" ] || [ "$only" = "runner" ]; then skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
+      if [ "$only" = "asbcp" ]; then skopeo_copy "$root" "$src_asbcp" "$dest_asbcp" --dest-creds "${username}:${password}"; fi
+      if [ "$only" = "runner" ]; then skopeo_copy "$root" "$src_runner" "$dest_runner" --dest-creds "${username}:${password}"; fi
     fi
   fi
 
   log_info "Verifying remote content (layer digests)..."
   local jqbin
   jqbin="$(tools_resolve "$root" jq)" || die "jq not found (run: ./sbx tools fetch or install jq)"
-  for pair in \
-    "sandbox-manager:${manager_ver} ${dest_manager}" \
-    "sandbox-runner:${runner_ver} ${dest_runner}"; do
-    if [ "$only" = "manager" ] && [[ "$pair" != sandbox-manager:* ]]; then continue; fi
-    if [ "$only" = "runner" ] && [[ "$pair" != sandbox-runner:* ]]; then continue; fi
+  local pairs=()
+  if [ "$only" = "asbcp" ]; then
+    pairs+=("agentsmith-sandbox-control-plane:${asbcp_ver} ${dest_asbcp}")
+  fi
+  if [ "$only" = "runner" ]; then
+    pairs+=("sandbox-runner:${runner_ver} ${dest_runner}")
+  fi
+  for pair in "${pairs[@]}"; do
     local ref="${pair%% *}"
     local dest="${pair#* }"
     local local_layers remote_layers

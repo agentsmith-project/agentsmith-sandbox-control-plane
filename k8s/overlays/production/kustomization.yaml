@@ -4,12 +4,9 @@ resources:
 - ../../base
 - access/ingress.yaml
 images:
-- name: sandbox-manager
-  newName: localhost:5001/sandbox-manager
+- name: agentsmith-sandbox-control-plane
+  newName: localhost:5001/agentsmith-sandbox-control-plane
   newTag: 2.0.3
-- name: sandbox-runner
-  newName: localhost:5001/sandbox-runner
-  newTag: 1.0.0
 patches:
 - path: patches/afscp-config.yaml
 - path: patches/manager-replicas.yaml

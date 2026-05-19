@@ -10,21 +10,30 @@ ARG https_proxy
 ARG NO_PROXY
 ARG no_proxy
 
-# 配置 Go 代理到国内源
-ENV GOPROXY=https://goproxy.cn,direct
-ENV GOSUMDB=sum.golang.google.cn
+ARG VERSION=dev
 
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN VERSION="$(cat VERSION 2>/dev/null || echo dev)" && \
-    CGO_ENABLED=0 GOOS=linux go build \
-      -ldflags "-X github.com/sandbox/manager/internal/app.version=${VERSION}" \
-      -o manager ./cmd/manager
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -ldflags "-X github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/app.version=${VERSION}" \
+      -o asbcp ./cmd/asbcp
 
 FROM ${RUNTIME_BASE_IMAGE}
+
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.title="AgentSmith Sandbox Control Plane" \
+      org.opencontainers.image.description="ASBCP sandbox workload lifecycle service" \
+      org.opencontainers.image.source="https://github.com/agentsmith-project/agentsmith-sandbox-control-plane" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # 代理配置（可选，用于构建时，不会保留在最终镜像中）
 ARG HTTP_PROXY
@@ -40,19 +49,13 @@ RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="$
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# 配置清华 apt 源
-RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list
-
 WORKDIR /app
-COPY --from=builder /build/manager .
+COPY --from=builder /build/asbcp .
 
 # 创建非 root 用户（数字 UID）
-RUN groupadd -g 10001 manager && useradd -u 10001 -g 10001 -s /bin/false manager && \
-    chown -R manager:manager /app
+RUN groupadd -g 10001 asbcp && useradd -u 10001 -g 10001 -s /bin/false asbcp && \
+    chown -R asbcp:asbcp /app
 
 USER 10001
 EXPOSE 8080
-CMD ["./manager"]
+CMD ["./asbcp"]

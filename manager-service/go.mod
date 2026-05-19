@@ -1,4 +1,4 @@
-module github.com/sandbox/manager
+module github.com/agentsmith-project/agentsmith-sandbox-control-plane
 
 go 1.25.6
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# E2E Test Suite for Sandbox Manager
+# E2E Test Suite for ASBCP
 # This script performs comprehensive end-to-end testing
 
 # Don't exit on error - we want to run all tests
@@ -13,10 +13,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Test configuration
-MANAGER_BIN="${MANAGER_BIN:-./manager}"
+MANAGER_BIN="${MANAGER_BIN:-./asbcp}"
 MANAGER_PORT="${MANAGER_PORT:-8080}"
 SERVICE_KEY="${SERVICE_KEY:-test-e2e-key-12345}"
-CONFIG_FILE="${CONFIG_FILE:-/tmp/e2e-manager-config.yaml}"
+CONFIG_FILE="${CONFIG_FILE:-/tmp/e2e-asbcp-config.yaml}"
 NAMESPACE="${NAMESPACE:-sandbox-workloads}"
 LOG_FILE="${LOG_FILE:-/tmp/e2e-test.log}"
 MANAGER_PID=""
@@ -101,7 +101,7 @@ assert_http_status() {
 
 # Start manager
 start_manager() {
-    log_info "Starting manager service..."
+    log_info "Starting ASBCP service..."
 
     # Create config file for the current manager schema
     cat > "$CONFIG_FILE" <<EOF
@@ -127,7 +127,7 @@ kubernetes:
 EOF
 
     # Start manager in background
-    CONFIG_PATH="$CONFIG_FILE" SERVICE_KEYS="$SERVICE_KEY" nohup "$MANAGER_BIN" > "$LOG_FILE" 2>&1 &
+    ASBCP_CONFIG_PATH="$CONFIG_FILE" ASBCP_SERVICE_KEYS="$SERVICE_KEY" nohup "$MANAGER_BIN" > "$LOG_FILE" 2>&1 &
     MANAGER_PID=$!
 
     # Wait for manager to be ready
@@ -135,21 +135,21 @@ EOF
     local waited=0
     while [ $waited -lt $max_wait ]; do
         if curl -s "http://localhost:$MANAGER_PORT/healthz" > /dev/null 2>&1; then
-            log_info "Manager started (PID: $MANAGER_PID)"
+            log_info "ASBCP started (PID: $MANAGER_PID)"
             return 0
         fi
         sleep 1
         waited=$((waited + 1))
     done
 
-    log_error "Manager failed to start within ${max_wait}s"
+    log_error "ASBCP failed to start within ${max_wait}s"
     return 1
 }
 
 # Stop manager
 stop_manager() {
     if [ -n "$MANAGER_PID" ]; then
-        log_info "Stopping manager (PID: $MANAGER_PID)..."
+        log_info "Stopping ASBCP (PID: $MANAGER_PID)..."
         kill "$MANAGER_PID" 2>/dev/null || true
         wait "$MANAGER_PID" 2>/dev/null || true
         MANAGER_PID=""
@@ -536,7 +536,7 @@ test_30_create_and_exec_pod() {
 # ============================================================
 
 main() {
-    print_header "Sandbox Manager E2E Test Suite"
+    print_header "ASBCP E2E Test Suite"
 
     # Setup
     trap cleanup EXIT
@@ -549,8 +549,8 @@ main() {
     log_info "Checking prerequisites..."
 
     if [ ! -f "$MANAGER_BIN" ]; then
-        log_error "Manager binary not found: $MANAGER_BIN"
-        log_info "Please build with: go build -o $MANAGER_BIN ./cmd/manager/main.go"
+        log_error "ASBCP binary not found: $MANAGER_BIN"
+        log_info "Please build with: go build -o $MANAGER_BIN ./cmd/asbcp"
         exit 1
     fi
 

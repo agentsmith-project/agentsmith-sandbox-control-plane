@@ -4,9 +4,14 @@
 
 # Default configuration
 MANAGER_URL="${MANAGER_URL:-http://localhost:8080}"
+SERVICE_KEY="${SERVICE_KEY:-test-key-123}"
 SANDBOX_ID="${SANDBOX_ID:-test-smoke-$(date +%s)}"
-SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-sandbox}"
-# Pod name from create response (Manager uses sbx-<hash>; load from file for cross-script use)
+SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-sandbox-workloads}"
+WORKSPACE_ID="${WORKSPACE_ID:-ws-1}"
+PROJECT_ID="${PROJECT_ID:-proj-1}"
+WORKSPACE_BINDING_ID="${WORKSPACE_BINDING_ID:-wmb_demo}"
+AFSCP_NAMESPACE_ID="${AFSCP_NAMESPACE_ID:-ns_demo}"
+# Pod name from create response; load from file for cross-script use.
 if [ -z "${SANDBOX_POD_NAME:-}" ] && [ -f /tmp/smoke-test-pod-name.txt ]; then
     SANDBOX_POD_NAME=$(cat /tmp/smoke-test-pod-name.txt)
     export SANDBOX_POD_NAME
@@ -15,20 +20,38 @@ fi
 MANAGER_TIMEOUT="${MANAGER_TIMEOUT:-10}"
 
 # Test scenario helpers
-create_sandbox() {
+ensure_workspace_binding() {
     local url=${1:-${MANAGER_URL}}
-    local sandbox_id=${2:-${SANDBOX_ID}}
+    local binding_id=${2:-${WORKSPACE_BINDING_ID}}
 
     local response=$(curl -s --max-time "${MANAGER_TIMEOUT}" -w "\n%{http_code}" -X PUT \
-        "${url}/v1/sandboxes/${sandbox_id}" \
+        "${url}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workspace-bindings/${binding_id}" \
+        -H "X-Service-Key: ${SERVICE_KEY}" \
         -H "Content-Type: application/json" \
-        -d '{"ttlSeconds": 300}')
+        -d "{\"namespace_id\":\"${AFSCP_NAMESPACE_ID}\",\"mount_binding_id\":\"${binding_id}\"}")
 
     local status=$(echo "${response}" | tail -n1)
     local body=$(echo "${response}" | head -n-1)
 
     echo "${body}"
-    return $( [ "${status}" -eq 200 ] )
+    [ "${status}" -eq 200 ]
+}
+
+create_sandbox() {
+    local url=${1:-${MANAGER_URL}}
+    local sandbox_id=${2:-${SANDBOX_ID}}
+
+    local response=$(curl -s --max-time "${MANAGER_TIMEOUT}" -w "\n%{http_code}" -X PUT \
+        "${url}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${sandbox_id}" \
+        -H "X-Service-Key: ${SERVICE_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"image\":\"${WORKLOAD_IMAGE:-ubuntu:22.04}\",\"workspace_binding_id\":\"${WORKSPACE_BINDING_ID}\",\"idle_timeout_sec\":300,\"max_lifetime_sec\":3600}")
+
+    local status=$(echo "${response}" | tail -n1)
+    local body=$(echo "${response}" | head -n-1)
+
+    echo "${body}"
+    [ "${status}" -eq 200 ] || [ "${status}" -eq 201 ]
 }
 
 delete_sandbox() {
@@ -36,10 +59,11 @@ delete_sandbox() {
     local sandbox_id=${2:-${SANDBOX_ID}}
 
     local response=$(curl -s --max-time "${MANAGER_TIMEOUT}" -w "\n%{http_code}" -X DELETE \
-        "${url}/v1/sandboxes/${sandbox_id}")
+        "${url}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${sandbox_id}" \
+        -H "X-Service-Key: ${SERVICE_KEY}")
 
     local status=$(echo "${response}" | tail -n1)
-    return $( [ "${status}" -eq 204 ] || [ "${status}" -eq 404 ] )
+    [ "${status}" -eq 200 ] || [ "${status}" -eq 404 ]
 }
 
 touch_session() {
@@ -47,11 +71,12 @@ touch_session() {
     local sandbox_id=${2:-${SANDBOX_ID}}
 
     local response=$(curl -s --max-time "${MANAGER_TIMEOUT}" -w "\n%{http_code}" -X POST \
-        "${url}/v1/sandboxes/${sandbox_id}/touch" \
+        "${url}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${sandbox_id}/keepalive" \
+        -H "X-Service-Key: ${SERVICE_KEY}" \
         -H "Content-Type: application/json")
 
     local status=$(echo "${response}" | tail -n1)
-    return $( [ "${status}" -eq 200 ] )
+    [ "${status}" -eq 200 ]
 }
 
 exec_command() {
@@ -60,7 +85,8 @@ exec_command() {
     local cmd=${3:-'["echo", "hello"]'}
 
     curl -s -N -X POST \
-        "${url}/v1/sandboxes/${sandbox_id}/exec" \
+        "${url}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${sandbox_id}/exec" \
+        -H "X-Service-Key: ${SERVICE_KEY}" \
         -H "Content-Type: application/json" \
         -d "{\"cmd\": ${cmd}}" \
         --max-time 30
@@ -70,7 +96,7 @@ check_pod_ready() {
     local sandbox_id=${1:-${SANDBOX_ID}}
     local namespace=${2:-${SANDBOX_NAMESPACE}}
 
-    local pod_name="${SANDBOX_POD_NAME:-sandbox-${sandbox_id}}"
+    local pod_name="${SANDBOX_POD_NAME:-workload-${sandbox_id}}"
 
     kubectl get pod "${pod_name}" -n "${namespace}" &> /dev/null
     if [ $? -ne 0 ]; then
@@ -111,6 +137,7 @@ cleanup_sandbox() {
 
 # Export functions
 export -f create_sandbox
+export -f ensure_workspace_binding
 export -f delete_sandbox
 export -f touch_session
 export -f exec_command

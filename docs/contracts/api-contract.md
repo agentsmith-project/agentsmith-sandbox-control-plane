@@ -1,0 +1,53 @@
+# ASBCP API Contract
+
+Contract version: `v1`
+
+ASBCP exposes lifecycle APIs for workspace bindings and workloads. API paths are scoped by AgentSmith workspace and project identifiers, but ASBCP does not authorize end users. AgentSmith performs product authorization before calling ASBCP.
+
+## Health
+
+| Method | Path | Auth | Response |
+| --- | --- | --- | --- |
+| `GET` | `/healthz` | No | Liveness status |
+| `GET` | `/readyz` | No | Readiness status |
+| `GET` | `/metrics` | No | Prometheus metrics |
+
+## Workspace Binding
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `PUT` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Ensure ASBCP resources from an AFSCP mount plan |
+| `GET` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Read sanitized binding status |
+| `DELETE` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Delete ASBCP-managed binding resources |
+
+Create request fields:
+
+- `namespace_id`: AgentSmith namespace or tenant context used by AFSCP.
+- `mount_binding_id`: AFSCP workload mount binding identifier.
+
+ASBCP must not accept caller-provided storage endpoints, raw credentials, or pod mount paths.
+
+## Workload
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `PUT` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Ensure workload Pod |
+| `GET` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Read workload status |
+| `POST` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}/keepalive` | Extend workload lifetime and AFSCP lifecycle |
+| `POST` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}/exec` | Execute command in the workload Pod |
+| `DELETE` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Release AFSCP lifecycle and delete workload Pod |
+
+Workload create request fields:
+
+- `workspace_binding_id`: ASBCP binding to mount.
+- `image`: Workload container image selected by AgentSmith.
+- `command`: Optional command selected by AgentSmith.
+- `env`: Optional environment variables selected by AgentSmith.
+- `resources`: Optional resource requests and limits.
+- `timeouts`: Optional lifecycle timeouts.
+
+ASBCP does not choose the runner image and does not own AgentSmith task policy.
+
+## Compatibility
+
+Breaking changes require a new contract version and release notes. Tag releases must include the API contract version in the GitHub Release body.

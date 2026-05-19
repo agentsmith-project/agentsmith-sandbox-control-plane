@@ -34,8 +34,8 @@ func TestValidateServerConfig(t *testing.T) {
 		RequestIDHeader: "X-Request-Id",
 		Timeouts:        ServerTimeouts{ReadHeader: 5 * time.Second, Read: 30 * time.Second, Write: 60 * time.Second, Idle: 120 * time.Second},
 		MaxHeaderBytes:  1 << 20,
-		Metrics:        MetricsConfig{Path: "/metrics"},
-		Debug:          DebugConfig{ConfigPath: "/debug/config"},
+		Metrics:         MetricsConfig{Path: "/metrics"},
+		Debug:           DebugConfig{ConfigPath: "/debug/config"},
 	}
 	tests := []struct {
 		name    string

@@ -23,7 +23,7 @@ func NewServiceKeyValidator(keys []string) (*ServiceKeyValidator, error) {
 	}
 
 	if len(validKeys) == 0 {
-		return nil, fmt.Errorf("SERVICE_KEYS cannot be empty: service requires authentication")
+		return nil, fmt.Errorf("ASBCP_SERVICE_KEYS cannot be empty: service requires authentication")
 	}
 
 	return &ServiceKeyValidator{

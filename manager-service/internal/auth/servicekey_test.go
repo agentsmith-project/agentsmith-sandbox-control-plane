@@ -10,13 +10,13 @@ import (
 func TestNewServiceKeyValidator_EmptyKeys_ReturnsError(t *testing.T) {
 	_, err := NewServiceKeyValidator([]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "SERVICE_KEYS cannot be empty")
+	assert.Contains(t, err.Error(), "ASBCP_SERVICE_KEYS cannot be empty")
 }
 
 func TestNewServiceKeyValidator_WhitespaceOnlyKeys_ReturnsError(t *testing.T) {
 	_, err := NewServiceKeyValidator([]string{"  ", "\t", "  "})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "SERVICE_KEYS cannot be empty")
+	assert.Contains(t, err.Error(), "ASBCP_SERVICE_KEYS cannot be empty")
 }
 
 func TestNewServiceKeyValidator_ValidKeys_ReturnsValidator(t *testing.T) {

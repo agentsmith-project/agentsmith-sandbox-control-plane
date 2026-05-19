@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/sandbox/manager/internal/workload"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workload"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

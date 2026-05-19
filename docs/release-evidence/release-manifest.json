@@ -1,0 +1,69 @@
+{
+  "project": "AgentSmith Sandbox Control Plane",
+  "short_name": "ASBCP",
+  "api_contract_version": "v1",
+  "release_gate": "scripts/verify-release.sh",
+  "image": {
+    "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",
+    "digest_required": true,
+    "latest_is_release_dependency": false
+  },
+  "required_evidence": [
+    {
+      "id": "governance_guard",
+      "description": "Governed release surface passes ASBCP governance guard.",
+      "status": "added"
+    },
+    {
+      "id": "workflow_hardening",
+      "description": "Release workflow calls the authoritative gate before publishing.",
+      "status": "added"
+    },
+    {
+      "id": "health_ready_smoke",
+      "description": "Release fixture verifies healthz and readyz handlers plus authenticated v1 API health path.",
+      "status": "added"
+    },
+    {
+      "id": "workspace_binding_fixture",
+      "description": "Fixture proves AFSCP mount plan consumption for workspace binding.",
+      "status": "added"
+    },
+    {
+      "id": "workload_lifecycle_smoke",
+      "description": "Fake-fixture smoke verifies create, keepalive, exec route/error contract, AFSCP release, and delete lifecycle paths.",
+      "status": "added"
+    },
+    {
+      "id": "kubernetes_render",
+      "description": "Kubernetes manifests render ASBCP canonical identity.",
+      "status": "added"
+    },
+    {
+      "id": "dockerfile_contract",
+      "description": "Dockerfile declares ASBCP binary, OCI version metadata, and non-root runtime contract.",
+      "status": "added"
+    },
+    {
+      "id": "docker_image_build",
+      "description": "Release gate builds the ASBCP service image with root VERSION metadata.",
+      "status": "added"
+    },
+    {
+      "id": "digest_pull",
+      "description": "GHCR digest form can be pulled after publication.",
+      "status": "workflow-gated",
+      "rationale": "The tag release workflow verifies docker pull of the published tag@digest before creating release notes."
+    },
+    {
+      "id": "raw_storage_exclusion",
+      "description": "ASBCP contract excludes raw storage credentials.",
+      "status": "added"
+    },
+    {
+      "id": "runner_artifact_classification",
+      "description": "Runner assets are not part of the active ASBCP service image release.",
+      "status": "added"
+    }
+  ]
+}

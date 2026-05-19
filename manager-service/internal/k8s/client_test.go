@@ -183,7 +183,7 @@ func (f *fakeK8sForClient) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(&v1.PodList{
 			TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"},
-			Items:   []v1.Pod{},
+			Items:    []v1.Pod{},
 		})
 		return
 	}
@@ -202,7 +202,7 @@ func (f *fakeK8sForClient) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(&v1.Namespace{
-			TypeMeta: metav1.TypeMeta{Kind: "Namespace", APIVersion: "v1"},
+			TypeMeta:   metav1.TypeMeta{Kind: "Namespace", APIVersion: "v1"},
 			ObjectMeta: metav1.ObjectMeta{Name: "test"},
 		})
 		return

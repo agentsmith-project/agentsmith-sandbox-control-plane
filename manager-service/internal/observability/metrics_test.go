@@ -597,4 +597,3 @@ func TestRequestIDMiddleware(t *testing.T) {
 		})
 	}
 }
-

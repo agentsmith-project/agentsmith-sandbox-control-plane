@@ -1,0 +1,8 @@
+AgentSmith Sandbox Control Plane (ASBCP)
+Copyright 2026 AgentSmith contributors
+
+This product includes software developed by AgentSmith contributors.
+
+ASBCP is released as an independent sandbox workload lifecycle service.
+It consumes AFSCP workload mount plans but does not include or relicense
+AFSCP business logic, storage policy, filesystem truth, or recovery logic.

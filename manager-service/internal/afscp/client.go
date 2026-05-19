@@ -92,7 +92,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if token == "" {
 		return nil, fmt.Errorf("afscp orchestrator token is required")
 	}
-	callerService := firstNonEmpty(config.CallerService, "sandbox-manager")
+	callerService := firstNonEmpty(config.CallerService, "agentsmith-sandbox-control-plane")
 	actorType := firstNonEmpty(config.ActorType, "system")
 	actorID := firstNonEmpty(config.ActorID, callerService)
 	httpClient := config.HTTPClient

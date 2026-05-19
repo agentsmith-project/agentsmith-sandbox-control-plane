@@ -1,106 +1,92 @@
-# AgentSmith Sandbox Manager
+# AgentSmith Sandbox Control Plane (ASBCP)
 
-Kubernetes workload manager for AgentSmith internal agents.
+AgentSmith Sandbox Control Plane (ASBCP) is the sandbox workload lifecycle service for AgentSmith internal agent tasks. It is an independently released service with its own API contract, release gate, runbooks, risk ledger, and image publication path.
 
-## Overview
+ASBCP is not the AgentSmith product management surface and is not an AFSCP submodule. AgentSmith chooses projects, tasks, authorization, and runner images. AFSCP owns filesystem and storage truth. ASBCP consumes an AFSCP workload mount plan and manages Kubernetes workload lifecycle resources.
 
-Sandbox Manager owns the sandbox-side workload lifecycle:
+## Scope
 
-- workspace binding materialization from an AFSCP workload mount plan
-- workload pod lifecycle
-- K8s PV/PVC and pod mount resources
-- exec, keepalive, release, and reclaim APIs
+ASBCP owns:
 
-AgentSmith owns workspace/project selection and task orchestration. For storage access, AgentSmith submits only `namespace_id` and `mount_binding_id`; sandbox calls AFSCP as the sandbox orchestrator, reads the current mount plan, and applies that plan to Kubernetes resources.
+- Workspace binding materialization from an AFSCP workload mount plan.
+- Kubernetes PV/PVC and workload Pod lifecycle.
+- Workload create, keepalive, exec, release, delete, health, readiness, and metrics APIs.
+- ASBCP API contracts, release evidence, operational runbooks, and release workflows.
 
-## Product Truth
+ASBCP does not own:
 
-- AFSCP is the source of truth for payload location, mount path, read-only mode, CSI secret reference, and security policy.
-- Sandbox does not accept caller-supplied storage backend settings or caller-supplied pod mount paths.
-- Workload pods mount the binding PVC at the AFSCP plan `mount_path`.
-- The container working directory is `<mount_path>/workspace`.
-- PV CSI `subdir` carries the AFSCP `payload_volume_subdir`; workload `VolumeMount.SubPath` is not part of the caller contract.
+- AgentSmith product governance, UI, audit, AI resource policy, or task authorization.
+- AFSCP filesystem truth, storage credentials, snapshot/version semantics, or recovery policy.
+- Mutable image consumption by AgentSmith. AgentSmith must consume an immutable ASBCP image digest.
 
-## Architecture
+## Canonical Identifiers
 
-```text
-AgentSmith
-  | namespace_id + mount_binding_id
-  v
-Sandbox Manager
-  | GET AFSCP orchestrator mount plan
-  v
-Kubernetes
-  | PV/PVC from plan, workload Pod from binding id
-  v
-Workload container
-  | TASK_HOME=<mount_path>
-  | WORKSPACE_PATH=<mount_path>/workspace
-```
+| Layer | Canonical value |
+| --- | --- |
+| Full name | AgentSmith Sandbox Control Plane |
+| Short name | ASBCP |
+| Repository | `agentsmith-project/agentsmith-sandbox-control-plane` |
+| Image | `ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:<version>@sha256:<digest>` |
+| Binary | `asbcp` |
+| Kubernetes app name | `agentsmith-sandbox-control-plane` |
+| Kubernetes component label | `asbcp` |
+| AFSCP caller service | `agentsmith-sandbox-control-plane` |
+| AgentSmith runtime env | `ASBCP_IMAGE`, `ASBCP_INTERNAL_BASE_URL`, `ASBCP_SERVICE_KEY` |
+| ASBCP service env | `ASBCP_CONFIG_PATH`, `ASBCP_SERVICE_KEYS`, `ASBCP_WORKLOAD_NAMESPACE`, `ASBCP_AFSCP_INTERNAL_BASE_URL`, `ASBCP_AFSCP_ORCHESTRATOR_TOKEN`, `ASBCP_AFSCP_CALLER_SERVICE`, `ASBCP_AFSCP_ACTOR_ID` |
 
-See also:
+## API Surface
 
-- [docs/AFSCP_WORKLOAD_MOUNT_MODEL.md](docs/AFSCP_WORKLOAD_MOUNT_MODEL.md)
-- [docs/contracts/agentsmith-integration-contract.md](docs/contracts/agentsmith-integration-contract.md)
-- [docs/api-reference.md](docs/api-reference.md)
-- [docs/runbook.md](docs/runbook.md)
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Create or ensure a workspace binding from an AFSCP plan |
-| `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Get sanitized workspace binding status |
-| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workspace-bindings/{bindingId}` | Delete sandbox-managed PV/PVC resources |
-| `PUT` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Create or ensure workload pod |
-| `GET` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Get workload pod status |
-| `DELETE` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}` | Delete workload pod and close AFSCP mount lifecycle |
-| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/keepalive` | Heartbeat AFSCP and extend workload expiry |
-| `POST` | `/v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}/exec` | Execute command in workload pod |
+| Method | Path | Purpose |
+| --- | --- | --- |
 | `GET` | `/healthz` | Liveness probe |
 | `GET` | `/readyz` | Readiness probe |
 | `GET` | `/metrics` | Prometheus metrics |
+| `PUT` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Ensure a workspace binding from an AFSCP plan |
+| `GET` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Read sanitized binding status |
+| `DELETE` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workspace-bindings/{binding_id}` | Delete ASBCP-managed binding resources |
+| `PUT` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Ensure workload Pod |
+| `GET` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Read workload status |
+| `POST` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}/keepalive` | Extend workload lifetime and AFSCP lifecycle |
+| `POST` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}/exec` | Execute a command in the workload Pod |
+| `DELETE` | `/v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_id}` | Release AFSCP lifecycle and delete workload Pod |
 
-## Authentication
+## Quick Verification
 
-All `/v1/` routes require a valid `X-Service-Key` header. Health, readiness, and metrics endpoints are unauthenticated.
-
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SERVICE_KEYS` | *(required)* | Comma-separated valid service keys |
-| `K8S_NAMESPACE` | `sandbox-workloads` | Namespace for workspace bindings and workload pods |
-| `AFSCP_INTERNAL_BASE_URL` | *(required)* | AFSCP internal API base URL |
-| `AFSCP_ORCHESTRATOR_TOKEN` | *(required)* | Sandbox orchestrator token for AFSCP |
-| `AFSCP_CALLER_SERVICE` | `sandbox-orchestrator` | Caller service header sent to AFSCP |
-| `AFSCP_ACTOR_TYPE` | `system` | Actor type for AFSCP lifecycle calls |
-| `AFSCP_ACTOR_ID` | `sandbox-manager` | Actor id for AFSCP lifecycle calls |
-| `JUICEFS_CSI_DRIVER` | `csi.juicefs.com` | CSI driver name used for plan materialization |
-| `JUICEFS_STORAGE_CAPACITY` | `1Pi` | Requested PVC capacity for each binding |
-| `JUICEFS_STORAGE_CLASS_NAME` | *(unset)* | Optional storage class for binding PV/PVC |
-| `CONFIG_PATH` | `/etc/sandbox-manager/manager-config.yaml` | YAML config path |
-
-## Quick Start
+PR and main CI use quick governance checks. They prove the public governance surface and workflow hardening are intact, but they do not declare release readiness.
 
 ```bash
-cd manager-service
-go build -o bin/manager ./cmd/manager/
-
-export SERVICE_KEYS="my-secret-key"
-export K8S_NAMESPACE="sandbox-workloads"
-export AFSCP_INTERNAL_BASE_URL="http://localhost:20000"
-export AFSCP_ORCHESTRATOR_TOKEN="sandbox-orchestrator-token"
-
-./bin/manager
+bash scripts/verify-release.sh --quick
 ```
 
-## Release Readiness
+The only authoritative ASBCP release gate is:
 
-Before calling the service release-ready, verify:
+```bash
+bash scripts/verify-release.sh
+```
 
-1. Workspace binding ensure fetches the AFSCP plan and creates/reuses PV/PVC.
-2. Workload create accepts `workspace_binding_id` only for mount selection.
-3. Pod mount path, read-only mode, working directory, and runtime env come from the plan.
-4. Keepalive and delete call the AFSCP workload mount lifecycle endpoints; delete confirms release/status operations and runs the storage flush barrier before pod removal.
-5. Docs, tests, and runbooks describe this same AFSCP plan consumer model.
+Tag releases must run that script before building or publishing a GHCR image.
+
+## AgentSmith Consumption
+
+AgentSmith consumes ASBCP as an external immutable image dependency. The consumer flow is:
+
+```text
+ASBCP release image digest
+  -> AgentSmith ASBCP image lock
+  -> generated site env
+  -> Kubernetes render
+  -> rollout and focused consumer smoke
+```
+
+AgentSmith must not build ASBCP source as part of its release lane and must not use mutable tags as release dependencies.
+
+## Documentation
+
+- [Developer Guide](docs/DEVELOPER_GUIDE.md)
+- [Development Governance](docs/DEVELOPMENT_GOVERNANCE.md)
+- [Release Gates](docs/RELEASE_GATES.md)
+- [Readiness Evidence](docs/READINESS_EVIDENCE.md)
+- [Risk Register](docs/RISK_REGISTER.md)
+- [API Contract](docs/contracts/api-contract.md)
+- [AFSCP Mount Plan Contract](docs/contracts/afscp-mount-plan-contract.md)
+- [Release Runbook](docs/runbooks/release.md)

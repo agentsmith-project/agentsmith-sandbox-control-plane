@@ -15,12 +15,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sandbox/manager/internal/auth"
-	"github.com/sandbox/manager/internal/k8s"
-	"github.com/sandbox/manager/internal/observability"
-	"github.com/sandbox/manager/internal/ratelimit"
-	"github.com/sandbox/manager/internal/workload"
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/auth"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/ratelimit"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workload"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -211,6 +211,10 @@ func (f *statefulPodFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(testBindingPVC("ws", "p", "wmb_demo"))
 		return
 	}
+	if r.Method == http.MethodGet && strings.Contains(path, "/persistentvolumes/") {
+		_ = json.NewEncoder(w).Encode(testBindingPV("ws", "p", "wmb_demo"))
+		return
+	}
 
 	// Expect paths like /api/v1/namespaces/test-ns/pods or .../pods/<name>
 	idx := strings.Index(path, "/pods")
@@ -315,6 +319,7 @@ func (f *statefulPodFake) makeServer(t *testing.T) *httptest.Server {
 }
 
 func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolumeClaim {
+	pvName := testBindingPVName(workspaceID, projectID, bindingID)
 	return &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
@@ -331,7 +336,34 @@ func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolu
 				"mbos.io/jvs-control-outside-payload": "true",
 			},
 		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			VolumeName: pvName,
+		},
+		Status: v1.PersistentVolumeClaimStatus{
+			Phase: v1.ClaimBound,
+		},
 	}
+}
+
+func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolume {
+	return &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testBindingPVName(workspaceID, projectID, bindingID),
+		},
+		Spec: v1.PersistentVolumeSpec{
+			MountOptions: []string{"subdir=afscp/ns_demo/repos/repo_demo/payload"},
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver:       "csi.juicefs.com",
+					VolumeHandle: "juicefs-ws-p-wmb-demo",
+				},
+			},
+		},
+	}
+}
+
+func testBindingPVName(workspaceID, projectID, bindingID string) string {
+	return "juicefs-pv-" + workspaceID + "-" + projectID + "-" + strings.ReplaceAll(bindingID, "_", "-")
 }
 
 // ---- Auth error codes -------------------------------------------------------

@@ -1,20 +1,20 @@
 //go:build e2e
 
-// Package e2e contains end-to-end tests for the Sandbox Manager.
+// Package e2e contains end-to-end tests for ASBCP.
 //
 // Prerequisites:
 //
 //	kubectl-accessible Kubernetes cluster (kind or real)
-//	Manager binary built at ../bin/manager  (run `make build` first)
+//	ASBCP binary built at ../bin/asbcp  (run `make build` first)
 //
 // Environment variables (all optional, see defaults below):
 //
-//	E2E_MANAGER_URL        URL of a pre-running manager (skip auto-start if set)
-//	E2E_MANAGER_BIN        Path to manager binary             (default: ../bin/manager)
+//	E2E_MANAGER_URL        URL of a pre-running ASBCP (skip auto-start if set)
+//	E2E_MANAGER_BIN        Path to ASBCP binary               (default: ../bin/asbcp)
 //	E2E_SERVICE_KEY        Service key for auth               (default: e2e-test-key)
 //	E2E_NAMESPACE          Workload K8s namespace             (default: sandbox-workloads)
 //	E2E_AFSCP_INTERNAL_BASE_URL AFSCP test double or real internal API base URL
-//	E2E_AFSCP_ORCHESTRATOR_TOKEN Sandbox orchestrator token   (default: e2e-afscp-token)
+//	E2E_AFSCP_ORCHESTRATOR_TOKEN ASBCP AFSCP token            (default: e2e-afscp-token)
 //	E2E_AFSCP_NAMESPACE_ID AFSCP namespace id                 (default: ns_e2e)
 //	E2E_AFSCP_SECRET_NAMESPACE K8s namespace for plan secret refs (default: afscp-mounts)
 //	E2E_STORAGE_CAPACITY   Binding storage capacity           (default: 1Pi)
@@ -102,7 +102,7 @@ func TestMain(m *testing.M) {
 		StorageCapacity:  envOr("E2E_STORAGE_CAPACITY", "1Pi"),
 		StorageClassName: envOr("E2E_STORAGE_CLASS", ""),
 		Image:            envOr("E2E_IMAGE", "ubuntu:22.04"),
-		ManagerBin:       absPath(envOr("E2E_MANAGER_BIN", "../bin/manager")),
+		ManagerBin:       absPath(envOr("E2E_MANAGER_BIN", "../bin/asbcp")),
 		JuiceFSEnabled:   os.Getenv("E2E_JUICEFS") == "true",
 	}
 	suite = c
@@ -123,16 +123,16 @@ func TestMain(m *testing.M) {
 			startFakeAFSCP(c)
 		}
 		if _, err := os.Stat(c.ManagerBin); err != nil {
-			log.Fatalf("E2E: manager binary not found at %s\n  hint: run `make build` first", c.ManagerBin)
+			log.Fatalf("E2E: ASBCP binary not found at %s\n  hint: run `make build` first", c.ManagerBin)
 		}
 		url, err := startManager(c)
 		if err != nil {
 			c.stopManager()
-			log.Fatalf("E2E: failed to start manager: %v", err)
+			log.Fatalf("E2E: failed to start ASBCP: %v", err)
 		}
 		c.ManagerURL = url
 	} else {
-		log.Printf("E2E: using existing manager at %s", c.ManagerURL)
+		log.Printf("E2E: using existing ASBCP at %s", c.ManagerURL)
 	}
 
 	// ── Run tests ──────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ func startManager(c *SuiteConfig) (string, error) {
 	url := "http://localhost:" + portStr
 
 	// Write config with httpPort as integer so YAML unmarshal never fails (root cause: string "18080" -> config parse error).
-	cfgPath := filepath.Join(os.TempDir(), "e2e-manager-config.yaml")
+	cfgPath := filepath.Join(os.TempDir(), "e2e-asbcp-config.yaml")
 	cfgContent := fmt.Sprintf(`version: 1
 server:
   httpPort: %d
@@ -184,13 +184,13 @@ kubernetes:
 		return "", fmt.Errorf("write config: %w", err)
 	}
 
-	logFile, err := os.CreateTemp("", "e2e-manager-*.log")
+	logFile, err := os.CreateTemp("", "e2e-asbcp-*.log")
 	if err != nil {
 		return "", fmt.Errorf("create log file: %w", err)
 	}
 	c.managerLog = logFile
 
-	// Pass KUBECONFIG explicitly so manager uses same cluster as test (avoids silent wrong-cluster or in-cluster config).
+	// Pass KUBECONFIG explicitly so ASBCP uses same cluster as test (avoids silent wrong-cluster or in-cluster config).
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		if home := os.Getenv("HOME"); home != "" {
@@ -200,14 +200,16 @@ kubernetes:
 
 	cmd := exec.Command(c.ManagerBin)
 	cmd.Env = append(os.Environ(),
-		"CONFIG_PATH="+cfgPath,
-		"SERVICE_KEYS="+c.ServiceKey,
-		"K8S_NAMESPACE="+c.Namespace,
-		"AFSCP_INTERNAL_BASE_URL="+c.AFSCPBaseURL,
-		"AFSCP_ORCHESTRATOR_TOKEN="+c.AFSCPToken,
-		"JUICEFS_CSI_DRIVER="+envOr("E2E_CSI_DRIVER", "csi.juicefs.com"),
-		"JUICEFS_STORAGE_CAPACITY="+c.StorageCapacity,
-		"JUICEFS_STORAGE_CLASS_NAME="+c.StorageClassName,
+		"ASBCP_CONFIG_PATH="+cfgPath,
+		"ASBCP_SERVICE_KEYS="+c.ServiceKey,
+		"ASBCP_WORKLOAD_NAMESPACE="+c.Namespace,
+		"ASBCP_AFSCP_INTERNAL_BASE_URL="+c.AFSCPBaseURL,
+		"ASBCP_AFSCP_ORCHESTRATOR_TOKEN="+c.AFSCPToken,
+		"ASBCP_AFSCP_CALLER_SERVICE=agentsmith-sandbox-control-plane",
+		"ASBCP_AFSCP_ACTOR_ID=agentsmith-sandbox-control-plane",
+		"ASBCP_JUICEFS_CSI_DRIVER="+envOr("E2E_CSI_DRIVER", "csi.juicefs.com"),
+		"ASBCP_JUICEFS_STORAGE_CAPACITY="+c.StorageCapacity,
+		"ASBCP_JUICEFS_STORAGE_CLASS_NAME="+c.StorageClassName,
 		"LOG_LEVEL=info",
 	)
 	if kubeconfig != "" {
@@ -217,10 +219,10 @@ kubernetes:
 	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("exec manager: %w", err)
+		return "", fmt.Errorf("exec ASBCP: %w", err)
 	}
 	c.managerCmd = cmd
-	log.Printf("E2E: started manager pid=%d log=%s", cmd.Process.Pid, logFile.Name())
+	log.Printf("E2E: started ASBCP pid=%d log=%s", cmd.Process.Pid, logFile.Name())
 
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {

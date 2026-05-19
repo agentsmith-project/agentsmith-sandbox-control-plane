@@ -6,14 +6,14 @@ set -euo pipefail
 echo "=== Sandbox 系统健康检查 ==="
 echo ""
 
-# 检查 Manager Pods
-echo "Manager Pods:"
-kubectl get pods -n sandbox-system -l app=sandbox-manager -o wide
+# 检查 ASBCP Pods
+echo "ASBCP Pods:"
+kubectl get pods -n sandbox-system -l app=agentsmith-sandbox-control-plane -o wide
 echo ""
 
-# 检查 Manager Service
-echo "Manager Service:"
-kubectl get service sandbox-manager -n sandbox-system
+# 检查 ASBCP Service
+echo "ASBCP Service:"
+kubectl get service agentsmith-sandbox-control-plane -n sandbox-system
 echo ""
 
 # 检查最近的事件
@@ -30,12 +30,12 @@ echo "资源使用情况:"
 kubectl top pods -n sandbox-system 2>/dev/null || echo "  (metrics-server 未安装，跳过)"
 echo ""
 
-# 检查 Manager 健康端点
-echo "Manager 健康检查:"
-if kubectl run -it --rm health-check --image=curlimages/curl --restart=Never -n sandbox-system -- curl -s http://sandbox-manager/healthz 2>/dev/null | grep -q "OK"; then
-    echo "  ✓ Manager 健康端点正常"
+# 检查 ASBCP 健康端点
+echo "ASBCP 健康检查:"
+if kubectl run -it --rm health-check --image=curlimages/curl --restart=Never -n sandbox-system -- curl -s http://agentsmith-sandbox-control-plane/healthz 2>/dev/null | grep -q "OK"; then
+    echo "  ✓ ASBCP 健康端点正常"
 else
-    echo "  ✗ Manager 健康端点异常"
+    echo "  ✗ ASBCP 健康端点异常"
 fi
 
 echo ""

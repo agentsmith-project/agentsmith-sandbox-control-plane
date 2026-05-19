@@ -37,21 +37,17 @@ log_info "Registry: $FULL_REGISTRY"
 echo ""
 
 # Read versions from VERSION files
-MANAGER_VERSION=$(read_version "${PROJECT_ROOT}/manager-service/VERSION")
-RUNNER_VERSION=$(read_version "${PROJECT_ROOT}/images/runner/VERSION")
+ASBCP_VERSION=$(read_version "${PROJECT_ROOT}/VERSION")
 
 # Use defaults if versions are empty
-MANAGER_VERSION="${MANAGER_VERSION:-1.0.0}"
-RUNNER_VERSION="${RUNNER_VERSION:-1.0.0}"
+ASBCP_VERSION="${ASBCP_VERSION:-1.0.0}"
 
 log_info "镜像版本:"
-echo "  Manager: $MANAGER_VERSION"
-echo "  Runner: $RUNNER_VERSION"
+echo "  ASBCP: $ASBCP_VERSION"
 echo ""
 
 # Build full image paths
-MANAGER_IMAGE="${FULL_REGISTRY}/sandbox-manager:${MANAGER_VERSION}"
-RUNNER_IMAGE="${FULL_REGISTRY}/sandbox-runner:${RUNNER_VERSION}"
+ASBCP_IMAGE="${FULL_REGISTRY}/agentsmith-sandbox-control-plane:${ASBCP_VERSION}"
 
 # For dev overlay with local registry, use short image names so Kind uses locally loaded images
 use_short_names_for_dev() {
@@ -72,15 +68,13 @@ for overlay in dev staging production; do
     
     log_info "更新 overlay: $overlay"
     
-    manager_img="$MANAGER_IMAGE"
-    runner_img="$RUNNER_IMAGE"
+    asbcp_img="$ASBCP_IMAGE"
     if [ "$overlay" = "dev" ] && use_short_names_for_dev; then
-        manager_img="sandbox-manager:${MANAGER_VERSION}"
-        runner_img="sandbox-runner:${RUNNER_VERSION}"
+        asbcp_img="agentsmith-sandbox-control-plane:${ASBCP_VERSION}"
     fi
     
     # Update kustomization.yaml images
-    if update_kustomization_images "$overlay_dir" "$manager_img" "$runner_img"; then
+    if update_kustomization_images "$overlay_dir" "$asbcp_img"; then
         log_success "Kustomization 镜像已更新"
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else

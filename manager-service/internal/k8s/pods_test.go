@@ -559,4 +559,3 @@ func TestPodExists(t *testing.T) {
 func TestGetPod(t *testing.T) {
 	t.Skip("covered by TestGetPod_Found / TestGetPod_NotFound using fake server")
 }
-

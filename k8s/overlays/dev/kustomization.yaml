@@ -3,12 +3,9 @@ kind: Kustomization
 resources:
 - ../../base
 images:
-- name: sandbox-manager
-  newName: sandbox-manager
+- name: agentsmith-sandbox-control-plane
+  newName: agentsmith-sandbox-control-plane
   newTag: 2.0.3
-- name: sandbox-runner
-  newName: sandbox-runner
-  newTag: 1.0.0
 patches:
 - path: patches/afscp-config.yaml
 - path: patches/manager-replicas.yaml

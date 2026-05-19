@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Offline bundles may still carry the runner as a non-active fixture.
+# ASBCP active release/dev paths do not build or push this image by default.
 offline_export() {
   local root="$1"
   shift || true
@@ -12,14 +14,14 @@ offline_export() {
   local username=""
   local password=""
   local proxy_mode="auto"
-  local manager_tag=""
+  local asbcp_tag=""
   local runner_tag=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --out) out_dir="${2:-}"; shift 2 ;;
       --source) source="${2:-docker}"; shift 2 ;;
-      --manager-tag) manager_tag="${2:-}"; shift 2 ;;
+      --asbcp-tag) asbcp_tag="${2:-}"; shift 2 ;;
       --runner-tag) runner_tag="${2:-}"; shift 2 ;;
       --registry) registry="${2:-}"; shift 2 ;;
       --project) project="${2:-}"; shift 2 ;;
@@ -47,11 +49,11 @@ offline_export() {
 
   tools_verify "$root" || die "Bundled tools missing/invalid (run: ./sbx tools fetch)"
 
-  local manager_ver runner_ver
-  manager_ver="${manager_tag:-$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)}"
+  local asbcp_ver runner_ver
+  asbcp_ver="${asbcp_tag:-$(cat "${root}/VERSION" 2>/dev/null || echo dev)}"
   runner_ver="${runner_tag:-$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)}"
 
-  local local_manager="sandbox-manager:${manager_ver}"
+  local local_asbcp="agentsmith-sandbox-control-plane:${asbcp_ver}"
   local local_runner="sandbox-runner:${runner_ver}"
 
   mkdir -p "$out_dir"
@@ -87,20 +89,20 @@ offline_export() {
     [ -n "$username" ] || die "--username is required when --source != docker"
     [ -n "$password" ] || die "--password is required when --source != docker"
     eval "$penv"
-    skopeo_copy "$root" "docker://${registry}/${project}/${local_manager}" "docker-daemon:${local_manager}" --src-creds "${username}:${password}"
+    skopeo_copy "$root" "docker://${registry}/${project}/${local_asbcp}" "docker-daemon:${local_asbcp}" --src-creds "${username}:${password}"
     skopeo_copy "$root" "docker://${registry}/${project}/${local_runner}" "docker-daemon:${local_runner}" --src-creds "${username}:${password}"
   fi
 
-  docker_image_exists "$local_manager" || die "Missing local image: $local_manager (run: ./sbx images build)"
+  docker_image_exists "$local_asbcp" || die "Missing local image: $local_asbcp (run: ./sbx images build)"
   docker_image_exists "$local_runner" || die "Missing local image: $local_runner (run: ./sbx images build)"
 
-  local tar_manager="${out_dir}/images/sandbox-manager_${manager_ver}_linux_amd64.tar"
+  local tar_asbcp="${out_dir}/images/agentsmith-sandbox-control-plane_${asbcp_ver}_linux_amd64.tar"
   local tar_runner="${out_dir}/images/sandbox-runner_${runner_ver}_linux_amd64.tar"
 
-  docker_save_image "$local_manager" "$tar_manager"
+  docker_save_image "$local_asbcp" "$tar_asbcp"
   docker_save_image "$local_runner" "$tar_runner"
 
-  offline_write_manifest "$root" "$out_dir" "$manager_ver" "$runner_ver" "$tar_manager" "$tar_runner"
+  offline_write_manifest "$root" "$out_dir" "$asbcp_ver" "$runner_ver" "$tar_asbcp" "$tar_runner"
   offline_write_sha256sums "$out_dir"
 
   log_info "Offline package created: $out_dir"
@@ -228,9 +230,9 @@ offline_verify() {
 offline_write_manifest() {
   local root="$1"
   local out_dir="$2"
-  local manager_ver="$3"
+  local asbcp_ver="$3"
   local runner_ver="$4"
-  local tar_manager="$5"
+  local tar_asbcp="$5"
   local tar_runner="$6"
 
   if ! command -v sha256sum >/dev/null 2>&1; then
@@ -246,28 +248,28 @@ offline_write_manifest() {
   gen_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   git_commit="$(git -C "$root" rev-parse HEAD)"
 
-  local rel_manager rel_runner
-  rel_manager="${tar_manager#${out_dir}/}"
+  local rel_asbcp rel_runner
+  rel_asbcp="${tar_asbcp#${out_dir}/}"
   rel_runner="${tar_runner#${out_dir}/}"
 
-  local sha_manager sha_runner
-  sha_manager="$(sha256sum "$tar_manager" | awk '{print $1}')"
+  local sha_asbcp sha_runner
+  sha_asbcp="$(sha256sum "$tar_asbcp" | awk '{print $1}')"
   sha_runner="$(sha256sum "$tar_runner" | awk '{print $1}')"
 
-  local dig_manager dig_runner
-  dig_manager="$("$sk" inspect "docker-archive:${tar_manager}" | "$jqbin" -r '.Digest // ""')"
+  local dig_asbcp dig_runner
+  dig_asbcp="$("$sk" inspect "docker-archive:${tar_asbcp}" | "$jqbin" -r '.Digest // ""')"
   dig_runner="$("$sk" inspect "docker-archive:${tar_runner}" | "$jqbin" -r '.Digest // ""')"
 
   "$jqbin" -n \
     --arg genAt "$gen_at" \
     --arg gitCommit "$git_commit" \
-    --arg managerVer "$manager_ver" \
+    --arg asbcpVer "$asbcp_ver" \
     --arg runnerVer "$runner_ver" \
-    --arg managerTar "$rel_manager" \
+    --arg asbcpTar "$rel_asbcp" \
     --arg runnerTar "$rel_runner" \
-    --arg managerSha "$sha_manager" \
+    --arg asbcpSha "$sha_asbcp" \
     --arg runnerSha "$sha_runner" \
-    --arg managerDig "$dig_manager" \
+    --arg asbcpDig "$dig_asbcp" \
     --arg runnerDig "$dig_runner" \
     '{
       schemaVersion: 1,
@@ -275,7 +277,7 @@ offline_write_manifest() {
       platform: "linux/amd64",
       gitCommit: $gitCommit,
       images: [
-        {name:"sandbox-manager", tag:$managerVer, tarPath:$managerTar, tarSha256:$managerSha, digest:$managerDig},
+        {name:"agentsmith-sandbox-control-plane", tag:$asbcpVer, tarPath:$asbcpTar, tarSha256:$asbcpSha, digest:$asbcpDig},
         {name:"sandbox-runner", tag:$runnerVer, tarPath:$runnerTar, tarSha256:$runnerSha, digest:$runnerDig}
       ]
     }' > "${out_dir}/manifest.json"

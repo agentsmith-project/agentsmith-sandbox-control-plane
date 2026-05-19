@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: sandbox-config
+  name: asbcp-runtime-config
   namespace: sandbox-system
 data:
   workload-namespace: "sandbox-workloads"
   afscp-internal-base-url: "http://afscp-api.agentsmith-system.svc.cluster.local:8080"
-  afscp-caller-service: "sandbox-orchestrator"
+  afscp-caller-service: "agentsmith-sandbox-control-plane"
   afscp-actor-type: "system"
-  afscp-actor-id: "sandbox-manager"
+  afscp-actor-id: "agentsmith-sandbox-control-plane"
   juicefs-csi-driver: "csi.juicefs.com"
   juicefs-storage-capacity: "1Pi"
   juicefs-storage-class-name: ""

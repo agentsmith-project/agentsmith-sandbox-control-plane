@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox/manager/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"

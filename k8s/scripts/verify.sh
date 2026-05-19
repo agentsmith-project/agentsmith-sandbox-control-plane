@@ -53,34 +53,34 @@ else
     echo "  ✗ Namespace sandbox-workloads 不存在"
 fi
 
-# 检查 Manager Deployment
-if kubectl get deployment sandbox-manager -n sandbox-system &> /dev/null; then
-    READY=$(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-    DESIRED=$(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+# 检查 ASBCP Deployment
+if kubectl get deployment agentsmith-sandbox-control-plane -n sandbox-system &> /dev/null; then
+    READY=$(kubectl get deployment agentsmith-sandbox-control-plane -n sandbox-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    DESIRED=$(kubectl get deployment agentsmith-sandbox-control-plane -n sandbox-system -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
     if [ "$READY" = "$DESIRED" ] && [ "$READY" != "0" ]; then
-        echo "  ✓ Manager Deployment 就绪 ($READY/$DESIRED)"
+        echo "  ✓ ASBCP Deployment 就绪 ($READY/$DESIRED)"
     else
-        echo "  ✗ Manager Deployment 未就绪 ($READY/$DESIRED)"
+        echo "  ✗ ASBCP Deployment 未就绪 ($READY/$DESIRED)"
     fi
 else
-    echo "  ✗ Manager Deployment 不存在"
+    echo "  ✗ ASBCP Deployment 不存在"
 fi
 
 # 检查 Service
-if kubectl get service sandbox-manager -n sandbox-system &> /dev/null; then
-    echo "  ✓ Manager Service 存在"
+if kubectl get service agentsmith-sandbox-control-plane -n sandbox-system &> /dev/null; then
+    echo "  ✓ ASBCP Service 存在"
 else
-    echo "  ✗ Manager Service 不存在"
+    echo "  ✗ ASBCP Service 不存在"
 fi
 
 # 验证镜像版本
 echo ""
 echo "[4/4] 验证镜像版本..."
-MANAGER_IMAGE=$(kubectl get deployment sandbox-manager -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
-if [ -n "$MANAGER_IMAGE" ]; then
-    echo "  Manager: $MANAGER_IMAGE"
+ASBCP_IMAGE=$(kubectl get deployment agentsmith-sandbox-control-plane -n sandbox-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+if [ -n "$ASBCP_IMAGE" ]; then
+    echo "  ASBCP: $ASBCP_IMAGE"
 else
-    echo "  ✗ 无法获取 Manager 镜像"
+    echo "  ✗ 无法获取 ASBCP 镜像"
 fi
 
 echo ""

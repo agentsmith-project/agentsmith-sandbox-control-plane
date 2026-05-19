@@ -9,31 +9,29 @@ resources:
   - namespaces.yaml
   - resource-quota.yaml
   - configmap.yaml
-  - manager-configmap.yaml
+  - asbcp-configmap.yaml
+  # Legacy filename compatibility only; resource names and labels are ASBCP.
   - rbac-manager.yaml
   - workload-rbac.yaml
   - manager-deployment.yaml
   - manager-service.yaml
   - workload-networkpolicy.yaml
 
-# 通用标签。不要写入 selectors：workload pods 由 manager 动态创建，
+# 通用标签。不要写入 selectors：workload pods 由 ASBCP 动态创建，
 # selector 必须只匹配 runtime 真实写入的 label。
 labels:
   - includeSelectors: false
     pairs:
-      app.kubernetes.io/name: sandbox
-      app.kubernetes.io/component: sandbox-system
+      app.kubernetes.io/name: agentsmith-sandbox-control-plane
+      app.kubernetes.io/component: asbcp
       app.kubernetes.io/managed-by: kustomize
 
 # 镜像替换（在 overlays 中覆盖）
 # Base 中只定义镜像名称，不包含 registry，由 overlays 指定完整路径
 images:
-  - name: sandbox-manager
-    newName: sandbox-manager
+  - name: agentsmith-sandbox-control-plane
+    newName: agentsmith-sandbox-control-plane
     newTag: "2.0.3"
-  - name: sandbox-runner
-    newName: sandbox-runner
-    newTag: "1.0.0"
 
 # 通用注解
 commonAnnotations:

@@ -99,8 +99,8 @@ sbx_images() {
     -h|--help|help|"")
       cat <<'EOF'
 Usage:
-  ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only manager|runner]
-  ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only manager|runner]
+  ./sbx images build [--pull-proxy auto|on|off] [--build-proxy auto|on|off] [--platform linux/amd64] [--only asbcp|runner]  # runner fixture only
+  ./sbx images push harbor --registry HOST:PORT --project NAME --username USER --password PASS [--proxy auto|on|off] [--source docker|archive] [--build-proxy auto|on|off] [--only asbcp|runner]  # runner fixture only
   ./sbx images export offline --out DIR [--source docker|harbor|registry] [--registry HOST:PORT] [--project NAME] [--username USER] [--password PASS] [--proxy auto|on|off]
   ./sbx images import offline --from DIR [--to docker|harbor|registry] [--registry HOST:PORT] [--project NAME] [--username USER] [--password PASS] [--verify] [--proxy auto|on|off]
   ./sbx images verify offline --path DIR

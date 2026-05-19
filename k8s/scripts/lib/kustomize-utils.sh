@@ -9,8 +9,7 @@ source "${SCRIPT_DIR}/common.sh"
 # Update kustomization.yaml images using kustomize command
 update_images_with_kustomize() {
     local overlay_dir="$1"
-    local manager_image="$2"
-    local runner_image="$3"
+    local asbcp_image="$2"
 
     if ! command_exists kustomize; then
         return 1
@@ -19,16 +18,14 @@ update_images_with_kustomize() {
     (
         cd "$overlay_dir" || return 1
         kustomize edit set image \
-            "$manager_image" \
-            "$runner_image" 2>/dev/null
+            "$asbcp_image" 2>/dev/null
     )
 }
 
 # Update kustomization.yaml images using Python
 update_images_with_python() {
     local overlay_dir="$1"
-    local manager_image="$2"
-    local runner_image="$3"
+    local asbcp_image="$2"
     local kustomization_file="${overlay_dir}/kustomization.yaml"
 
     if ! command_exists python3; then
@@ -72,8 +69,7 @@ if 'images' not in data:
 
 # Parse input images
 images_to_update = {
-    'sandbox-manager': parse_image('${manager_image}'),
-    'sandbox-runner': parse_image('${runner_image}')
+    'agentsmith-sandbox-control-plane': parse_image('${asbcp_image}')
 }
 
 # Update or add images
@@ -93,19 +89,18 @@ EOF
 # Update images in kustomization.yaml (tries multiple methods)
 update_kustomization_images() {
     local overlay_dir="$1"
-    local manager_image="$2"
-    local runner_image="$3"
+    local asbcp_image="$2"
 
     log_info "更新 overlay: $(basename "$overlay_dir")"
 
     # Try kustomize first
-    if update_images_with_kustomize "$overlay_dir" "$manager_image" "$runner_image"; then
+    if update_images_with_kustomize "$overlay_dir" "$asbcp_image"; then
         log_success "使用 kustomize 更新镜像"
         return 0
     fi
 
     # Fallback to Python
-    if update_images_with_python "$overlay_dir" "$manager_image" "$runner_image"; then
+    if update_images_with_python "$overlay_dir" "$asbcp_image"; then
         log_success "使用 Python 更新镜像"
         return 0
     fi

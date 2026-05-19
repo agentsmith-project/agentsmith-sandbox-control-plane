@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${IMAGE_DIR}/.." && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${IMAGE_DIR}/config.env}"
 
 # 加载配置
@@ -13,8 +14,8 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 REGISTRY="${REGISTRY:-localhost:5001}"
-IMAGE_NAME="${IMAGE_NAME:-sandbox-manager}"
-VERSION="${VERSION:-$(cat "${IMAGE_DIR}/VERSION" 2>/dev/null || echo "1.0.0")}"
+IMAGE_NAME="${IMAGE_NAME:-agentsmith-sandbox-control-plane}"
+VERSION="${VERSION:-$(cat "${ROOT_DIR}/VERSION" 2>/dev/null || echo "dev")}"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
 
 echo "[${IMAGE_NAME}] Verifying image: ${FULL_IMAGE}"
@@ -39,9 +40,9 @@ if [ "$USER_ID" = "0" ]; then
 fi
 echo "  ✓ 非 root 用户: $USER_ID"
 
-echo "  [验证] manager 二进制存在且可执行..."
-docker run --rm "$FULL_IMAGE" sh -lc 'test -x /app/manager' && echo "  ✓ /app/manager OK" || {
-    echo "  ✗ /app/manager 不存在或不可执行"
+echo "  [验证] asbcp 二进制存在且可执行..."
+docker run --rm "$FULL_IMAGE" sh -lc 'test -x /app/asbcp' && echo "  ✓ /app/asbcp OK" || {
+    echo "  ✗ /app/asbcp 不存在或不可执行"
     exit 1
 }
 

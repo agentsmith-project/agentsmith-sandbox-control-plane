@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

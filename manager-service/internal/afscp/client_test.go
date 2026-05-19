@@ -40,7 +40,7 @@ func TestClientGetOrchestratorMountPlanUsesOrchestratorHeaders(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "orchestrator-token", CallerService: "sandbox-orchestrator"})
+	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "orchestrator-token", CallerService: "agentsmith-sandbox-control-plane"})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestClientGetOrchestratorMountPlanUsesOrchestratorHeaders(t *testing.T) {
 	if got.Method != http.MethodGet || got.Path != "/internal/v1/workload-mount-bindings/wmb_123/orchestrator-plan" {
 		t.Fatalf("request = %s %s", got.Method, got.Path)
 	}
-	if got.Authorization != "Bearer orchestrator-token" || got.CallerService != "sandbox-orchestrator" || got.NamespaceID != "ns_123" || got.CorrelationID != "corr-123" {
+	if got.Authorization != "Bearer orchestrator-token" || got.CallerService != "agentsmith-sandbox-control-plane" || got.NamespaceID != "ns_123" || got.CorrelationID != "corr-123" {
 		t.Fatalf("headers = %#v", got)
 	}
 	if got.ActorType != "" || got.IdempotencyKey != "" {
@@ -97,7 +97,7 @@ func TestClientReleaseAndStatusUseMutationHeaders(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "token", CallerService: "sandbox-orchestrator", ActorID: "sandbox-manager"})
+	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "token", CallerService: "agentsmith-sandbox-control-plane", ActorID: "agentsmith-sandbox-control-plane"})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestClientReleaseAndStatusUseMutationHeaders(t *testing.T) {
 	if requests[1].Method != http.MethodPatch || requests[1].Path != "/internal/v1/workload-mount-bindings/wmb_123/status" || requests[1].IdempotencyKey != "idem-status" {
 		t.Fatalf("status request = %#v", requests[1])
 	}
-	if requests[0].ActorType != "system" || requests[0].ActorID != "sandbox-manager" || requests[1].ActorType != "system" || requests[1].ActorID != "sandbox-manager" {
+	if requests[0].ActorType != "system" || requests[0].ActorID != "agentsmith-sandbox-control-plane" || requests[1].ActorType != "system" || requests[1].ActorID != "agentsmith-sandbox-control-plane" {
 		t.Fatalf("mutation actor headers = %#v", requests)
 	}
 	if requests[1].Body["status"] != "released" || requests[1].Body["reason"] != "pod deleted" || requests[1].Body["observed_at"] != "2026-05-10T12:00:00Z" {
@@ -140,7 +140,7 @@ func TestClientReleaseAndStatusWaitForTerminalSuccess(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "token", CallerService: "sandbox-orchestrator", OperationPollInterval: time.Millisecond})
+	client, err := NewClient(ClientConfig{BaseURL: server.URL, Token: "token", CallerService: "agentsmith-sandbox-control-plane", OperationPollInterval: time.Millisecond})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

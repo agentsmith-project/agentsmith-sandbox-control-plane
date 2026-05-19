@@ -21,7 +21,7 @@ if [ -f /tmp/smoke-test-pod-name.txt ]; then
     export SANDBOX_POD_NAME
     rm /tmp/smoke-test-pod-name.txt
 fi
-pod_name="${SANDBOX_POD_NAME:-sandbox-${SANDBOX_ID}}"
+pod_name="${SANDBOX_POD_NAME:-workload-${SANDBOX_ID}}"
 
 echo "Cleaning up sandbox ${SANDBOX_ID} (pod: ${pod_name})..."
 
@@ -51,7 +51,7 @@ done
 echo "  Verifying cleanup..."
 kubectl get pod "${pod_name}" -n "${SANDBOX_NAMESPACE}" &> /dev/null
 if [ $? -eq 0 ]; then
-    echo -e "${COLOR_RED}✗ Pod still exists after manager cleanup${COLOR_NC}"
+    echo -e "${COLOR_RED}✗ Pod still exists after ASBCP cleanup${COLOR_NC}"
     exit 1
 else
     echo -e "  ${COLOR_GREEN}Cleanup verified${COLOR_NC}"

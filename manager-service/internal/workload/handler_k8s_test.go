@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox/manager/internal/afscp"
-	"github.com/sandbox/manager/internal/k8s"
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"

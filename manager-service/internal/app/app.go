@@ -12,14 +12,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sandbox/manager/internal/afscp"
-	"github.com/sandbox/manager/internal/auth"
-	"github.com/sandbox/manager/internal/config"
-	"github.com/sandbox/manager/internal/k8s"
-	"github.com/sandbox/manager/internal/observability"
-	"github.com/sandbox/manager/internal/ratelimit"
-	"github.com/sandbox/manager/internal/workload"
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/auth"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/config"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/ratelimit"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workload"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -46,7 +46,7 @@ func Main() {
 
 func mainImpl() {
 	observability.InitLogging()
-	observability.Info("Sandbox Manager v%s starting", version)
+	observability.Info("AgentSmith Sandbox Control Plane v%s starting", version)
 
 	bootCfg := loadBootConfig()
 
@@ -66,7 +66,7 @@ func mainImpl() {
 
 	log.Printf("Configuration loaded from %s", bootCfg.ConfigPath)
 
-	k8sNamespace := strings.TrimSpace(os.Getenv("K8S_NAMESPACE"))
+	k8sNamespace := strings.TrimSpace(os.Getenv("ASBCP_WORKLOAD_NAMESPACE"))
 	if k8sNamespace == "" {
 		k8sNamespace = cfg.Sandbox.Defaults.Namespace
 	}
@@ -91,7 +91,7 @@ func mainImpl() {
 
 	k8sExecutor := k8s.NewExecutor(k8sClient)
 
-	serviceKeys := auth.ParseServiceKeys(os.Getenv("SERVICE_KEYS"))
+	serviceKeys := auth.ParseServiceKeys(os.Getenv("ASBCP_SERVICE_KEYS"))
 	authValidator, err := auth.NewServiceKeyValidator(serviceKeys)
 	if err != nil {
 		log.Fatalf("Failed to initialize service key validator: %v", err)
@@ -99,30 +99,30 @@ func mainImpl() {
 	log.Printf("Service key validator initialized (%d keys)", authValidator.Count())
 
 	afscpClient, err := afscp.NewClient(afscp.ClientConfig{
-		BaseURL:       os.Getenv("AFSCP_INTERNAL_BASE_URL"),
-		Token:         os.Getenv("AFSCP_ORCHESTRATOR_TOKEN"),
-		CallerService: getEnvOrDefault("AFSCP_CALLER_SERVICE", "sandbox-orchestrator"),
-		ActorType:     getEnvOrDefault("AFSCP_ACTOR_TYPE", "system"),
-		ActorID:       getEnvOrDefault("AFSCP_ACTOR_ID", "sandbox-manager"),
+		BaseURL:       os.Getenv("ASBCP_AFSCP_INTERNAL_BASE_URL"),
+		Token:         os.Getenv("ASBCP_AFSCP_ORCHESTRATOR_TOKEN"),
+		CallerService: getEnvOrDefault("ASBCP_AFSCP_CALLER_SERVICE", "agentsmith-sandbox-control-plane"),
+		ActorType:     getEnvOrDefault("ASBCP_AFSCP_ACTOR_TYPE", "system"),
+		ActorID:       getEnvOrDefault("ASBCP_AFSCP_ACTOR_ID", "agentsmith-sandbox-control-plane"),
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize AFSCP client: %v", err)
 	}
 
 	workloadOptions := workload.Options{
-		DefaultNodeSelector: mustParseStringMapEnv("WORKLOAD_NODE_SELECTOR_JSON"),
-		DefaultTolerations:  mustParseTolerationsEnv("WORKLOAD_TOLERATIONS_JSON"),
+		DefaultNodeSelector: mustParseStringMapEnv("ASBCP_WORKLOAD_NODE_SELECTOR_JSON"),
+		DefaultTolerations:  mustParseTolerationsEnv("ASBCP_WORKLOAD_TOLERATIONS_JSON"),
 		AFSCPClient:         afscpClient,
 	}
 	workloadHandler := workload.NewHandler(k8sClient, k8sExecutor, workloadOptions)
 	workspaceBindingHandler := workspacebinding.NewHandler(k8sClient, workspacebinding.Options{
 		Namespace:        k8sNamespace,
-		CSIDriver:        getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
-		StorageCapacity:  getEnvOrDefault("JUICEFS_STORAGE_CAPACITY", "1Pi"),
-		StorageClassName: os.Getenv("JUICEFS_STORAGE_CLASS_NAME"),
+		CSIDriver:        getEnvOrDefault("ASBCP_JUICEFS_CSI_DRIVER", "csi.juicefs.com"),
+		StorageCapacity:  getEnvOrDefault("ASBCP_JUICEFS_STORAGE_CAPACITY", "1Pi"),
+		StorageClassName: os.Getenv("ASBCP_JUICEFS_STORAGE_CLASS_NAME"),
 		AFSCPClient:      afscpClient,
 	})
-	log.Printf("Workload handler initialized with AFSCP workload mount plan model (csiDriver=%s)", getEnvOrDefault("JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
+	log.Printf("Workload handler initialized with AFSCP workload mount plan model (csiDriver=%s)", getEnvOrDefault("ASBCP_JUICEFS_CSI_DRIVER", "csi.juicefs.com"))
 
 	rateLimitCfg := ratelimit.ConfigFromRequestsPerMinute(cfg.RateLimit.RequestsPerMinute)
 	rateLimiter := ratelimit.NewLimiter(rateLimitCfg)
@@ -147,7 +147,7 @@ func mainImpl() {
 	mgr.setupReadinessChecks()
 	mgr.setupHTTPServer()
 
-	log.Printf("Sandbox Manager started on port %d", cfg.Server.HTTPPort)
+	log.Printf("ASBCP started on port %d", cfg.Server.HTTPPort)
 	log.Printf("  Health check: http://localhost:%d/healthz", cfg.Server.HTTPPort)
 	log.Printf("  Readiness:    http://localhost:%d/readyz", cfg.Server.HTTPPort)
 	log.Printf("  Metrics:      http://localhost:%d%s", cfg.Server.HTTPPort, cfg.Server.Metrics.Path)
@@ -155,7 +155,7 @@ func mainImpl() {
 
 	mgr.waitForShutdown()
 
-	log.Printf("Sandbox Manager stopped")
+	log.Printf("ASBCP stopped")
 }
 
 type BootConfig struct {
@@ -164,7 +164,7 @@ type BootConfig struct {
 
 func loadBootConfig() *BootConfig {
 	return &BootConfig{
-		ConfigPath: getEnvOrDefault("CONFIG_PATH", "/etc/sandbox-manager/manager-config.yaml"),
+		ConfigPath: getEnvOrDefault("ASBCP_CONFIG_PATH", "/etc/asbcp/asbcp-config.yaml"),
 	}
 }
 

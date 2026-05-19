@@ -3,7 +3,7 @@ package workload
 import (
 	"time"
 
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 )
 
 // CreateRequest is the request body for PUT /v1/workspaces/{wsId}/projects/{projId}/workloads/{wlId}.

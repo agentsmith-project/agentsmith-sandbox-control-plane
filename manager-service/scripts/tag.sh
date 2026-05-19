@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${IMAGE_DIR}/.." && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${IMAGE_DIR}/config.env}"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -12,8 +13,8 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 REGISTRY="${REGISTRY:-localhost:5001}"
-IMAGE_NAME="${IMAGE_NAME:-sandbox-manager}"
-OLD_VERSION="${OLD_VERSION:-$(cat "${IMAGE_DIR}/VERSION" 2>/dev/null || echo "1.0.0")}"
+IMAGE_NAME="${IMAGE_NAME:-agentsmith-sandbox-control-plane}"
+OLD_VERSION="${OLD_VERSION:-$(cat "${ROOT_DIR}/VERSION" 2>/dev/null || echo "dev")}"
 NEW_VERSION="${1:-}"
 
 if [ -z "$NEW_VERSION" ]; then
@@ -37,7 +38,7 @@ fi
 docker tag "$FULL_IMAGE_OLD" "$FULL_IMAGE_NEW"
 
 # 更新 VERSION 文件
-echo "$NEW_VERSION" > "${IMAGE_DIR}/VERSION"
+echo "$NEW_VERSION" > "${ROOT_DIR}/VERSION"
 
 echo "[${IMAGE_NAME}] ✓ Tagged successfully"
 echo "[${IMAGE_NAME}] VERSION file updated to: $NEW_VERSION"

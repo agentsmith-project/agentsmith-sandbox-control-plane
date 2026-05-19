@@ -12,9 +12,22 @@ SANDBOX_ID="test-smoke-$(date +%s)"
 
 echo "Creating sandbox ${SANDBOX_ID}..."
 
-# 1. Create sandbox via API (allow long timeout: Manager waits for pod ready)
+# 1. Ensure workspace binding via API.
 MANAGER_TIMEOUT=120
 export MANAGER_TIMEOUT
+echo "  Ensuring workspace binding ${WORKSPACE_BINDING_ID}..."
+set +e
+binding_response=$(ensure_workspace_binding "${MANAGER_URL}" "${WORKSPACE_BINDING_ID}")
+binding_status=$?
+set -e
+
+if [ ${binding_status} -ne 0 ]; then
+    echo -e "${COLOR_RED}✗ Failed to ensure workspace binding${COLOR_NC}"
+    echo "Response: ${binding_response}"
+    exit 1
+fi
+
+# 2. Create workload via API (allow long timeout: ASBCP waits for pod ready)
 echo "  Sending create request (timeout ${MANAGER_TIMEOUT}s)..."
 set +e
 response=$(create_sandbox "${MANAGER_URL}" "${SANDBOX_ID}")
@@ -27,8 +40,8 @@ if [ ${create_status} -ne 0 ]; then
     exit 1
 fi
 
-# Parse pod name from create response (Manager returns sbx-<hash>, not sandbox-<id>)
-pod_name=$(echo "${response}" | jq -r '.podName')
+# Parse pod name from create response.
+pod_name=$(echo "${response}" | jq -r '.pod_name')
 if [ -z "${pod_name}" ] || [ "${pod_name}" = "null" ]; then
     echo -e "${COLOR_RED}✗ Create response missing podName${COLOR_NC}"
     echo "Response: ${response}"
@@ -39,7 +52,7 @@ echo "${pod_name}" > /tmp/smoke-test-pod-name.txt
 
 echo -e "  ${COLOR_GREEN}Create request accepted (pod: ${pod_name})${COLOR_NC}"
 
-# 2. Verify pod was created
+# 3. Verify pod was created
 echo "  Waiting for pod to be created..."
 sleep 2
 
@@ -52,7 +65,7 @@ fi
 
 echo -e "  ${COLOR_GREEN}Pod ${pod_name} created${COLOR_NC}"
 
-# 3. Wait for pod to be ready
+# 4. Wait for pod to be ready
 echo "  Waiting for pod to be ready (max 120s)..."
 if ! wait_for_pod_ready "${SANDBOX_ID}" "${SANDBOX_NAMESPACE}" 120 2; then
     echo -e "${COLOR_RED}✗ Pod did not become ready in time${COLOR_NC}"
@@ -67,9 +80,9 @@ fi
 
 echo -e "  ${COLOR_GREEN}Pod is ready${COLOR_NC}"
 
-# 4. Session is ready (pod ready is sufficient; API has no GET session endpoint)
+# 5. Workload is ready (pod ready is sufficient for this smoke stage)
 
-# 5. Save SANDBOX_ID for subsequent tests
+# 6. Save SANDBOX_ID for subsequent tests
 echo "${SANDBOX_ID}" > /tmp/smoke-test-sandbox-id.txt
 
 echo ""

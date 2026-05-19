@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: sandbox-manager-config
+  name: asbcp-config
   namespace: sandbox-system
 data:
-  manager-config.yaml: |-
+  asbcp-config.yaml: |-
     version: 1
 
     server:

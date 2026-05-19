@@ -167,4 +167,3 @@ func (c *Client) CreateNamespace(ctx context.Context, name string, labels map[st
 	log.Printf("K8s: created namespace %s", name)
 	return nil
 }
-

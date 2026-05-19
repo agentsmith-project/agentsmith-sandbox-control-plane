@@ -1,11 +1,11 @@
-# Sandbox Manager Service
+# AgentSmith Sandbox Control Plane (ASBCP)
 
 ## 概述
 
-Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HTTP API：
-- 创建和管理 workload Pod（工作区目录由 manager 分配）
+ASBCP 是 AgentSmith sandbox workload 的控制面服务，提供基于 workload 的 HTTP API：
+- 创建和管理 workload Pod（工作区目录由 ASBCP 分配）
 - 在 Pod 中执行命令（exec）
-- 客户端 keepalive 续期（过期回收必须走 manager workload delete API）
+- 客户端 keepalive 续期（过期回收必须走 ASBCP workload delete API）
 
 ## 快速开始
 
@@ -16,9 +16,9 @@ Manager Service 是 Sandbox 系统的核心服务，提供基于 workload 的 HT
 ./scripts/build.sh
 
 # 运行（需要可访问的 K8s 集群：in-cluster 或 KUBECONFIG）
-export CONFIG_PATH="$(pwd)/manager-config.example.yaml"
-export SERVICE_KEYS="test-key-123"
-./manager
+export ASBCP_CONFIG_PATH="$(pwd)/asbcp-config.example.yaml"
+export ASBCP_SERVICE_KEYS="test-key-123"
+go run ./cmd/asbcp
 ```
 
 ### 构建镜像
@@ -54,8 +54,8 @@ export SERVICE_KEYS="test-key-123"
 
 ## 配置与环境变量
 
-- `CONFIG_PATH`: Manager YAML 配置文件路径（默认：`/etc/sandbox-manager/manager-config.yaml`）
-- `SERVICE_KEYS`: 逗号分隔的 service keys（用于 API 鉴权）
+- `ASBCP_CONFIG_PATH`: ASBCP YAML 配置文件路径（默认：`/etc/asbcp/asbcp-config.yaml`）
+- `ASBCP_SERVICE_KEYS`: 逗号分隔的 service keys（用于 API 鉴权）
 
 ## API 文档
 

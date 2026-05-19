@@ -1,66 +1,87 @@
 #!/bin/bash
-# Smoke test: SSE command execution
-# Tests the POST /v1/sandboxes/{id}/exec endpoint with SSE streaming
+# Smoke test: command execution over the active workload API.
+# Tests create -> exec -> keepalive -> delete using /v1/workspaces/.../workloads.
 
 set -euo pipefail
 
-MANAGER_URL="${SBX_MANAGER_HTTP_URL:-http://localhost:8080}"
+MANAGER_URL="${ASBCP_HTTP_URL:-http://localhost:8080}"
+SERVICE_KEY="${SERVICE_KEY:-test-key-123}"
+WORKSPACE_ID="${WORKSPACE_ID:-ws-1}"
+PROJECT_ID="${PROJECT_ID:-proj-1}"
+WORKSPACE_BINDING_ID="${WORKSPACE_BINDING_ID:-wmb_demo}"
+AFSCP_NAMESPACE_ID="${AFSCP_NAMESPACE_ID:-ns_demo}"
 SESSION_ID="${SBX_SESSION_ID:-smoke-test-sse-$(date +%s)}"
+WORKLOAD_URL="${MANAGER_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${SESSION_ID}"
 
-echo "=== SSE Exec Smoke Test ==="
-echo "Manager URL: ${MANAGER_URL}"
-echo "Session ID:  ${SESSION_ID}"
+echo "=== ASBCP Exec Smoke Test ==="
+echo "ASBCP URL:   ${MANAGER_URL}"
+echo "Workload ID: ${SESSION_ID}"
 echo ""
 
-# Step 1: Create sandbox (Manager waits for pod ready, allow up to 120s)
-echo "--- Step 1: Create sandbox ---"
-CREATE_RESPONSE=$(curl -s --max-time 120 -w "\n%{http_code}" -X PUT \
-  "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}" \
+# Step 1: Ensure workspace binding.
+echo "--- Step 1: Ensure workspace binding ---"
+BINDING_STATUS=$(curl -s --max-time 120 -o /tmp/asbcp-smoke-binding.json -w "%{http_code}" -X PUT \
+  "${MANAGER_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workspace-bindings/${WORKSPACE_BINDING_ID}" \
+  -H "X-Service-Key: ${SERVICE_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"ttlSeconds": 300}')
+  -d "{\"namespace_id\":\"${AFSCP_NAMESPACE_ID}\",\"mount_binding_id\":\"${WORKSPACE_BINDING_ID}\"}")
+
+if [ "$BINDING_STATUS" -ne 200 ]; then
+  echo "FAIL: Ensure workspace binding returned ${BINDING_STATUS}"
+  cat /tmp/asbcp-smoke-binding.json
+  exit 1
+fi
+echo "PASS: Workspace binding ready"
+echo ""
+
+# Step 2: Create workload (ASBCP waits for pod ready, allow up to 120s)
+echo "--- Step 2: Create workload ---"
+CREATE_RESPONSE=$(curl -s --max-time 120 -w "\n%{http_code}" -X PUT \
+  "${WORKLOAD_URL}" \
+  -H "X-Service-Key: ${SERVICE_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"image\":\"${WORKLOAD_IMAGE:-ubuntu:22.04}\",\"workspace_binding_id\":\"${WORKSPACE_BINDING_ID}\",\"idle_timeout_sec\":300,\"max_lifetime_sec\":3600}")
 
 CREATE_STATUS=$(echo "$CREATE_RESPONSE" | tail -1)
 CREATE_BODY=$(echo "$CREATE_RESPONSE" | head -n -1)
 
-if [ "$CREATE_STATUS" -ne 200 ]; then
-  echo "FAIL: Create sandbox returned ${CREATE_STATUS}"
+if [ "$CREATE_STATUS" -ne 200 ] && [ "$CREATE_STATUS" -ne 201 ]; then
+  echo "FAIL: Create workload returned ${CREATE_STATUS}"
   echo "Body: ${CREATE_BODY}"
   exit 1
 fi
-echo "PASS: Create sandbox returned 200"
+echo "PASS: Create workload returned ${CREATE_STATUS}"
 echo "Body: ${CREATE_BODY}"
 echo ""
 
-# Step 2: Execute command via SSE
-echo "--- Step 2: Execute 'echo hello' via SSE ---"
-EXEC_RESPONSE=$(curl -s -N -X POST \
-  "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+# Step 3: Execute command
+echo "--- Step 3: Execute 'echo hello' ---"
+EXEC_RESPONSE=$(curl -s --max-time 30 -w "\n%{http_code}" -X POST \
+  "${WORKLOAD_URL}/exec" \
+  -H "X-Service-Key: ${SERVICE_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"cmd": ["echo", "hello"]}' \
-  --max-time 30)
+  -d '{"cmd": ["echo", "hello"], "timeout_seconds": 10}')
+EXEC_STATUS=$(echo "$EXEC_RESPONSE" | tail -1)
+EXEC_BODY=$(echo "$EXEC_RESPONSE" | head -n -1)
 
-echo "SSE Response:"
-echo "${EXEC_RESPONSE}"
+echo "Exec Response:"
+echo "${EXEC_BODY}"
 echo ""
 
-# Check for stdout event
-if echo "$EXEC_RESPONSE" | grep -q "event: stdout"; then
-  echo "PASS: Got stdout event"
-else
-  echo "FAIL: Missing stdout event"
+if [ "$EXEC_STATUS" -ne 200 ]; then
+  echo "FAIL: Exec returned ${EXEC_STATUS}"
   exit 1
 fi
 
-# Check for exit event
-if echo "$EXEC_RESPONSE" | grep -q "event: exit"; then
-  echo "PASS: Got exit event"
+if echo "$EXEC_BODY" | grep -q '"stdout"'; then
+  echo "PASS: Got stdout"
 else
-  echo "FAIL: Missing exit event"
+  echo "FAIL: Missing stdout"
   exit 1
 fi
 
-# Check exit code is 0
-if echo "$EXEC_RESPONSE" | grep -q '"exit_code":0'; then
+# Check exit code is 0.
+if echo "$EXEC_BODY" | grep -Eq '"exit_code"[[:space:]]*:[[:space:]]*0'; then
   echo "PASS: Exit code is 0"
 else
   echo "FAIL: Exit code is not 0"
@@ -68,50 +89,54 @@ else
 fi
 echo ""
 
-# Step 3: Execute failing command
-echo "--- Step 3: Execute failing command ---"
-FAIL_RESPONSE=$(curl -s -N -X POST \
-  "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/exec" \
+# Step 4: Execute failing command
+echo "--- Step 4: Execute failing command ---"
+FAIL_RESPONSE=$(curl -s --max-time 30 -w "\n%{http_code}" -X POST \
+  "${WORKLOAD_URL}/exec" \
+  -H "X-Service-Key: ${SERVICE_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"cmd": ["ls", "/nonexistent-path-12345"]}' \
-  --max-time 30)
+  -d '{"cmd": ["ls", "/nonexistent-path-12345"], "timeout_seconds": 10}')
+FAIL_STATUS=$(echo "$FAIL_RESPONSE" | tail -1)
+FAIL_BODY=$(echo "$FAIL_RESPONSE" | head -n -1)
 
-echo "SSE Response:"
-echo "${FAIL_RESPONSE}"
+echo "Exec Response:"
+echo "${FAIL_BODY}"
 echo ""
 
-if echo "$FAIL_RESPONSE" | grep -q "event: exit"; then
-  echo "PASS: Got exit event for failing command"
+if [ "$FAIL_STATUS" -eq 200 ] && echo "$FAIL_BODY" | grep -q '"exit_code"'; then
+  echo "PASS: Got exit code for failing command"
 else
-  echo "FAIL: Missing exit event for failing command"
+  echo "FAIL: Missing exec result for failing command"
   exit 1
 fi
 echo ""
 
-# Step 4: Touch sandbox
-echo "--- Step 4: Touch sandbox ---"
+# Step 5: Keepalive workload
+echo "--- Step 5: Keepalive workload ---"
 TOUCH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-  "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}/touch")
+  "${WORKLOAD_URL}/keepalive" \
+  -H "X-Service-Key: ${SERVICE_KEY}")
 
 if [ "$TOUCH_STATUS" -eq 200 ]; then
-  echo "PASS: Touch returned 200"
+  echo "PASS: Keepalive returned 200"
 else
-  echo "FAIL: Touch returned ${TOUCH_STATUS}"
+  echo "FAIL: Keepalive returned ${TOUCH_STATUS}"
   exit 1
 fi
 echo ""
 
-# Step 5: Delete sandbox
-echo "--- Step 5: Delete sandbox ---"
+# Step 6: Delete workload (release path)
+echo "--- Step 6: Delete workload ---"
 DELETE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-  "${MANAGER_URL}/v1/sandboxes/${SESSION_ID}")
+  "${WORKLOAD_URL}" \
+  -H "X-Service-Key: ${SERVICE_KEY}")
 
-if [ "$DELETE_STATUS" -eq 204 ]; then
-  echo "PASS: Delete returned 204"
+if [ "$DELETE_STATUS" -eq 200 ]; then
+  echo "PASS: Delete returned 200"
 else
   echo "FAIL: Delete returned ${DELETE_STATUS}"
   exit 1
 fi
 echo ""
 
-echo "=== All SSE Exec Smoke Tests PASSED ==="
+echo "=== ASBCP Exec Smoke Test PASSED ==="

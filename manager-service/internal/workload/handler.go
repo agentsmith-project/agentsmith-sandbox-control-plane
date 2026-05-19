@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox/manager/internal/afscp"
-	"github.com/sandbox/manager/internal/workspacebinding"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/sandbox/manager/internal/k8s"
-	"github.com/sandbox/manager/internal/observability"
-	retryutil "github.com/sandbox/manager/internal/retry"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/k8s"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
+	retryutil "github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/retry"
 )
 
 var k8sRetryConfig = retryutil.RetryConfig{

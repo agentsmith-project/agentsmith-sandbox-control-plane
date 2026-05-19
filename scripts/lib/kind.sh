@@ -76,19 +76,18 @@ dev_up() {
   if [[ "$reg" == "localhost:"* ]] || [[ "$reg" == "127.0.0.1:"* ]]; then
     log_info "Building images into local docker (pull uses proxy; Dockerfile build does not)..."
     DOCKER_IMAGE_HTTP_PROXY="" DOCKER_IMAGE_HTTPS_PROXY="" DOCKER_IMAGE_NO_PROXY="" \
-      "${root}/sbx" images build --pull-proxy "$proxy_mode" --build-proxy off
-    local manager_ver runner_ver
-    manager_ver="$(cat "${root}/manager-service/VERSION" 2>/dev/null || echo dev)"
-    runner_ver="$(cat "${root}/images/runner/VERSION" 2>/dev/null || echo dev)"
-    log_info "Loading images into Kind cluster..."
-    kind load docker-image "sandbox-manager:${manager_ver}" "sandbox-runner:${runner_ver}" --name "$cluster"
+      "${root}/sbx" images build --only asbcp --pull-proxy "$proxy_mode" --build-proxy off
+    local asbcp_ver
+    asbcp_ver="$(cat "${root}/VERSION" 2>/dev/null || echo dev)"
+    log_info "Loading ASBCP image into Kind cluster..."
+    kind load docker-image "agentsmith-sandbox-control-plane:${asbcp_ver}" --name "$cluster"
   else
     if [ -z "${HARBOR_USERNAME:-}" ] || [ -z "${HARBOR_PASSWORD:-}" ]; then
       die "Remote registry requires HARBOR_USERNAME and HARBOR_PASSWORD"
     fi
     log_info "Building and pushing images to registry (source=archive; build-proxy=off)..."
     DOCKER_IMAGE_HTTP_PROXY="" DOCKER_IMAGE_HTTPS_PROXY="" DOCKER_IMAGE_NO_PROXY="" \
-      "${root}/sbx" images push harbor --registry "$reg" --project "$proj" --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --proxy off --source archive --build-proxy off
+      "${root}/sbx" images push harbor --only asbcp --registry "$reg" --project "$proj" --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --proxy off --source archive --build-proxy off
   fi
 
   log_info "Updating k8s images for dev overlay..."

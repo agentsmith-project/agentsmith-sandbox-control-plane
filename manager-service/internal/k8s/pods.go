@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/sandbox/manager/internal/observability"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 )
 
 // GetPod retrieves a pod by name
