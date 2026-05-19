@@ -733,9 +733,8 @@ func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
-	var body map[string]string
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
-	assert.Contains(t, body["error"], "existing pod spec drift")
+	body := decodeError(t, rec)
+	assert.Contains(t, body.Error.Message, "existing pod spec drift")
 }
 
 // ---------------------------------------------------------------------------

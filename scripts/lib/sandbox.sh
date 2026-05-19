@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-sandbox_list() {
+workload_list() {
   local _root="$1"
   shift || true
 
-  local ns="sandbox"
-  local selector="app=llm-sandbox"
+  local ns="${WORKLOAD_NAMESPACE:-sandbox-workloads}"
+  local selector="${WORKLOAD_SELECTOR:-app=managed-workload}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --namespace) ns="${2:-sandbox}"; shift 2 ;;
-      --selector) selector="${2:-app=llm-sandbox}"; shift 2 ;;
+      --namespace) ns="${2:-$ns}"; shift 2 ;;
+      --selector) selector="${2:-$selector}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx sandbox list [--namespace sandbox] [--selector app=llm-sandbox]"
+        echo "Usage: ./sbx workloads list [--namespace sandbox-workloads] [--selector app=managed-workload]"
         return 0
         ;;
       *) die "Unknown option: $1" ;;
@@ -25,41 +25,40 @@ sandbox_list() {
       .items[]
       | [
           .metadata.name,
+          (.metadata.labels["workload_id"] // ""),
+          (.metadata.labels["workspace_id"] // ""),
+          (.metadata.labels["project_id"] // ""),
           (.status.phase // ""),
-          (.metadata.annotations["sandbox/ttlSeconds"] // ""),
-          (.metadata.annotations["sandbox/lastActiveAt"] // ""),
-          (.metadata.annotations["sandbox/expiresAt"] // "")
+          (.metadata.annotations["expires_at"] // ""),
+          (.metadata.annotations["last_activity_at"] // ""),
+          (.metadata.annotations["workload/maxExpiresAt"] // "")
         ] | @tsv' | column -t || true
   else
     kubectl -n "$ns" get pods -l "$selector" -o wide || true
   fi
 }
 
-sandbox_cleanup() {
+workload_expired() {
   local _root="$1"
   shift || true
 
-  local ns="sandbox"
-  local selector="app=llm-sandbox"
-  local dry_run="true"
+  local ns="${WORKLOAD_NAMESPACE:-sandbox-workloads}"
+  local selector="${WORKLOAD_SELECTOR:-app=managed-workload}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --namespace) ns="${2:-sandbox}"; shift 2 ;;
-      --selector) selector="${2:-app=llm-sandbox}"; shift 2 ;;
-      --dry-run) dry_run="true"; shift ;;
-      --force) dry_run="false"; shift ;;
+      --namespace) ns="${2:-$ns}"; shift 2 ;;
+      --selector) selector="${2:-$selector}"; shift 2 ;;
       -h|--help)
-        echo "Usage: ./sbx sandbox cleanup [--namespace sandbox] [--selector app=llm-sandbox] [--dry-run|--force]"
+        echo "Usage: ./sbx workloads expired [--namespace sandbox-workloads] [--selector app=managed-workload]"
         return 0
         ;;
       *) die "Unknown option: $1" ;;
     esac
   done
 
-  if [ "$dry_run" = "true" ]; then
-    log_info "Dry-run cleanup (no deletion). Use --force to delete."
-  fi
+  log_info "Listing expired ASBCP workload candidates only."
+  log_info "Use the ASBCP workload delete API for cleanup so AFSCP release and storage flush run."
 
   local now
   now="$(date -u +%s)"
@@ -77,10 +76,13 @@ sandbox_cleanup() {
       .items[]
       | [
           .metadata.name,
-          (.metadata.annotations["sandbox/expiresAt"] // ""),
-          (.metadata.annotations["sandbox/lastActiveAt"] // ""),
-          (.metadata.annotations["sandbox/ttlSeconds"] // "900")
-        ] | @tsv' | while IFS=$'\t' read -r name expiresAt lastActiveAt ttl; do
+          (.metadata.labels["workload_id"] // ""),
+          (.metadata.labels["workspace_id"] // ""),
+          (.metadata.labels["project_id"] // ""),
+          (.metadata.annotations["expires_at"] // ""),
+          (.metadata.annotations["last_activity_at"] // ""),
+          (.metadata.annotations["workload/idleTimeoutSec"] // "1800")
+        ] | @tsv' | while IFS=$'\t' read -r name workload_id workspace_id project_id expiresAt lastActiveAt ttl; do
         local expire_epoch=""
         if [ -n "$expiresAt" ]; then
           expire_epoch="$(date -u -d "$expiresAt" +%s 2>/dev/null || true)"
@@ -94,22 +96,12 @@ sandbox_cleanup() {
         fi
 
         if [ -z "$expire_epoch" ]; then
-          if [ "$dry_run" = "true" ]; then
-            echo "[dry-run] delete $name (no valid timestamps)"
-          else
-            echo "delete $name (no valid timestamps)"
-            kubectl -n "$ns" delete pod "$name" --grace-period=0 --force || true
-          fi
+          printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$workload_id" "$workspace_id" "$project_id" "missing valid expiry"
           continue
         fi
 
         if [ $(( now + skew )) -ge "$expire_epoch" ]; then
-          if [ "$dry_run" = "true" ]; then
-            echo "[dry-run] delete $name (expired)"
-          else
-            echo "delete $name (expired)"
-            kubectl -n "$ns" delete pod "$name" --grace-period=0 --force || true
-          fi
+          printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$workload_id" "$workspace_id" "$project_id" "expired"
         fi
       done
 }

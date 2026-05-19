@@ -12,12 +12,19 @@ ASBCP operations must be safe to retry unless explicitly documented otherwise.
 
 ## Error Shape
 
-API errors should include:
+API errors use a stable JSON envelope:
 
-- Stable machine-readable error code.
-- Human-readable message.
-- Request identifier when available.
-- Retry hint when useful.
+```json
+{
+  "error": {
+    "code": "dependency_failure",
+    "message": "AFSCP orchestrator mount plan is unavailable",
+    "request_id": "req-..."
+  }
+}
+```
+
+The envelope must include a stable machine-readable `code`, a human-readable `message`, and `request_id` when available. API responses must not expose Kubernetes raw errors, AFSCP raw errors, service keys, AFSCP tokens, raw storage credentials, or full command output unless explicitly safe.
 
 ## Status Codes
 

@@ -196,6 +196,21 @@ func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(v))
 }
 
+type testErrorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
+	} `json:"error"`
+}
+
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) testErrorEnvelope {
+	t.Helper()
+	var body testErrorEnvelope
+	decodeJSON(t, rec, &body)
+	return body
+}
+
 // ---------------------------------------------------------------------------
 // PodName
 // ---------------------------------------------------------------------------
@@ -379,26 +394,47 @@ func TestJsonError(t *testing.T) {
 	tests := []struct {
 		name    string
 		status  int
+		code    string
 		message string
 	}{
-		{"400 bad request", http.StatusBadRequest, "invalid input"},
-		{"404 not found", http.StatusNotFound, "pod not found"},
-		{"500 internal", http.StatusInternalServerError, "something broke"},
+		{"400 bad request", http.StatusBadRequest, "invalid_request", "invalid input"},
+		{"404 not found", http.StatusNotFound, "not_found", "pod not found"},
+		{"500 internal", http.StatusInternalServerError, "internal_error", "something broke"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			jsonError(rec, tt.status, tt.message)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("X-Request-Id", "req-test")
+			jsonError(rec, req, tt.status, tt.code, tt.message)
 
 			assert.Equal(t, tt.status, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
 
-			var body map[string]string
-			decodeJSON(t, rec, &body)
-			assert.Equal(t, tt.message, body["error"])
-			assert.Len(t, body, 1, "error response should only have 'error' key")
+			body := decodeError(t, rec)
+			assert.Equal(t, tt.code, body.Error.Code)
+			assert.Equal(t, tt.message, body.Error.Message)
+			assert.Equal(t, "req-test", body.Error.RequestID)
 		})
 	}
+}
+
+func TestHandleExec_K8sErrorUsesStableEnvelopeWithoutRawLeak(t *testing.T) {
+	h := newTestHandler(t)
+	payload, _ := json.Marshal(ExecRequest{Cmd: []string{"echo", "hello"}})
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set("X-Request-Id", "req-k8s")
+	rec := httptest.NewRecorder()
+
+	h.handleExec(rec, req, "nonexistent")
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	body := decodeError(t, rec)
+	assert.Equal(t, "not_found", body.Error.Code)
+	assert.Equal(t, "pod not found", body.Error.Message)
+	assert.Equal(t, "req-k8s", body.Error.RequestID)
+	assert.NotContains(t, rec.Body.String(), "Status")
+	assert.NotContains(t, rec.Body.String(), "pods")
 }
 
 // ---------------------------------------------------------------------------
@@ -543,9 +579,8 @@ func TestHandleCreatePod_InvalidJSON(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Contains(t, body["error"], "invalid request body")
+	body := decodeError(t, rec)
+	assert.Contains(t, body.Error.Message, "invalid request body")
 }
 
 func TestHandleCreatePod_EmptyBody(t *testing.T) {
@@ -555,9 +590,8 @@ func TestHandleCreatePod_EmptyBody(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Contains(t, body["error"], "invalid request body")
+	body := decodeError(t, rec)
+	assert.Contains(t, body.Error.Message, "invalid request body")
 }
 
 func TestHandleCreatePod_MissingImage(t *testing.T) {
@@ -568,9 +602,8 @@ func TestHandleCreatePod_MissingImage(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "image is required", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "image is required", body.Error.Message)
 }
 
 func TestHandleCreatePodRejectsFieldsOutsideContract(t *testing.T) {
@@ -599,9 +632,8 @@ func TestHandleExec_InvalidJSON(t *testing.T) {
 	h.handleExec(rec, req, "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Contains(t, body["error"], "invalid request body")
+	body := decodeError(t, rec)
+	assert.Contains(t, body.Error.Message, "invalid request body")
 }
 
 func TestHandleExec_EmptyCmd(t *testing.T) {
@@ -612,9 +644,8 @@ func TestHandleExec_EmptyCmd(t *testing.T) {
 	h.handleExec(rec, req, "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "cmd is required", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "cmd is required", body.Error.Message)
 }
 
 func TestHandleExec_MissingCmd(t *testing.T) {
@@ -625,9 +656,8 @@ func TestHandleExec_MissingCmd(t *testing.T) {
 	h.handleExec(rec, req, "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "cmd is required", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "cmd is required", body.Error.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +672,8 @@ func TestHandleExec_PodNotFound(t *testing.T) {
 	h.handleExec(rec, req, "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "pod not found", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "pod not found", body.Error.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -730,9 +759,8 @@ func TestHandleDeletePod_NotFound(t *testing.T) {
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "pod not found", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "pod not found", body.Error.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -746,9 +774,8 @@ func TestHandleKeepalive_NotFound(t *testing.T) {
 	h.handleKeepalive(rec, req, "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	var body map[string]string
-	decodeJSON(t, rec, &body)
-	assert.Equal(t, "pod not found", body["error"])
+	body := decodeError(t, rec)
+	assert.Equal(t, "pod not found", body.Error.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,9 +1432,8 @@ func TestHandleCreatePod_InvalidResourceReturns400(t *testing.T) {
 			h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			var body map[string]string
-			decodeJSON(t, rec, &body)
-			assert.Contains(t, body["error"], tt.wantMsg)
+			body := decodeError(t, rec)
+			assert.Contains(t, body.Error.Message, tt.wantMsg)
 		})
 	}
 }

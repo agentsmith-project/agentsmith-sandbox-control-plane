@@ -366,6 +366,14 @@ func testBindingPVName(workspaceID, projectID, bindingID string) string {
 	return "juicefs-pv-" + workspaceID + "-" + projectID + "-" + strings.ReplaceAll(bindingID, "_", "-")
 }
 
+type testErrorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
+	} `json:"error"`
+}
+
 // ---- Auth error codes -------------------------------------------------------
 
 func TestHTTPStack_MissingKey_ReturnsMissingCode(t *testing.T) {
@@ -378,9 +386,9 @@ func TestHTTPStack_MissingKey_ReturnsMissingCode(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
-	var body map[string]string
+	var body testErrorEnvelope
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	assert.Equal(t, "SERVICE_KEY_MISSING", body["error"])
+	assert.Equal(t, "service_key_missing", body.Error.Code)
 }
 
 func TestHTTPStack_InvalidKey_ReturnsInvalidCode(t *testing.T) {
@@ -394,9 +402,9 @@ func TestHTTPStack_InvalidKey_ReturnsInvalidCode(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
-	var body map[string]string
+	var body testErrorEnvelope
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	assert.Equal(t, "SERVICE_KEY_INVALID", body["error"])
+	assert.Equal(t, "service_key_invalid", body.Error.Code)
 }
 
 func TestHTTPStack_AuthErrors_AreDistinct(t *testing.T) {
@@ -411,16 +419,16 @@ func TestHTTPStack_AuthErrors_AreDistinct(t *testing.T) {
 		resp, err := srv.Client().Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		var body map[string]string
+		var body testErrorEnvelope
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-		return body["error"]
+		return body.Error.Code
 	}
 
 	missing := doReq("")
 	invalid := doReq("bad")
 	assert.NotEqual(t, missing, invalid, "missing and invalid key errors must be distinct")
-	assert.Equal(t, "SERVICE_KEY_MISSING", missing)
-	assert.Equal(t, "SERVICE_KEY_INVALID", invalid)
+	assert.Equal(t, "service_key_missing", missing)
+	assert.Equal(t, "service_key_invalid", invalid)
 }
 
 // ---- Rate limiting in the HTTP stack ----------------------------------------

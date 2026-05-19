@@ -54,7 +54,7 @@ type DeleteResponse struct {
 }
 
 // KeepaliveResponse is the response for POST .../keepalive.
-// Client must send keepalive periodically; expired workloads must be released through the manager delete API.
+// Client must send keepalive periodically; expired workloads must be released through the workload delete API.
 type KeepaliveResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }

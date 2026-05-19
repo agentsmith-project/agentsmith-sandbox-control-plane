@@ -46,11 +46,18 @@ func TestServiceKeyMiddleware_MissingKey_Returns401WithCode(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	var resp map[string]string
+	var resp struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
 	err = json.Unmarshal(rec.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	assert.Equal(t, "SERVICE_KEY_MISSING", resp["error"],
-		"missing key must return SERVICE_KEY_MISSING, not the generic 'unauthorized'")
+	assert.Equal(t, "service_key_missing", resp.Error.Code,
+		"missing key must return a stable missing-key code, not the generic 'unauthorized'")
+	assert.NotContains(t, rec.Body.String(), "valid-key-123")
 }
 
 func TestServiceKeyMiddleware_InvalidKey_Returns401WithCode(t *testing.T) {
@@ -70,11 +77,18 @@ func TestServiceKeyMiddleware_InvalidKey_Returns401WithCode(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	var resp map[string]string
+	var resp struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
 	err = json.Unmarshal(rec.Body.Bytes(), &resp)
 	require.NoError(t, err)
-	assert.Equal(t, "SERVICE_KEY_INVALID", resp["error"],
-		"wrong key must return SERVICE_KEY_INVALID, distinguishable from missing key")
+	assert.Equal(t, "service_key_invalid", resp.Error.Code,
+		"wrong key must return a stable invalid-key code, distinguishable from missing key")
+	assert.NotContains(t, rec.Body.String(), "invalid-key")
 }
 
 // TestServiceKeyMiddleware_MissingVsInvalidDistinct verifies the two failure modes are
@@ -87,25 +101,33 @@ func TestServiceKeyMiddleware_MissingVsInvalidDistinct(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// No header → SERVICE_KEY_MISSING
+	// No header -> service_key_missing
 	noKey := httptest.NewRequest("GET", "/", nil)
 	noKeyRec := httptest.NewRecorder()
 	handler.ServeHTTP(noKeyRec, noKey)
-	var missingResp map[string]string
+	var missingResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
 	require.NoError(t, json.Unmarshal(noKeyRec.Body.Bytes(), &missingResp))
 
-	// Wrong header → SERVICE_KEY_INVALID
+	// Wrong header -> service_key_invalid
 	badKey := httptest.NewRequest("GET", "/", nil)
 	badKey.Header.Set("X-Service-Key", "not-real-key")
 	badKeyRec := httptest.NewRecorder()
 	handler.ServeHTTP(badKeyRec, badKey)
-	var invalidResp map[string]string
+	var invalidResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
 	require.NoError(t, json.Unmarshal(badKeyRec.Body.Bytes(), &invalidResp))
 
-	assert.NotEqual(t, missingResp["error"], invalidResp["error"],
+	assert.NotEqual(t, missingResp.Error.Code, invalidResp.Error.Code,
 		"missing-key and invalid-key errors must be distinct codes")
-	assert.Equal(t, "SERVICE_KEY_MISSING", missingResp["error"])
-	assert.Equal(t, "SERVICE_KEY_INVALID", invalidResp["error"])
+	assert.Equal(t, "service_key_missing", missingResp.Error.Code)
+	assert.Equal(t, "service_key_invalid", invalidResp.Error.Code)
 }
 
 func TestServiceKeyMiddleware_EmptyHeaderName_DefaultsToXServiceKey(t *testing.T) {

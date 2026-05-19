@@ -13,9 +13,22 @@ WL_ID="wl-test-$(date +%s)"
 BINDING_ID="${BINDING_ID:-wmb_demo}"
 AFSCP_NAMESPACE_ID="${AFSCP_NAMESPACE_ID:-ns_demo}"
 
+redact_secret() {
+  local value="${1:-}"
+  if [ -z "$value" ]; then
+    echo "<empty>"
+    return
+  fi
+  if [ "${#value}" -le 8 ]; then
+    echo "<redacted>"
+    return
+  fi
+  printf '%s...%s\n' "${value:0:4}" "${value: -4}"
+}
+
 echo "=== ASBCP API Test ==="
 echo "ASBCP URL: $ASBCP_URL"
-echo "Service Key: $SERVICE_KEY"
+echo "Service Key: $(redact_secret "$SERVICE_KEY")"
 echo "Workload: $WS_ID / $PROJ_ID / $WL_ID"
 echo ""
 

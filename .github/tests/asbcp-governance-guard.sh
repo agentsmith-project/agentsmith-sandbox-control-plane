@@ -24,6 +24,7 @@ require_contains() {
 
 required_files=(
   README.md
+  .gitignore
   LICENSE
   NOTICE
   CONTRIBUTING.md
@@ -112,7 +113,11 @@ require_contains .github/workflows/release.yml "--changelog-evidence-json" "fina
 require_contains .github/workflows/release.yml "dist/asbcp-changelog-evidence\\.json" "parsed CHANGELOG evidence handoff"
 require_contains .github/workflows/release.yml "--risk-status-json" "risk register release status parser"
 require_contains .github/workflows/release.yml "dist/asbcp-risk-status\\.json" "risk status evidence handoff"
+require_contains .github/workflows/release.yml "--api-contract-version" "API contract version parser"
+require_contains .github/workflows/release.yml "dist/asbcp-api-contract-version\\.txt" "parsed API contract version handoff"
 require_contains .github/workflows/release.yml "\"known_risk_status_source\"" "final manifest risk status source field"
+require_contains scripts/verify-release.sh "read_api_contract_version" "API contract version reader"
+require_contains scripts/verify-release.sh "check_api_contract_version_evidence" "API contract version evidence gate"
 require_contains scripts/verify-release.sh "### Breaking Changes" "CHANGELOG breaking changes subsection parser"
 require_contains scripts/verify-release.sh "emit_risk_status_evidence" "risk register release status evidence parser"
 require_contains scripts/verify-release.sh "docs/RISK_REGISTER\\.md" "risk register status source"
@@ -150,6 +155,39 @@ if grep -Eq 'KNOWN_RISK_STATUS:|os\.environ\["KNOWN_RISK_STATUS"\]' "${ROOT}/.gi
   fail "release workflow must derive known_risk_status from docs/RISK_REGISTER.md instead of a static KNOWN_RISK_STATUS string"
 fi
 
+if grep -Eq "API_CONTRACT_VERSION:[[:space:]]*['\"]?v[0-9]+" "${ROOT}/.github/workflows/release.yml"; then
+  fail "release workflow must derive api_contract_version from docs/contracts/api-contract.md"
+fi
+
+active_operator_surface_paths=(
+  "sbx"
+  "scripts/lib/sandbox.sh"
+)
+active_operator_alias_patterns=(
+  '(^|[[:space:]])\./sbx[[:space:]]+sandbox([[:space:]]|$)'
+  '(^|[[:space:]])sandbox\)'
+  'sbx_sandbox'
+  'sandbox_(list|cleanup)'
+  'app=llm-sandbox'
+  '\["sandbox/'
+  'kubectl[[:space:]][^[:cntrl:]]*delete[[:space:]]+pods?'
+)
+active_operator_alias_regex="$(IFS='|'; printf '%s' "${active_operator_alias_patterns[*]}")"
+active_operator_alias_output="$(mktemp -t asbcp-active-operator-alias.XXXXXX)"
+trap 'rm -f "${old_name_guard_output:-}" "${active_operator_alias_output:-}"' EXIT
+
+set +e
+git -C "${ROOT}" grep -n -I -E -- "${active_operator_alias_regex}" -- "${active_operator_surface_paths[@]}" >"${active_operator_alias_output}"
+active_operator_alias_status=$?
+set -e
+if [ "${active_operator_alias_status}" -eq 0 ]; then
+  cat "${active_operator_alias_output}" >&2
+  fail "active sbx operator surface must use ASBCP workload wording and must not keep the retired sandbox alias/defaults/direct pod deletion"
+elif [ "${active_operator_alias_status}" -ne 1 ]; then
+  cat "${active_operator_alias_output}" >&2
+  fail "active sbx operator alias scan failed"
+fi
+
 if grep -Eq 'access/(ingress|nodeport|loadbalancer)\.yaml' "${ROOT}/k8s/overlays/production/kustomization.yaml"; then
   fail "production overlay must be internal-only by default and must not include ASBCP access resources"
 fi
@@ -185,57 +223,83 @@ if failures:
     sys.exit(1)
 PY
 
-guard_paths=(
-  README.md
-  CONTRIBUTING.md
-  SECURITY.md
-  CHANGELOG.md
-  NOTICE
-  docs/DEVELOPER_GUIDE.md
-  docs/DEVELOPMENT_GOVERNANCE.md
-  docs/RELEASE_GATES.md
-  docs/READINESS_EVIDENCE.md
-  docs/RISK_REGISTER.md
-  docs/README.md
-  docs/AFSCP_WORKLOAD_MOUNT_MODEL.md
-  docs/PRE_LAUNCH_CHECKLIST.md
-  docs/api-reference.md
-  docs/configuration.md
-  docs/runbook.md
-  docs/contracts
-  docs/runbooks
-  docs/adr
-  docs/release-evidence
-  .github
-  scripts/test
-  manager-service/scripts
-  k8s/config
-  k8s/overlays
-  scripts/verify-release.sh
+# Content scanning intentionally uses every tracked text file instead of a
+# directory allowlist. This keeps manager-service source/config/tests, go.mod,
+# Dockerfile, and k8s/base under the same governance guard as docs/workflows.
+# Exact guard/evidence self-tests are excluded because they intentionally keep
+# retired tokens as fixtures; active service and smoke test roots stay scanned.
+tracked_active_text_exclude_pathspecs=(
+  ':!.github/tests/asbcp-governance-guard.sh'
+  ':!manager-service/internal/app/active_contract_guard_test.go'
 )
 
-if rg -n -g '!.github/tests/asbcp-governance-guard.sh' "SANDBOX_MANAGER|SANDBOX_SERVICE_KEY|github\\.com/sandbox/manager|mbos-sandbox-v1|agentsmith-sandbox-manager|/v1/sandboxes|sandbox-manager|Sandbox Manager|sandbox manager|build-manager" "${guard_paths[@]}" >/tmp/asbcp-old-name-guard.txt; then
-  cat /tmp/asbcp-old-name-guard.txt >&2
-  fail "old ASBCP naming or retired API path found in governed release surface"
-fi
-
-active_old_smoke_paths=(
-  scripts/test
-  manager-service/scripts
-  manager-service/e2e
-  k8s/config
-  k8s/overlays/dev/README.md
-  k8s/overlays/dev/patches/README.md
-  k8s/overlays/staging/README.md
-  k8s/overlays/staging/patches/README.md
-  k8s/overlays/production/README.md
-  k8s/overlays/production/patches/README.md
-  k8s/overlays/production/patches/security-hardening.yaml
+canonical_forbidden_content_patterns=(
+  'SANDBOX_MANAGER(_[A-Z0-9_]+)?'
+  'SANDBOX_CONTROL_PLANE(_[A-Z0-9_]+)?'
+  'SANDBOX_SERVICE_KEY'
+  'SANDBOX_SOURCE_DIR'
+  '--sandbox-source-dir'
+  'github\.com/sandbox/manager'
+  'mbos-sandbox-v1'
+  'agentsmith-sandbox-manager'
+  '/v1/sandboxes'
+  'sandbox-manager'
+  'Sandbox Manager'
+  'sandbox manager'
+  'sandboxManager'
+  'SandboxManager'
+  'sandbox_manager'
+  'manager delete API'
+  'sandboxControlPlane'
+  'SandboxControlPlane'
+  'sandbox_control_plane'
+  'start-manager'
+  'stop-manager'
+  'restart-manager'
+  'build-manager'
+  '/etc/asbcp/config\.yaml'
+  '/etc/sandbox-manager/manager-config\.yaml'
+  'sandbox-manager-image\.lock'
+  'sandbox-manager-pv-rbac\.yaml\.tpl'
+  'go[[:space:]]+run[[:space:]]+\./cmd/manager'
+  '\./cmd/manager'
+  'cmd/manager'
+  'cmd/cleaner'
+  'E2E_MANAGER_'
+  'ManagerURL'
+  'ManagerBin'
+  'MANAGER_URL'
+  'MANAGER_VERSION'
+  'MANAGER_[A-Z0-9_]*'
+  'SANDBOX_ID'
+  'create_sandbox'
+  'delete_sandbox'
+  'create sandbox'
+  'Create sandbox'
+  'Creating sandbox'
+  'Failed to create sandbox'
+  'Sandbox ID'
+  'sandbox ID'
+  'GC_VERSION'
+  'Manager 副本'
+  'Manager 可能'
+  'Manager 测试'
+  'Manager 代码'
 )
 
-if rg -n "E2E_MANAGER_|ManagerURL|ManagerBin|manager|Manager|MANAGER_URL|MANAGER_|SANDBOX_ID|create_sandbox|delete_sandbox|create sandbox|Create sandbox|Creating sandbox|Failed to create sandbox|Sandbox ID|sandbox ID|MANAGER_VERSION|GC_VERSION|Manager 副本|Manager 可能|Manager 测试|Manager 代码" "${active_old_smoke_paths[@]}" >/tmp/asbcp-old-smoke-guard.txt; then
-  cat /tmp/asbcp-old-smoke-guard.txt >&2
-  fail "old manager/sandbox smoke or operator wording found in active ASBCP surface"
+canonical_forbidden_content_regex="$(IFS='|'; printf '%s' "${canonical_forbidden_content_patterns[*]}")"
+old_name_guard_output="$(mktemp -t asbcp-old-name-guard.XXXXXX)"
+
+set +e
+git -C "${ROOT}" grep -n -I -E -- "${canonical_forbidden_content_regex}" -- . "${tracked_active_text_exclude_pathspecs[@]}" >"${old_name_guard_output}"
+old_name_guard_status=$?
+set -e
+if [ "${old_name_guard_status}" -eq 0 ]; then
+  cat "${old_name_guard_output}" >&2
+  fail "old ASBCP naming, retired command invocation, or smoke/operator alias found in tracked active text"
+elif [ "${old_name_guard_status}" -ne 1 ]; then
+  cat "${old_name_guard_output}" >&2
+  fail "tracked active text old-name scan failed"
 fi
 
 canonical_forbidden_path_tokens=(
@@ -251,7 +315,19 @@ canonical_forbidden_path_tokens=(
   "agentsmith-integration-contract-v2"
   "wait-for-minio.sh"
   "mbos-sandbox-v1"
+  "SANDBOX_CONTROL_PLANE"
+  "SANDBOX_SOURCE_DIR"
+  "--sandbox-source-dir"
+  "start-manager"
+  "stop-manager"
+  "restart-manager"
+  "sandbox-manager-image.lock"
+  "sandbox-manager-pv-rbac.yaml.tpl"
 )
+
+# Content guard also covers retired config paths: /etc/asbcp/config.yaml and
+# /etc/sandbox-manager/manager-config.yaml. Keep these literals visible so the
+# guard's own coverage tests can detect accidental removal.
 
 active_path_exception_root="manager-service"
 active_path_exception_prefix="${active_path_exception_root}/"

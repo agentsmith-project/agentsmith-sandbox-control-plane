@@ -1,9 +1,22 @@
 package observability
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"regexp"
+	"strings"
 )
+
+const maxRedactedLogValueLength = 512
+
+var logValueRedactionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^ \t,;]+`),
+	regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`(?i)(\b(?:token|access_token|refresh_token|id_token|api[_-]?key|secret|password|credential|credentials|service[_-]?key|client[_-]?secret)\b\s*[:=]\s*)("[^"]*"|'[^']*'|[^ \t,;]+)`),
+	regexp.MustCompile(`(?i)("?(?:token|access_token|refresh_token|id_token|api[_-]?key|secret|password|credential|credentials|service[_-]?key|client[_-]?secret)"?\s*:\s*)("[^"]*"|[^,}\s]+)`),
+	regexp.MustCompile(`([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@`),
+}
 
 // Logger is the interface for logging
 type Logger interface {
@@ -76,6 +89,25 @@ func Warn(msg string, args ...interface{}) {
 // Error logs an error message
 func Error(msg string, args ...interface{}) {
 	globalLogger.Error(msg, args...)
+}
+
+// RedactLogValue formats an error/log value for service logs without exposing
+// credential-like material or unbounded command/dependency output.
+func RedactLogValue(value interface{}) string {
+	text := fmt.Sprint(value)
+	text = strings.ReplaceAll(text, "\r", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+
+	for _, pattern := range logValueRedactionPatterns {
+		text = pattern.ReplaceAllString(text, "${1}[REDACTED]")
+	}
+
+	runes := []rune(text)
+	if len(runes) > maxRedactedLogValueLength {
+		text = string(runes[:maxRedactedLogValueLength]) + "...[TRUNCATED]"
+	}
+	return text
 }
 
 // InitLogging initializes logging based on environment variables

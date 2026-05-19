@@ -18,7 +18,7 @@ case "${1:-}" in
     shift
     CHANGELOG_EVIDENCE_TAG="${1:-}"
     [ -n "${CHANGELOG_EVIDENCE_TAG}" ] || {
-      echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json]" >&2
+      echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json|--api-contract-version]" >&2
       exit 2
     }
     shift
@@ -27,14 +27,18 @@ case "${1:-}" in
     MODE="risk-status-json"
     shift
     ;;
+  "--api-contract-version")
+    MODE="api-contract-version"
+    shift
+    ;;
   *)
-    echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json]" >&2
+    echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json|--api-contract-version]" >&2
     exit 2
     ;;
 esac
 
 if [ "$#" -ne 0 ]; then
-  echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json]" >&2
+  echo "usage: bash scripts/verify-release.sh [--quick|--changelog-evidence-json <tag>|--risk-status-json|--api-contract-version]" >&2
   exit 2
 fi
 
@@ -64,6 +68,25 @@ shell_function_stanza() {
 
 read_version() {
   tr -d '[:space:]' < "${ROOT}/VERSION"
+}
+
+read_api_contract_version() {
+  require_cmd python3
+  python3 - "${ROOT}/docs/contracts/api-contract.md" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+match = re.search(r"^Contract version:\s*`([^`]+)`\s*$", text, re.MULTILINE)
+if not match:
+    raise SystemExit("docs/contracts/api-contract.md must declare Contract version: `<version>`")
+version = match.group(1).strip()
+if not re.fullmatch(r"v[0-9]+", version):
+    raise SystemExit(f"API contract version must look like vN, got {version!r}")
+print(version)
+PY
 }
 
 check_version_tag_contract() {
@@ -287,6 +310,38 @@ if failures:
 PY
 }
 
+check_api_contract_version_evidence() {
+  require_cmd python3
+  local contract_version
+  contract_version="$(read_api_contract_version)"
+  [ -n "$contract_version" ] || fail "could not read API contract version"
+
+  python3 - "${ROOT}/docs/release-evidence/release-manifest.json" "$contract_version" <<'PY'
+import json
+import sys
+
+manifest_path = sys.argv[1]
+contract_version = sys.argv[2]
+with open(manifest_path, "r", encoding="utf-8") as fh:
+    manifest = json.load(fh)
+
+if manifest.get("api_contract_version") != contract_version:
+    raise SystemExit(
+        "docs/release-evidence/release-manifest.json api_contract_version must match "
+        f"docs/contracts/api-contract.md Contract version {contract_version}"
+    )
+PY
+
+  local workflow="${ROOT}/.github/workflows/release.yml"
+  grep -Fq -- "--api-contract-version" "$workflow" || \
+    fail "release workflow must read API contract version through scripts/verify-release.sh --api-contract-version"
+  grep -Fq -- "dist/asbcp-api-contract-version.txt" "$workflow" || \
+    fail "release workflow must pass parsed API contract version through dist/asbcp-api-contract-version.txt"
+  if grep -Eq "API_CONTRACT_VERSION:[[:space:]]*['\"]?v[0-9]+" "$workflow"; then
+    fail "release workflow must not hardcode API_CONTRACT_VERSION; read docs/contracts/api-contract.md"
+  fi
+}
+
 check_release_workflow_lock_output() {
   require_cmd python3
   local workflow="${ROOT}/.github/workflows/release.yml"
@@ -336,6 +391,9 @@ check_release_workflow_lock_output() {
     "dist/asbcp-changelog-evidence.json"
     "--risk-status-json"
     "dist/asbcp-risk-status.json"
+    "--api-contract-version"
+    "dist/asbcp-api-contract-version.txt"
+    'api_contract_version = Path("dist/asbcp-api-contract-version.txt").read_text'
     '"schema_id": "https://agentsmith.dev/schemas/asbcp/final-manifest.v1.json"'
     '"tag_ref"'
     '"tag_resolved_digest"'
@@ -345,6 +403,7 @@ check_release_workflow_lock_output() {
     'Changelog summary: {changelog_evidence["changelog_summary"]}'
     'risk_status_evidence["known_risk_status"]'
     'risk_status_evidence["source"]'
+    'API contract version: {api_contract_version}'
     'asbcp_version={os.environ["ASBCP_VERSION"]}'
     'Path("dist/asbcp-release-notes.md").write_text(manifest["release_notes"]["body_source"]'
   )
@@ -389,6 +448,9 @@ check_release_workflow_lock_output() {
   fi
   if grep -Eq 'KNOWN_RISK_STATUS:|os\.environ\["KNOWN_RISK_STATUS"\]' "$workflow"; then
     fail "release workflow must derive known_risk_status from docs/RISK_REGISTER.md instead of a static KNOWN_RISK_STATUS string"
+  fi
+  if grep -Eq "API_CONTRACT_VERSION:[[:space:]]*['\"]?v[0-9]+" "$workflow"; then
+    fail "release workflow must derive api_contract_version from docs/contracts/api-contract.md"
   fi
 
   python3 - "$workflow" <<'PY'
@@ -652,6 +714,13 @@ check_dockerfile_contract() {
   done
 }
 
+check_raw_storage_sdk_dependency_absent() {
+  local raw_storage_sdk_prefix="github.com/""mi""nio/"
+  if grep -Fq "$raw_storage_sdk_prefix" "${ROOT}/manager-service/go.mod" "${ROOT}/manager-service/go.sum"; then
+    fail "unused raw-storage SDK dependency ${raw_storage_sdk_prefix}* must stay out of ASBCP Go module"
+  fi
+}
+
 render_kustomize_overlays() {
   local version="$1"
   require_cmd kubectl
@@ -757,6 +826,11 @@ if [ "${MODE}" = "risk-status-json" ]; then
   exit 0
 fi
 
+if [ "${MODE}" = "api-contract-version" ]; then
+  read_api_contract_version
+  exit 0
+fi
+
 run bash "${ROOT}/.github/tests/asbcp-governance-guard.sh"
 run bash -n "${ROOT}/scripts/verify-release.sh"
 run bash -n "${ROOT}/.github/tests/asbcp-governance-guard.sh"
@@ -766,9 +840,11 @@ VERSION="$(read_version)"
 check_version_tag_contract "$VERSION"
 check_changelog_release_evidence "v${VERSION}"
 check_risk_status_evidence
+check_api_contract_version_evidence
 check_release_workflow_lock_output
 check_final_manifest_schema
 check_readiness_evidence
+check_raw_storage_sdk_dependency_absent
 
 EXPECTED_GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "${ROOT}/manager-service/go.mod")"
 [ -n "${EXPECTED_GO_VERSION}" ] || fail "could not read Go version from manager-service/go.mod"

@@ -276,7 +276,7 @@ test_05_auth_no_key() {
     local body=$(echo "$response" | head -n-1)
 
     assert_http_status 401 "$status" "should return 401 without service key" || return 1
-    assert_contains "$body" "SERVICE_KEY_MISSING" "should return SERVICE_KEY_MISSING error" || return 1
+    assert_contains "$body" "service_key_missing" "should return service_key_missing error" || return 1
 }
 
 test_06_auth_invalid_key() {
@@ -289,7 +289,7 @@ test_06_auth_invalid_key() {
     local body=$(echo "$response" | head -n-1)
 
     assert_http_status 401 "$status" "should return 401 with invalid service key" || return 1
-    assert_contains "$body" "SERVICE_KEY_INVALID" "should return SERVICE_KEY_INVALID error" || return 1
+    assert_contains "$body" "service_key_invalid" "should return service_key_invalid error" || return 1
 }
 
 test_07_auth_valid_key() {

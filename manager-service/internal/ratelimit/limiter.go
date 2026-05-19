@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"net/http"
 
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
 	"golang.org/x/time/rate"
 )
 
@@ -35,7 +36,7 @@ func (l *Limiter) Allow() bool {
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !l.Allow() {
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			httperror.Write(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)

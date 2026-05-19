@@ -260,16 +260,35 @@ func TestEnsureBindingFailsClosedWhenAFSCPPlanUnavailable(t *testing.T) {
 	client := &fakeK8sClient{}
 	handler := NewHandler(client, Options{
 		Namespace:   "sandbox-workloads",
-		AFSCPClient: &fakeAFSCPClient{plan: validPlan(), err: errors.New("afscp down")},
+		AFSCPClient: &fakeAFSCPClient{plan: validPlan(), err: errors.New("afscp token raw-secret failed for mount wmb_demo")},
 	})
 	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
 	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	req.Header.Set("X-Request-Id", "req-afscp")
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if body.Error.Code != "dependency_failure" || body.Error.Message == "" || body.Error.RequestID != "req-afscp" {
+		t.Fatalf("unexpected error envelope: %+v", body.Error)
+	}
+	for _, raw := range []string{"raw-secret", "wmb_demo"} {
+		if strings.Contains(rec.Body.String(), raw) {
+			t.Fatalf("AFSCP raw error detail leaked to API client via %q: %s", raw, rec.Body.String())
+		}
 	}
 	if client.pv != nil || client.pvc != nil {
 		t.Fatalf("expected no k8s resources when AFSCP plan is unavailable")
@@ -342,8 +361,11 @@ func TestDeleteBindingReturnsErrorWhenPVCDeleteFails(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "pvc delete failed") {
-		t.Fatalf("expected pvc delete error in response, got %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "pvc delete failed") {
+		t.Fatalf("raw pvc delete error must not leak in response, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "delete persistent volume claim failed") {
+		t.Fatalf("expected stable pvc delete error message, got %s", rec.Body.String())
 	}
 }
 
@@ -362,7 +384,10 @@ func TestDeleteBindingReturnsErrorWhenPVDeleteFails(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "pv delete failed") {
-		t.Fatalf("expected pv delete error in response, got %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "pv delete failed") {
+		t.Fatalf("raw pv delete error must not leak in response, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "delete persistent volume failed") {
+		t.Fatalf("expected stable pv delete error message, got %s", rec.Body.String())
 	}
 }

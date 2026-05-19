@@ -14,24 +14,24 @@ const (
 	testProj = "proj-e2e"
 )
 
-// TestAuth_NoKey verifies that requests without a service key return 401 SERVICE_KEY_MISSING.
+// TestAuth_NoKey verifies that requests without a service key return 401 service_key_missing.
 func TestAuth_NoKey(t *testing.T) {
 	wlID := uniqueID("auth-no-key")
 	resp := newUnauthClient().CreateWorkload(t, testWS, testProj, wlID,
 		CreateRequest{Image: suite.Image})
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-	assert.Contains(t, resp.BodyString(), "SERVICE_KEY_MISSING")
+	assert.Contains(t, resp.BodyString(), "service_key_missing")
 }
 
-// TestAuth_InvalidKey verifies that a wrong service key returns 401 SERVICE_KEY_INVALID.
+// TestAuth_InvalidKey verifies that a wrong service key returns 401 service_key_invalid.
 func TestAuth_InvalidKey(t *testing.T) {
 	wlID := uniqueID("auth-bad-key")
 	resp := newWrongKeyClient().CreateWorkload(t, testWS, testProj, wlID,
 		CreateRequest{Image: suite.Image})
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-	assert.Contains(t, resp.BodyString(), "SERVICE_KEY_INVALID")
+	assert.Contains(t, resp.BodyString(), "service_key_invalid")
 }
 
 // TestAuth_ValidKey verifies that a correct service key passes through authentication.

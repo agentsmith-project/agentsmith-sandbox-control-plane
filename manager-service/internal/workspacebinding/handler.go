@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -115,10 +116,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	workspaceID, projectID, bindingID, ok := parseBindingRoute(r.URL.Path)
 	if !ok {
+		jsonError(w, r, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	if !isValidName(bindingID) {
-		jsonError(w, http.StatusBadRequest, "invalid binding_id")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid binding_id")
 		return
 	}
 	switch r.Method {
@@ -129,7 +131,7 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		h.handleDelete(w, r, workspaceID, projectID, bindingID)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		jsonError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -155,33 +157,33 @@ func parseBindingRoute(path string) (workspaceID, projectID, bindingID string, o
 func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) {
 	req, err := decodeEnsureRequest(r)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error())
 		return
 	}
 	if h.options.AFSCPClient == nil {
-		jsonError(w, http.StatusInternalServerError, "afscp client is not configured")
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "AFSCP client is not configured")
 		return
 	}
 	mountBindingID := firstNonEmpty(req.MountBindingID, bindingID)
 	if err := validateAFSCPNamespaceID(req.NamespaceID); err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid namespace_id")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid namespace_id")
 		return
 	}
 	if err := validateAFSCPMountBindingID(mountBindingID); err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid mount_binding_id")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid mount_binding_id")
 		return
 	}
 	if req.MountBindingID != "" && req.MountBindingID != bindingID {
-		jsonError(w, http.StatusBadRequest, "binding_id and mount_binding_id must match")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "binding_id and mount_binding_id must match")
 		return
 	}
 	plan, err := h.options.AFSCPClient.GetOrchestratorMountPlan(r.Context(), req.NamespaceID, mountBindingID, correlationID(r))
 	if err != nil {
-		jsonError(w, http.StatusBadGateway, "get afscp orchestrator mount plan failed: "+err.Error())
+		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP orchestrator mount plan is unavailable")
 		return
 	}
 	if err := validatePlan(req.NamespaceID, mountBindingID, plan); err != nil {
-		jsonError(w, http.StatusBadGateway, "invalid afscp orchestrator mount plan: "+err.Error())
+		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP orchestrator mount plan is invalid")
 		return
 	}
 
@@ -209,11 +211,11 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 	}
 
 	if err := h.k8sClient.EnsurePersistentVolume(ctx, h.buildPV(status, plan)); err != nil {
-		jsonError(w, http.StatusInternalServerError, "ensure persistent volume failed: "+err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "ensure persistent volume failed")
 		return
 	}
 	if err := h.k8sClient.EnsurePersistentVolumeClaim(ctx, h.options.Namespace, h.buildPVC(status, plan)); err != nil {
-		jsonError(w, http.StatusInternalServerError, "ensure persistent volume claim failed: "+err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "ensure persistent volume claim failed")
 		return
 	}
 	jsonResponse(w, http.StatusOK, status)
@@ -225,24 +227,24 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 	pv, err := h.k8sClient.GetPersistentVolume(ctx, pvName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, "not found", http.StatusNotFound)
+			jsonError(w, r, http.StatusNotFound, "not_found", "workspace binding not found")
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "get persistent volume failed")
 		return
 	}
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.options.Namespace, pvcName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, "not found", http.StatusNotFound)
+			jsonError(w, r, http.StatusNotFound, "not_found", "workspace binding not found")
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "get persistent volume claim failed")
 		return
 	}
 	status, err := bindingStatusFromObjects(workspaceID, projectID, bindingID, h.options.Namespace, pv, pvc)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "workspace binding status is invalid")
 		return
 	}
 	jsonResponse(w, http.StatusOK, status)
@@ -253,19 +255,19 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspace
 	pvName, pvcName := names(workspaceID, projectID, bindingID)
 	active, err := h.activeWorkloadsForBinding(ctx, workspaceID, projectID, bindingID)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "check active workloads failed: "+err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "check active workloads failed")
 		return
 	}
 	if len(active) > 0 {
-		jsonError(w, http.StatusConflict, "workspace binding has active workloads; delete workloads first: "+strings.Join(active, ","))
+		jsonError(w, r, http.StatusConflict, "conflict", "workspace binding has active workloads; delete workloads first: "+strings.Join(active, ","))
 		return
 	}
 	if err := h.k8sClient.DeletePersistentVolumeClaim(ctx, h.options.Namespace, pvcName); err != nil {
-		jsonError(w, http.StatusInternalServerError, "delete persistent volume claim failed: "+err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "delete persistent volume claim failed")
 		return
 	}
 	if err := h.k8sClient.DeletePersistentVolume(ctx, pvName); err != nil {
-		jsonError(w, http.StatusInternalServerError, "delete persistent volume failed: "+err.Error())
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "delete persistent volume failed")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]string{"message": "binding deleted"})
@@ -444,8 +446,8 @@ func jsonResponse(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func jsonError(w http.ResponseWriter, status int, message string) {
-	jsonResponse(w, status, map[string]string{"error": message})
+func jsonError(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
+	httperror.Write(w, r, status, code, message)
 }
 
 func decodeEnsureRequest(r *http.Request) (EnsureRequest, error) {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1011,13 +1012,27 @@ func TestGovernanceGuardCoversTrackedOldNamePaths(t *testing.T) {
 		t.Fatalf("read governance guard: %v", err)
 	}
 	guard := string(guardBytes)
+	contentBlockStart := strings.Index(guard, "canonical_forbidden_content_patterns=(")
+	contentBlockEnd := -1
+	if contentBlockStart >= 0 {
+		contentBlockEnd = strings.Index(guard[contentBlockStart:], "\n)\n\ncanonical_forbidden_content_regex=")
+	}
+	forbiddenContentBlock := ""
+	if contentBlockStart >= 0 && contentBlockEnd >= 0 {
+		forbiddenContentBlock = guard[contentBlockStart : contentBlockStart+contentBlockEnd]
+	}
 	requiredGuardTokens := []string{
 		`cd "${ROOT}"`,
 		`git -C "${ROOT}" ls-files`,
+		`git -C "${ROOT}" grep`,
+		`-- . "${tracked_active_text_exclude_pathspecs[@]}"`,
 		`--ignored`,
 		`find "${ROOT}"`,
 		`-path "${ROOT}/.git"`,
 		`-prune`,
+		"tracked active text",
+		"tracked_active_text_exclude_pathspecs",
+		"canonical_forbidden_content_patterns",
 		"canonical_forbidden_path_tokens",
 		"active_path_exception_root",
 		"active_path_exception_prefix",
@@ -1026,10 +1041,16 @@ func TestGovernanceGuardCoversTrackedOldNamePaths(t *testing.T) {
 		"manager",
 		"manager-service/",
 		"Go module root exception only",
-		"manager-service/e2e",
+		"go.mod",
+		"Dockerfile",
+		"k8s/base",
 		"E2E_MANAGER_",
 		"ManagerURL",
 		"ManagerBin",
+		"MANAGER_URL",
+		"MANAGER_VERSION",
+		"go[[:space:]]+run[[:space:]]+\\./cmd/manager",
+		"\\./cmd/manager",
 		"manager-config",
 		"sandbox-manager",
 		"sandbox manager",
@@ -1043,11 +1064,27 @@ func TestGovernanceGuardCoversTrackedOldNamePaths(t *testing.T) {
 		"agentsmith-integration-contract-v2",
 		"wait-for-minio.sh",
 		"mbos-sandbox-v1",
+		"SANDBOX_CONTROL_PLANE",
+		"SANDBOX_SOURCE_DIR",
+		"--sandbox-source-dir",
+		"start-manager",
+		"stop-manager",
+		"restart-manager",
 	}
 	var violations []string
+	if forbiddenContentBlock == "" {
+		violations = append(violations, "governance guard missing canonical forbidden content patterns block")
+	}
 	for _, token := range requiredGuardTokens {
 		if !strings.Contains(guard, token) {
 			violations = append(violations, "governance guard missing old-name path coverage token "+token)
+		}
+	}
+	for _, token := range []string{
+		"manager delete API",
+	} {
+		if !strings.Contains(forbiddenContentBlock, token) {
+			violations = append(violations, "governance guard canonical forbidden content block missing "+token)
 		}
 	}
 
@@ -1066,17 +1103,18 @@ func TestGovernanceGuardCoversTrackedOldNamePaths(t *testing.T) {
 		violations = append(violations, "quick verifier used repo-relative guard paths outside repo root:\n"+string(quickOutput))
 	}
 	for _, token := range []string{
-		"scripts/test",
-		"manager-service/scripts",
-		"manager-service/e2e",
-		"k8s/config",
-		"k8s/overlays",
+		"tracked active text",
+		"git -C \"${ROOT}\" grep",
+		"manager-service source/config/tests",
+		"go.mod",
+		"Dockerfile",
+		"k8s/base",
 		"E2E_MANAGER_",
 		"ManagerURL",
 		"ManagerBin",
-		"manager",
-		"Manager",
 		"MANAGER_URL",
+		"MANAGER_VERSION",
+		"MANAGER_[A-Z0-9_]*",
 		"SANDBOX_ID",
 		"create_sandbox",
 		"delete_sandbox",
@@ -1156,8 +1194,245 @@ func TestGovernanceGuardCoversTrackedOldNamePaths(t *testing.T) {
 			}
 		}
 	}
+	if strings.Contains(guard, "guard_paths=(") || strings.Contains(guard, "active_old_smoke_paths=(") {
+		violations = append(violations, "governance guard must scan tracked text instead of old directory allowlists")
+	}
 	if len(violations) > 0 {
 		t.Fatalf("old-name path guard violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestCanonicalForbiddenListCoversReleaseIndependencePlan(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	guardPath := filepath.Join(repoRoot, ".github", "tests", "asbcp-governance-guard.sh")
+	guardBytes, err := os.ReadFile(guardPath)
+	if err != nil {
+		t.Fatalf("read governance guard: %v", err)
+	}
+	guard := string(guardBytes)
+	requiredGuardTokens := []string{
+		"SANDBOX_MANAGER",
+		"SANDBOX_CONTROL_PLANE",
+		"SANDBOX_SOURCE_DIR",
+		"--sandbox-source-dir",
+		"start-manager",
+		"stop-manager",
+		"restart-manager",
+		"sandboxControlPlane",
+		"SandboxControlPlane",
+		"sandbox_control_plane",
+		"/etc/asbcp/config.yaml",
+		"/etc/sandbox-manager/manager-config.yaml",
+		"sandbox-manager-image.lock",
+		"sandbox-manager-pv-rbac.yaml.tpl",
+		"go[[:space:]]+run[[:space:]]+\\./cmd/manager",
+		"\\./cmd/manager",
+		"MANAGER_URL",
+		"MANAGER_VERSION",
+		".gitignore",
+	}
+	var violations []string
+	for _, token := range requiredGuardTokens {
+		if !strings.Contains(guard, token) {
+			violations = append(violations, "governance guard missing canonical forbidden token "+token)
+		}
+	}
+	if scope := activeContractScope("docs/plans/2026-02-08-i03-comprehensive-fixes-plan.md"); scope != "docs" {
+		violations = append(violations, "docs/plans markdown must be scanned as docs, got scope "+strconv.Quote(scope))
+	}
+	if strings.Contains(guard, "docs/plans/") && strings.Contains(guard, "SkipDir") {
+		violations = append(violations, "governance guard must not skip docs/plans as a directory")
+	}
+	if len(violations) > 0 {
+		t.Fatalf("canonical forbidden-list coverage violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestGitignoreUsesCanonicalASBCPArtifacts(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	content := string(data)
+	var violations []string
+	for _, token := range []string{
+		"manager-service/manager",
+		"manager-service/cleaner",
+		"cmd/cleaner",
+		"bin/cleaner",
+	} {
+		if strings.Contains(content, token) {
+			violations = append(violations, ".gitignore contains retired artifact "+token)
+		}
+	}
+	for _, token := range []string{
+		"manager-service/asbcp",
+		"manager-service/bin/",
+	} {
+		if !strings.Contains(content, token) {
+			violations = append(violations, ".gitignore missing canonical artifact "+token)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf(".gitignore ASBCP artifact violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseEvidenceReadsAPIContractVersionFromContract(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	contractPath := filepath.Join(repoRoot, "docs", "contracts", "api-contract.md")
+	contractBytes, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatalf("read API contract: %v", err)
+	}
+	contract := string(contractBytes)
+	const prefix = "Contract version: `"
+	start := strings.Index(contract, prefix)
+	if start == -1 {
+		t.Fatalf("docs/contracts/api-contract.md must declare %s<version>`", prefix)
+	}
+	start += len(prefix)
+	end := strings.Index(contract[start:], "`")
+	if end == -1 {
+		t.Fatalf("docs/contracts/api-contract.md contract version must be backtick-terminated")
+	}
+	contractVersion := contract[start : start+end]
+
+	scriptBytes, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "verify-release.sh"))
+	if err != nil {
+		t.Fatalf("read release verifier: %v", err)
+	}
+	script := string(scriptBytes)
+	var violations []string
+	for _, token := range []string{
+		"read_api_contract_version",
+		"--api-contract-version",
+		"check_api_contract_version_evidence",
+		"docs/contracts/api-contract.md",
+		"Contract version:",
+	} {
+		if !strings.Contains(script, token) {
+			violations = append(violations, "release verifier missing API contract evidence token "+token)
+		}
+	}
+
+	workflowBytes, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	workflow := string(workflowBytes)
+	for _, token := range []string{
+		"--api-contract-version",
+		"dist/asbcp-api-contract-version.txt",
+		"api_contract_version = Path(\"dist/asbcp-api-contract-version.txt\").read_text",
+		`"api_contract_version": api_contract_version`,
+	} {
+		if !strings.Contains(workflow, token) {
+			violations = append(violations, "release workflow missing API contract parser token "+token)
+		}
+	}
+	if strings.Contains(workflow, "API_CONTRACT_VERSION: "+contractVersion) {
+		violations = append(violations, "release workflow must not hardcode API_CONTRACT_VERSION "+contractVersion)
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "release-evidence", "release-manifest.json"))
+	if err != nil {
+		t.Fatalf("read release evidence manifest: %v", err)
+	}
+	var manifest struct {
+		APIContractVersion string `json:"api_contract_version"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse release manifest: %v", err)
+	}
+	if manifest.APIContractVersion != contractVersion {
+		violations = append(violations, "release manifest api_contract_version must match docs contract version "+contractVersion)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("API contract version evidence violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestDiagnosticScriptsRedactSecrets(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	scriptRel := "manager-service/scripts/test-asbcp-api.sh"
+	data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(scriptRel)))
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptRel, err)
+	}
+	script := string(data)
+	var violations []string
+	for _, token := range []string{
+		"redact_secret",
+		`echo "Service Key: $(redact_secret "$SERVICE_KEY")"`,
+	} {
+		if !strings.Contains(script, token) {
+			violations = append(violations, scriptRel+" missing secret redaction token "+token)
+		}
+	}
+	for _, token := range []string{
+		`echo "Service Key: $SERVICE_KEY"`,
+		`echo "Service Key: ${SERVICE_KEY}"`,
+		"echo $SERVICE_KEY",
+		"echo ${SERVICE_KEY}",
+	} {
+		if strings.Contains(script, token) {
+			violations = append(violations, scriptRel+" prints raw service key via "+token)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("diagnostic script secret redaction violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestGoModuleDoesNotDependOnRawStorageSDK(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	var violations []string
+	for _, rel := range []string{"manager-service/go.mod", "manager-service/go.sum"} {
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if strings.Contains(string(data), "github.com/minio/") {
+			violations = append(violations, rel+" contains unused raw-storage SDK dependency github.com/minio/")
+		}
+	}
+	scriptBytes, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "verify-release.sh"))
+	if err != nil {
+		t.Fatalf("read release verifier: %v", err)
+	}
+	if !strings.Contains(string(scriptBytes), "check_raw_storage_sdk_dependency_absent") {
+		violations = append(violations, "release verifier missing raw storage SDK dependency guard")
+	}
+	if len(violations) > 0 {
+		t.Fatalf("raw storage SDK dependency violations:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestReleaseGateDocsDoNotOverclaimExecSuccessEvidence(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	var violations []string
+	for _, rel := range []string{
+		"docs/RELEASE_GATES.md",
+		"docs/READINESS_EVIDENCE.md",
+		"docs/release-evidence/release-manifest.json",
+	} {
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "exec route/error contract") {
+			violations = append(violations, rel+" must describe current exec evidence as route/error contract")
+		}
+		if strings.Contains(content, "create/keepalive/exec/release/delete paths") ||
+			strings.Contains(content, "create, keepalive, exec, release, delete smoke") {
+			violations = append(violations, rel+" overclaims successful exec lifecycle evidence")
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("release gate exec evidence wording violations:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
@@ -1255,6 +1530,84 @@ func TestActiveSmokeAndOperatorSurfaceUsesASBCPTerms(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("active smoke/operator surface still uses retired manager/sandbox terms:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestSBXOperatorSurfaceUsesASBCPWorkloadTerms(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	surfaces := []string{
+		"sbx",
+		"scripts/lib/sandbox.sh",
+	}
+	forbidden := []string{
+		"./sbx sandbox",
+		"sbx_sandbox",
+		"sandbox_list",
+		"sandbox_cleanup",
+		"app=llm-sandbox",
+		`["sandbox/`,
+		"kubectl delete pod",
+		`delete pod "$name"`,
+	}
+	required := map[string][]string{
+		"sbx": {
+			"workloads",
+			"./sbx workloads list",
+		},
+		"scripts/lib/sandbox.sh": {
+			"workload_list",
+			"sandbox-workloads",
+			"app=managed-workload",
+		},
+	}
+
+	var violations []string
+	for _, rel := range surfaces {
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		content := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(content, token) {
+				violations = append(violations, rel+": retired operator surface "+token)
+			}
+		}
+		for _, token := range required[rel] {
+			if !strings.Contains(content, token) {
+				violations = append(violations, rel+": missing ASBCP workload surface "+token)
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("sbx active operator surface must use ASBCP workload terms:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestRuntimeErrorLogsUseRedactionBoundary(t *testing.T) {
+	repoRoot := repoRootForTest(t)
+	rawErrorLog := regexp.MustCompile(`log\.Printf\([^\n]*%v[^\n]*,\s*(?:[A-Za-z0-9_\.]+,\s*)*err\)`)
+	scanFiles := []string{
+		"manager-service/internal/workload/handler.go",
+		"manager-service/internal/k8s/exec.go",
+	}
+
+	var violations []string
+	for _, rel := range scanFiles {
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		content := string(data)
+		for _, match := range rawErrorLog.FindAllString(content, -1) {
+			violations = append(violations, rel+": raw error log "+strconv.Quote(match))
+		}
+		if !strings.Contains(content, "observability.RedactLogValue") {
+			violations = append(violations, rel+" must route runtime error logs through observability.RedactLogValue")
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("runtime error logs must redact raw dependency/exec errors:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
@@ -1794,7 +2147,7 @@ func activeContractScope(rel string) string {
 		return "docs"
 	case strings.HasPrefix(rel, "k8s/") && strings.HasSuffix(rel, ".md"):
 		return "docs"
-	case strings.HasPrefix(rel, "docs/") && strings.HasSuffix(rel, ".md") && !strings.HasPrefix(rel, "docs/plans/"):
+	case strings.HasPrefix(rel, "docs/") && strings.HasSuffix(rel, ".md"):
 		return "docs"
 	case strings.HasPrefix(rel, "k8s/base/") && (strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml")):
 		return "k8s"

@@ -11,7 +11,7 @@ This ledger records ASBCP release-readiness evidence. It is intentionally lightw
 | AFSCP mount-plan dependency contract | Yes | Added under `docs/contracts/` |
 | Health and readiness smoke | Yes | Fake-fixture smoke covers `healthz`, `readyz`, and authenticated v1 health path |
 | Workspace binding fixture | Yes | Fake AFSCP/Kubernetes fixture proves mount-plan consumption |
-| Workload create, keepalive, exec, release, delete smoke | Yes | Fake-fixture smoke covers create, keepalive, exec route/error contract, AFSCP release, and delete paths |
+| Workload lifecycle and exec route/error smoke | Yes | Fake-fixture smoke covers create, keepalive, exec route/error contract, AFSCP release, and delete paths |
 | Kubernetes render check | Yes | Enforced by `scripts/verify-release.sh` |
 | Dockerfile contract and image build | Yes | Enforced by `scripts/verify-release.sh` |
 | CHANGELOG release evidence | Yes | `scripts/verify-release.sh` parses the current tag section into `known_breaking_changes` and `changelog_summary` before image publication; the workflow reuses that JSON for the final manifest |

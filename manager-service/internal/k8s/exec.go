@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -153,7 +154,7 @@ func (e *Executor) Exec(ctx context.Context, podName string, opts *ExecOptions) 
 			return result, nil
 		}
 		result.ExitCode = -1
-		log.Printf("Exec error after %v: %v", duration, err)
+		log.Printf("Exec error after %v: %s", duration, observability.RedactLogValue(err))
 		return result, err
 	}
 

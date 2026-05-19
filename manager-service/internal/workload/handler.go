@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/httperror"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workspacebinding"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -131,12 +132,12 @@ func parseRoute(path string) (workspaceID, projectID, workloadID, action string,
 func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	workspaceID, projectID, workloadID, action, ok := parseRoute(r.URL.Path)
 	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+		jsonError(w, r, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 
 	if !isValidK8sName(workloadID) {
-		jsonError(w, http.StatusBadRequest, "invalid workload_id: must be lowercase alphanumeric or hyphens, max 63 chars")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid workload_id: must be lowercase alphanumeric or hyphens, max 63 chars")
 		return
 	}
 
@@ -152,34 +153,35 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	case action == "exec" && r.Method == http.MethodPost:
 		h.handleExec(w, r, workloadID)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		jsonError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
 func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	var req CreateRequest
 	if err := decodeCreateRequest(r, &req); err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error())
 		return
 	}
 
 	if req.Image == "" {
-		jsonError(w, http.StatusBadRequest, "image is required")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "image is required")
 		return
 	}
 	if req.WorkspaceBindingID == "" {
-		jsonError(w, http.StatusBadRequest, "workspace_binding_id is required")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "workspace_binding_id is required")
 		return
 	}
 	if _, err := parseResourceRequirements(req); err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 
 	ctx := r.Context()
 	mount, err := h.resolveWorkspaceMount(ctx, r, workspaceID, projectID, req.WorkspaceBindingID)
 	if err != nil {
-		jsonError(w, statusCodeForError(err, http.StatusBadRequest), err.Error())
+		status := statusCodeForError(err, http.StatusBadRequest)
+		jsonError(w, r, status, httperror.CodeForStatus(status), err.Error())
 		return
 	}
 	req.resolvedMount = &mount
@@ -209,7 +211,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 
 	pod, err := h.buildPod(workspaceID, projectID, workloadID, podName, env, req, now, expiresAt)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 
@@ -219,7 +221,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 			existingPod, getErr := h.k8sClient.GetPod(ctx, podName)
 			if getErr == nil {
 				if drift := workloadPodSpecDrift(existingPod, pod); drift != "" {
-					jsonError(w, http.StatusConflict, "existing pod spec drift: "+drift)
+					jsonError(w, r, http.StatusConflict, "conflict", "existing pod spec drift: "+drift)
 					return
 				}
 				jsonResponse(w, http.StatusOK, PodStatus{
@@ -232,14 +234,14 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 				return
 			}
 		}
-		log.Printf("workload/%s: pod creation failed: %v", workloadID, err)
-		jsonError(w, http.StatusInternalServerError, "pod creation failed: "+err.Error())
+		log.Printf("workload/%s: pod creation failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod creation failed")
 		return
 	}
 
 	ready, err := h.k8sClient.WaitForPodReady(ctx, podName, 300*time.Second, 2*time.Second)
 	if err != nil {
-		log.Printf("workload/%s: pod not ready: %v", workloadID, err)
+		log.Printf("workload/%s: pod not ready: %s", workloadID, observability.RedactLogValue(err))
 	}
 
 	status := PodStatus{
@@ -273,38 +275,41 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			jsonError(w, http.StatusNotFound, "pod not found")
+			jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
 		return
 	}
 
 	if err := h.releaseWorkloadMount(ctx, r, pod); err != nil {
-		jsonError(w, http.StatusBadGateway, "afscp workload mount release failed: "+err.Error())
+		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
 		return
 	}
 
 	if err := h.flushWorkloadStorage(ctx, pod); err != nil {
-		jsonError(w, http.StatusInternalServerError, "storage flush barrier failed: "+err.Error())
+		log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
 		return
 	}
 
 	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
 		return h.k8sClient.DeletePod(ctx, podName, 10)
 	}); err != nil {
-		log.Printf("workload/%s: pod deletion failed: %v", workloadID, err)
-		jsonError(w, http.StatusInternalServerError, "pod deletion failed: "+err.Error())
+		log.Printf("workload/%s: pod deletion failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion failed")
 		return
 	}
 
 	if err := h.waitForPodDeletion(ctx, podName, 30*time.Second); err != nil {
-		jsonError(w, http.StatusInternalServerError, "pod deletion not confirmed: "+err.Error())
+		log.Printf("workload/%s: pod deletion not confirmed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod deletion not confirmed")
 		return
 	}
 
 	if err := h.markWorkloadMountReleased(ctx, r, pod); err != nil {
-		jsonError(w, http.StatusBadGateway, "afscp workload mount released status failed: "+err.Error())
+		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount released status failed")
 		return
 	}
 
@@ -322,7 +327,8 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 			jsonResponse(w, http.StatusOK, PodStatus{Phase: "offline"})
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
 		return
 	}
 
@@ -343,7 +349,7 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 }
 
 // handleKeepalive updates the pod's last-activity and expires_at. Clients must send keepalive
-// periodically; expired workloads must be released through the manager delete API.
+// periodically; expired workloads must be released through the workload delete API.
 func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, workloadID string) {
 	ctx := r.Context()
 	podName := PodName(workloadID)
@@ -351,10 +357,11 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 	pod, err := h.k8sClient.GetPod(ctx, podName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			jsonError(w, http.StatusNotFound, "pod not found")
+			jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
 		return
 	}
 
@@ -375,14 +382,15 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 	}
 
 	if err := h.heartbeatWorkloadMount(ctx, r, pod); err != nil {
-		jsonError(w, http.StatusBadGateway, "afscp workload mount heartbeat failed: "+err.Error())
+		jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount heartbeat failed")
 		return
 	}
 
 	if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {
 		return h.k8sClient.PatchActivity(ctx, podName, newExpires)
 	}); err != nil {
-		jsonError(w, http.StatusInternalServerError, "failed to update keepalive: "+err.Error())
+		log.Printf("workload/%s: failed to update keepalive: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "failed to update keepalive")
 		return
 	}
 
@@ -395,11 +403,11 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID string) {
 	var req ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error())
 		return
 	}
 	if len(req.Cmd) == 0 {
-		jsonError(w, http.StatusBadRequest, "cmd is required")
+		jsonError(w, r, http.StatusBadRequest, "invalid_request", "cmd is required")
 		return
 	}
 
@@ -408,11 +416,12 @@ func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID 
 
 	exists, err := h.k8sClient.PodExists(ctx, podName)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("workload/%s: pod lookup failed before exec: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
 		return
 	}
 	if !exists {
-		jsonError(w, http.StatusNotFound, "pod not found")
+		jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
 		return
 	}
 
@@ -431,7 +440,8 @@ func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID 
 	})
 
 	if err != nil && result == nil {
-		jsonError(w, http.StatusInternalServerError, "exec failed: "+err.Error())
+		log.Printf("workload/%s: exec failed: %s", workloadID, observability.RedactLogValue(err))
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "exec failed")
 		return
 	}
 
@@ -689,11 +699,17 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 	pvcName := workspacebinding.PVCName(workspaceID, projectID, bindingID)
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.k8sClient.Namespace(), pvcName)
 	if err != nil {
-		return workspacebinding.ResolvedMount{}, fmt.Errorf("workspace binding is not ready: %w", err)
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is not ready; re-ensure workspace binding",
+		}
 	}
 	mount, err := workspacebinding.ResolvedMountFromPVC(pvc)
 	if err != nil {
-		return workspacebinding.ResolvedMount{}, fmt.Errorf("workspace binding mount plan is invalid: %w", err)
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding mount plan is invalid; re-ensure workspace binding",
+		}
 	}
 	pvName := strings.TrimSpace(pvc.Spec.VolumeName)
 	if pvName == "" {
@@ -706,7 +722,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 	if err != nil {
 		return workspacebinding.ResolvedMount{}, responseStatusError{
 			status:  http.StatusConflict,
-			message: "workspace binding is stale: persistent volume is not ready: " + err.Error() + "; re-ensure workspace binding",
+			message: "workspace binding is stale: persistent volume is not ready; re-ensure workspace binding",
 		}
 	}
 	if err := ensurePersistentVolumeMatchesResolvedMount(pv, mount); err != nil {
@@ -720,7 +736,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 		if err != nil {
 			return workspacebinding.ResolvedMount{}, responseStatusError{
 				status:  http.StatusBadGateway,
-				message: "workspace binding active check failed: " + err.Error(),
+				message: "workspace binding active check failed",
 			}
 		}
 		if err := ensureResolvedMountMatchesPlan(mount, plan); err != nil {
@@ -1224,8 +1240,8 @@ func jsonResponse(w http.ResponseWriter, status int, v interface{}) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func jsonError(w http.ResponseWriter, status int, message string) {
-	jsonResponse(w, status, map[string]string{"error": message})
+func jsonError(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
+	httperror.Write(w, r, status, code, message)
 }
 
 // isValidK8sName checks if a string is valid for use in a K8S pod name segment.

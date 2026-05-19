@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 
 // RequestIDHeader is the default header name for request ID
 const RequestIDHeader = "X-Request-Id"
+
+type requestIDContextKey struct{}
 
 // GenerateRequestID generates a new request ID
 func GenerateRequestID() string {
@@ -28,8 +31,29 @@ func GenerateRequestID() string {
 	return "unknown"
 }
 
+// WithRequestID stores the request ID selected for this request in context.
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDContextKey{}, requestID)
+}
+
+// RequestIDFromContext returns the request ID selected by RequestIDMiddleware.
+func RequestIDFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	requestID, ok := ctx.Value(requestIDContextKey{}).(string)
+	return requestID, ok && requestID != ""
+}
+
 // GetRequestID extracts or generates a request ID
 func GetRequestID(r *http.Request) string {
+	if r == nil {
+		return GenerateRequestID()
+	}
+	if id, ok := RequestIDFromContext(r.Context()); ok {
+		return id
+	}
+
 	// Try to get from header
 	if id := r.Header.Get(RequestIDHeader); id != "" {
 		return id
@@ -49,8 +73,13 @@ func GetRequestID(r *http.Request) string {
 func RequestIDMiddleware(headerName string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requestID := GetRequestID(r)
+			requestID := r.Header.Get(headerName)
+			if requestID == "" {
+				requestID = GetRequestID(r)
+			}
+			r.Header.Set(headerName, requestID)
 			w.Header().Set(headerName, requestID)
+			r = r.WithContext(WithRequestID(r.Context(), requestID))
 			next.ServeHTTP(w, r)
 		})
 	}

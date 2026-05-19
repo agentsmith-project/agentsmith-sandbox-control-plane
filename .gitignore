@@ -4,8 +4,7 @@
 *.zip
 bin/
 manager-service/bin/
-manager-service/manager
-manager-service/cleaner
+manager-service/asbcp
 manager-service/*.test
 images/gc/kubectl
 

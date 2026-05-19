@@ -41,7 +41,7 @@ Groups:
   tools       Vendor/fetch/verify bundled tools (skopeo/kubectl/kustomize/...)
   dev         Kind-based dev cluster helpers
   k8s         Deploy/verify/update-images for kustomize
-  sandbox     Sandbox namespace maintenance helpers
+  workloads   ASBCP workload inspection helpers
   test        Run smoke/unit/coverage tests
 
 Run:
@@ -77,8 +77,8 @@ main() {
     k8s)
       sbx_k8s "$@"
       ;;
-    sandbox)
-      sbx_sandbox "$@"
+    workloads)
+      sbx_workloads "$@"
       ;;
     test)
       sbx_test "$@"
@@ -274,7 +274,7 @@ EOF
   esac
 }
 
-sbx_sandbox() {
+sbx_workloads() {
   local cmd="${1:-}"
   shift || true
 
@@ -282,18 +282,21 @@ sbx_sandbox() {
     -h|--help|help|"")
       cat <<'EOF'
 Usage:
-  ./sbx sandbox list [--namespace sandbox] [--selector app=llm-sandbox]
-  ./sbx sandbox cleanup [--namespace sandbox] [--selector app=llm-sandbox] [--dry-run]
+  ./sbx workloads list [--namespace sandbox-workloads] [--selector app=managed-workload]
+  ./sbx workloads expired [--namespace sandbox-workloads] [--selector app=managed-workload]
+
+Notes:
+  Destructive workload cleanup must go through the ASBCP workload delete API.
 EOF
       ;;
     list)
-      sandbox_list "$ROOT_DIR" "$@"
+      workload_list "$ROOT_DIR" "$@"
       ;;
-    cleanup)
-      sandbox_cleanup "$ROOT_DIR" "$@"
+    expired)
+      workload_expired "$ROOT_DIR" "$@"
       ;;
     *)
-      log_error "Unknown sandbox command: $cmd"
+      log_error "Unknown workloads command: $cmd"
       exit 1
       ;;
   esac

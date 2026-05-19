@@ -78,6 +78,25 @@ func TestDefaultLogger_Error_AlwaysLogs(t *testing.T) {
 	}
 }
 
+func TestRedactLogValueRemovesCredentialLikeMaterial(t *testing.T) {
+	longOutput := strings.Repeat("x", 900)
+	input := "dependency failed: Authorization: Bearer raw-token-123 token=abc123 password=\"p@ss\" stderr=" + longOutput
+
+	got := RedactLogValue(input)
+
+	for _, leaked := range []string{"raw-token-123", "abc123", "p@ss", longOutput} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("RedactLogValue leaked %q in %q", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("RedactLogValue must mark redacted material, got %q", got)
+	}
+	if len(got) > 640 {
+		t.Fatalf("RedactLogValue should bound log payload length, got %d chars: %q", len(got), got)
+	}
+}
+
 func TestDefaultLogger_Debug_NotLoggedWhenDisabled_EvenIfOtherLogsAre(t *testing.T) {
 	buf := captureLog(t)
 	logger := NewDefaultLogger(false)

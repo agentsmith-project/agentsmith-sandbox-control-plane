@@ -8,7 +8,6 @@ on:
 env:
   GO_VERSION: '1.25.6'
   IMAGE_NAME: ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane
-  API_CONTRACT_VERSION: v1
 
 jobs:
   release:
@@ -130,6 +129,7 @@ jobs:
           mkdir -p dist
           bash scripts/verify-release.sh --changelog-evidence-json "${ASBCP_GIT_TAG}" > dist/asbcp-changelog-evidence.json
           bash scripts/verify-release.sh --risk-status-json > dist/asbcp-risk-status.json
+          bash scripts/verify-release.sh --api-contract-version > dist/asbcp-api-contract-version.txt
           python3 - <<'PY'
           import json
           import os
@@ -151,6 +151,9 @@ jobs:
           risk_status_evidence = json.loads(Path("dist/asbcp-risk-status.json").read_text(encoding="utf-8"))
           if risk_status_evidence["blocking_risks"]:
               raise SystemExit("release-blocking risks remain: " + ", ".join(risk_status_evidence["blocking_risks"]))
+          api_contract_version = Path("dist/asbcp-api-contract-version.txt").read_text(encoding="utf-8").strip()
+          if not api_contract_version:
+              raise SystemExit("API contract version evidence must not be empty")
 
           known_breaking_changes_json = json.dumps(changelog_evidence["known_breaking_changes"], ensure_ascii=False)
           release_body = f"""## ASBCP Release
@@ -158,7 +161,7 @@ jobs:
           Version: {os.environ["ASBCP_VERSION"]}
           Git tag: {os.environ["ASBCP_GIT_TAG"]}
           Commit SHA: {commit_sha}
-          API contract version: {os.environ["API_CONTRACT_VERSION"]}
+          API contract version: {api_contract_version}
           Image ref: `{os.environ["ASBCP_IMAGE_REF"]}`
           Image digest: `{build_push_digest}`
           Anonymous pull: {os.environ["ANONYMOUS_PULL_RESULT"]} with {os.environ["ANONYMOUS_DOCKER_CONFIG"]} Docker config
@@ -190,7 +193,7 @@ jobs:
               "commit_sha": commit_sha,
               "image_ref": os.environ["ASBCP_IMAGE_REF"],
               "image_digest": os.environ["ASBCP_IMAGE_DIGEST"],
-              "api_contract_version": os.environ["API_CONTRACT_VERSION"],
+              "api_contract_version": api_contract_version,
               "anonymous_pull": {
                   "result": os.environ["ANONYMOUS_PULL_RESULT"],
                   "tag_ref": os.environ["ASBCP_TAG_REF"],
