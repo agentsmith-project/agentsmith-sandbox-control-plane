@@ -1,6 +1,6 @@
 #!/bin/bash
-# scripts/test/smoke/02-create-sandbox.sh
-# Smoke test scenario: Create sandbox
+# scripts/test/smoke/02-create-workload.sh
+# Smoke test scenario: create workload.
 
 set -e
 
@@ -8,16 +8,16 @@ set -e
 source "$(dirname "$0")/../lib/scenarios.sh"
 source "$(dirname "$0")/../lib/assertions.sh"
 
-SANDBOX_ID="test-smoke-$(date +%s)"
+WORKLOAD_ID="test-smoke-$(date +%s)"
 
-echo "Creating sandbox ${SANDBOX_ID}..."
+echo "Creating workload ${WORKLOAD_ID}..."
 
 # 1. Ensure workspace binding via API.
-MANAGER_TIMEOUT=120
-export MANAGER_TIMEOUT
+ASBCP_TIMEOUT=120
+export ASBCP_TIMEOUT
 echo "  Ensuring workspace binding ${WORKSPACE_BINDING_ID}..."
 set +e
-binding_response=$(ensure_workspace_binding "${MANAGER_URL}" "${WORKSPACE_BINDING_ID}")
+binding_response=$(ensure_workspace_binding "${ASBCP_URL}" "${WORKSPACE_BINDING_ID}")
 binding_status=$?
 set -e
 
@@ -28,14 +28,14 @@ if [ ${binding_status} -ne 0 ]; then
 fi
 
 # 2. Create workload via API (allow long timeout: ASBCP waits for pod ready)
-echo "  Sending create request (timeout ${MANAGER_TIMEOUT}s)..."
+echo "  Sending create request (timeout ${ASBCP_TIMEOUT}s)..."
 set +e
-response=$(create_sandbox "${MANAGER_URL}" "${SANDBOX_ID}")
+response=$(create_workload "${ASBCP_URL}" "${WORKLOAD_ID}")
 create_status=$?
 set -e
 
 if [ ${create_status} -ne 0 ]; then
-    echo -e "${COLOR_RED}✗ Failed to create sandbox${COLOR_NC}"
+    echo -e "${COLOR_RED}✗ Failed to create workload${COLOR_NC}"
     echo "Response: ${response}"
     exit 1
 fi
@@ -47,8 +47,8 @@ if [ -z "${pod_name}" ] || [ "${pod_name}" = "null" ]; then
     echo "Response: ${response}"
     exit 1
 fi
-export SANDBOX_POD_NAME="${pod_name}"
-echo "${pod_name}" > /tmp/smoke-test-pod-name.txt
+export WORKLOAD_POD_NAME="${pod_name}"
+echo "${pod_name}" > /tmp/asbcp-smoke-pod-name.txt
 
 echo -e "  ${COLOR_GREEN}Create request accepted (pod: ${pod_name})${COLOR_NC}"
 
@@ -56,10 +56,10 @@ echo -e "  ${COLOR_GREEN}Create request accepted (pod: ${pod_name})${COLOR_NC}"
 echo "  Waiting for pod to be created..."
 sleep 2
 
-kubectl get pod "${pod_name}" -n "${SANDBOX_NAMESPACE}" &> /dev/null
+kubectl get pod "${pod_name}" -n "${WORKLOAD_NAMESPACE}" &> /dev/null
 if [ $? -ne 0 ]; then
     echo -e "${COLOR_RED}✗ Pod ${pod_name} not found${COLOR_NC}"
-    cleanup_sandbox "${SANDBOX_ID}"
+    cleanup_workload "${WORKLOAD_ID}"
     exit 1
 fi
 
@@ -67,14 +67,14 @@ echo -e "  ${COLOR_GREEN}Pod ${pod_name} created${COLOR_NC}"
 
 # 4. Wait for pod to be ready
 echo "  Waiting for pod to be ready (max 120s)..."
-if ! wait_for_pod_ready "${SANDBOX_ID}" "${SANDBOX_NAMESPACE}" 120 2; then
+if ! wait_for_pod_ready "${WORKLOAD_ID}" "${WORKLOAD_NAMESPACE}" 120 2; then
     echo -e "${COLOR_RED}✗ Pod did not become ready in time${COLOR_NC}"
 
     # Get pod status for debugging
     echo "Pod status:"
-    kubectl get pod "${pod_name}" -n "${SANDBOX_NAMESPACE}" -o json | jq '.status'
+    kubectl get pod "${pod_name}" -n "${WORKLOAD_NAMESPACE}" -o json | jq '.status'
 
-    cleanup_sandbox "${SANDBOX_ID}"
+    cleanup_workload "${WORKLOAD_ID}"
     exit 1
 fi
 
@@ -82,11 +82,11 @@ echo -e "  ${COLOR_GREEN}Pod is ready${COLOR_NC}"
 
 # 5. Workload is ready (pod ready is sufficient for this smoke stage)
 
-# 6. Save SANDBOX_ID for subsequent tests
-echo "${SANDBOX_ID}" > /tmp/smoke-test-sandbox-id.txt
+# 6. Save WORKLOAD_ID for subsequent tests
+echo "${WORKLOAD_ID}" > /tmp/asbcp-smoke-workload-id.txt
 
 echo ""
-echo -e "${COLOR_GREEN}✓ Sandbox creation test passed${COLOR_NC}"
-echo "  Sandbox ID: ${SANDBOX_ID}"
+echo -e "${COLOR_GREEN}✓ Workload creation test passed${COLOR_NC}"
+echo "  Workload ID: ${WORKLOAD_ID}"
 
 exit 0

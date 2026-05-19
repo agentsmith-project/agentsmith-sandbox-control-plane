@@ -10,7 +10,7 @@ spec:
       - name: asbcp
         imagePullPolicy: Always  # 生产环境总是拉取最新镜像
         securityContext:
-          readOnlyRootFilesystem: false  # Manager 可能需要写入
+          readOnlyRootFilesystem: false  # ASBCP 当前需要写入临时运行数据
           runAsNonRoot: true
           allowPrivilegeEscalation: false
           capabilities:

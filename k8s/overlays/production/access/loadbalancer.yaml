@@ -7,9 +7,9 @@ metadata:
     # Cloud-specific annotations (examples)
     # AWS ELB
     # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    # service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
     # GCP
-    # cloud.google.com/load-balancer-type: "External"
+    # cloud.google.com/load-balancer-type: "Internal"
     # Azure
     # service.beta.kubernetes.io/azure-load-balancer-resource-group: "my-resource-group"
 spec:

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .PHONY: help test test-unit test-race test-coverage test-integration test-e2e \
-	lint build-asbcp build-manager build-docker build-image \
+	lint build-asbcp build-docker build-image \
 	kind-up kind-down kind-status port-forward smoke \
 	release-gate clean-tools clean-test-deps
 
@@ -92,8 +92,6 @@ _build-check:
 build-asbcp:
 	@$(SBX) images build --only asbcp
 
-build-manager: build-asbcp
-
 build-docker:
 	@if [ "$(DRY_RUN)" = "1" ]; then \
 	  echo "$(SBX) images build"; \
@@ -128,7 +126,7 @@ smoke:
 	  pf=$$!; \
 	  trap "kill $$pf >/dev/null 2>&1 || true" EXIT; \
 	  sleep 2; \
-	  "$(ASBCP_DIR)"/scripts/test-manager.sh "$(ASBCP_URL)" "$(SERVICE_KEY)"; \
+	  "$(ASBCP_DIR)"/scripts/test-asbcp-api.sh "$(ASBCP_URL)" "$(SERVICE_KEY)"; \
 	'
 
 clean-tools:

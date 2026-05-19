@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Manager 代码检查脚本
+# ASBCP 代码检查脚本
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "$SERVICE_DIR"
 
-echo "[manager] Running linters..."
+echo "[asbcp] Running linters..."
 
 ensure_writable_gocache() {
   if [ -n "${GOCACHE:-}" ]; then
@@ -45,4 +45,4 @@ if [ "$(gofmt -l . | wc -l)" -gt 0 ]; then
     exit 1
 fi
 
-echo "[manager] ✓ Lint checks passed"
+echo "[asbcp] ✓ Lint checks passed"

@@ -43,7 +43,7 @@ go run ./cmd/asbcp
 ### API 冒烟测试（curl）
 
 ```bash
-./scripts/test-manager.sh http://localhost:8080 test-key-123
+./scripts/test-asbcp-api.sh http://localhost:8080 test-key-123
 ```
 
 ### 代码检查

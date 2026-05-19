@@ -4,24 +4,24 @@
 
 set -euo pipefail
 
-MANAGER_URL="${ASBCP_HTTP_URL:-http://localhost:8080}"
+ASBCP_URL="${ASBCP_URL:-${ASBCP_HTTP_URL:-http://localhost:8080}}"
 SERVICE_KEY="${SERVICE_KEY:-test-key-123}"
 WORKSPACE_ID="${WORKSPACE_ID:-ws-1}"
 PROJECT_ID="${PROJECT_ID:-proj-1}"
 WORKSPACE_BINDING_ID="${WORKSPACE_BINDING_ID:-wmb_demo}"
 AFSCP_NAMESPACE_ID="${AFSCP_NAMESPACE_ID:-ns_demo}"
 SESSION_ID="${SBX_SESSION_ID:-smoke-test-sse-$(date +%s)}"
-WORKLOAD_URL="${MANAGER_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${SESSION_ID}"
+WORKLOAD_URL="${ASBCP_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workloads/${SESSION_ID}"
 
 echo "=== ASBCP Exec Smoke Test ==="
-echo "ASBCP URL:   ${MANAGER_URL}"
+echo "ASBCP URL:   ${ASBCP_URL}"
 echo "Workload ID: ${SESSION_ID}"
 echo ""
 
 # Step 1: Ensure workspace binding.
 echo "--- Step 1: Ensure workspace binding ---"
 BINDING_STATUS=$(curl -s --max-time 120 -o /tmp/asbcp-smoke-binding.json -w "%{http_code}" -X PUT \
-  "${MANAGER_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workspace-bindings/${WORKSPACE_BINDING_ID}" \
+  "${ASBCP_URL}/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/workspace-bindings/${WORKSPACE_BINDING_ID}" \
   -H "X-Service-Key: ${SERVICE_KEY}" \
   -H "Content-Type: application/json" \
   -d "{\"namespace_id\":\"${AFSCP_NAMESPACE_ID}\",\"mount_binding_id\":\"${WORKSPACE_BINDING_ID}\"}")

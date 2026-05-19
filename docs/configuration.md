@@ -27,8 +27,8 @@ Schema version: `version: 1`
 | `ASBCP_AFSCP_CALLER_SERVICE` | `agentsmith-sandbox-control-plane` | Caller service header sent to AFSCP |
 | `ASBCP_AFSCP_ACTOR_ID` | `agentsmith-sandbox-control-plane` | Actor id for mutating AFSCP lifecycle calls |
 | `ASBCP_JUICEFS_CSI_DRIVER` | `csi.juicefs.com` | CSI driver name when the AFSCP plan requires JuiceFS |
-| `ASBCP_STORAGE_CAPACITY` | `1Pi` | Default binding PVC capacity |
-| `ASBCP_STORAGE_CLASS_NAME` | unset | Optional binding storage class |
+| `ASBCP_JUICEFS_STORAGE_CAPACITY` | `1Pi` | Default binding PVC capacity |
+| `ASBCP_JUICEFS_STORAGE_CLASS_NAME` | unset | Optional binding storage class |
 | `ASBCP_LOG_LEVEL` | unset | When set to `debug`, enables verbose structured logs |
 
 ASBCP configuration must not include raw storage credentials. Filesystem and storage truth are provided by AFSCP mount plans.

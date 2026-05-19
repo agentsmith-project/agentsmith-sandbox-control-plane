@@ -5,8 +5,8 @@ resources:
 images:
 - name: agentsmith-sandbox-control-plane
   newName: agentsmith-sandbox-control-plane
-  newTag: 2.0.4
+  newTag: 2.0.5
 patches:
 - path: patches/afscp-config.yaml
-- path: patches/manager-replicas.yaml
+- path: patches/asbcp-replicas.yaml
 - path: patches/resource-limits.yaml

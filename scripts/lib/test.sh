@@ -20,7 +20,7 @@ Options:
   --help, -h         Show this help
 
 Environment Variables:
-  MANAGER_URL        Manager service URL (default: http://localhost:8080)
+  ASBCP_URL          ASBCP service URL (default: http://localhost:8080)
   SERVICE_KEY        Service key for authentication (default: test-key)
 EOF
 }

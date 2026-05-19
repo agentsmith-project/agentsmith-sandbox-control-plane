@@ -4,6 +4,6 @@
 
 ## 补丁说明
 
-- `manager-replicas.yaml`: 设置 Manager 副本数为 3
+- `asbcp-replicas.yaml`: 设置 ASBCP 副本数为 3
 - `resource-limits.yaml`: 设置较大的资源限制
 - `security-hardening.yaml`: 安全加固配置

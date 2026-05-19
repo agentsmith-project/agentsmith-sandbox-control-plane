@@ -2,7 +2,7 @@
 
 package e2e_test
 
-// pod_spec_test.go – Validates the Kubernetes Pod spec produced by the manager.
+// pod_spec_test.go – Validates the Kubernetes Pod spec produced by ASBCP.
 //
 // Each test directly inspects the K8s Pod object via the API, verifying that:
 //   - Labels match the API contract (workload_id, workspace_id, project_id, app)
@@ -495,7 +495,7 @@ func TestPodSpec_NoResourcesWhenNotRequested(t *testing.T) {
 // Full pod lifecycle: Pending → Running (integration smoke)
 // ---------------------------------------------------------------------------
 
-// TestPodSpec_PodBecomesRunning verifies that a pod created by the manager
+// TestPodSpec_PodBecomesRunning verifies that a pod created by ASBCP
 // eventually transitions to the Running phase, indicating the image was pulled
 // and the container started successfully.
 func TestPodSpec_PodBecomesRunning(t *testing.T) {

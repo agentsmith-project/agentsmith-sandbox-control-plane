@@ -4,7 +4,7 @@
 
 ## 特点
 
-- Manager 副本数：1
+- ASBCP 副本数：1
 - 资源限制：较小
 - 镜像标签：dev-latest
 

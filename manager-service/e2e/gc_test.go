@@ -3,13 +3,13 @@
 package e2e_test
 
 // gc_test.go – End-to-end tests for pod expiry, idle timeout, keepalive accounting,
-// and manager-owned release of expired workloads.
+// and ASBCP-owned release of expired workloads.
 //
 // Test topology (no external state assumptions):
 //   - Each test creates its own workload(s) and cleans up via t.Cleanup.
 //   - patchPodExpiry (suite helper) fast-forwards the expires_at annotation so GC
 //     tests don't need to wait for real idle timeouts.
-//   - releaseExpiredWorkloadsViaManager scans expired pods and calls the manager
+//   - releaseExpiredWorkloadsViaASBCP scans expired pods and calls the ASBCP
 //     workload delete API, preserving the AFSCP release/status path.
 
 import (
@@ -251,10 +251,10 @@ func TestGC_MultipleKeepalives(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Manager-owned expiry release
+// ASBCP-owned expiry release
 // ---------------------------------------------------------------------------
 
-func TestGC_ManagerRelease_DeletesExpiredPod(t *testing.T) {
+func TestGC_ASBCPRelease_DeletesExpiredPod(t *testing.T) {
 	wlID := uniqueID("gc-inproc-del")
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
@@ -266,7 +266,7 @@ func TestGC_ManagerRelease_DeletesExpiredPod(t *testing.T) {
 	// Force-expire the pod.
 	patchPodExpiry(t, suite.Namespace, podName, time.Now().UTC().Add(-1*time.Hour))
 
-	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaASBCP(t, suite.Namespace)
 	assert.GreaterOrEqual(t, deleted, 1, "at least one expired pod must be deleted")
 
 	waitPodGone(t, suite.Namespace, podName, 60*time.Second)
@@ -278,9 +278,9 @@ func TestGC_ManagerRelease_DeletesExpiredPod(t *testing.T) {
 	assert.Equal(t, "offline", ps.Phase, "deleted pod must appear as offline")
 }
 
-// TestGC_ManagerRelease_PreservesActivePod verifies the manager release helper does NOT delete a pod
+// TestGC_ASBCPRelease_PreservesActivePod verifies the ASBCP release helper does NOT delete a pod
 // whose expires_at is in the future.
-func TestGC_ManagerRelease_PreservesActivePod(t *testing.T) {
+func TestGC_ASBCPRelease_PreservesActivePod(t *testing.T) {
 	wlID := uniqueID("gc-inproc-keep")
 
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
@@ -289,7 +289,7 @@ func TestGC_ManagerRelease_PreservesActivePod(t *testing.T) {
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	// Pod expires_at is already in the future from creation (default 30 min).
-	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaASBCP(t, suite.Namespace)
 
 	// The active pod must NOT have been deleted.
 	resp := newClient().GetWorkload(t, testWS, testProj, wlID)
@@ -299,9 +299,9 @@ func TestGC_ManagerRelease_PreservesActivePod(t *testing.T) {
 		"active pod (expires_at in future) must not be swept; deleted=%d", deleted)
 }
 
-// TestGC_ManagerRelease_MultipleExpiredPods verifies batch release deletes all expired
+// TestGC_ASBCPRelease_MultipleExpiredPods verifies batch release deletes all expired
 // pods in one pass without touching active ones.
-func TestGC_ManagerRelease_MultipleExpiredPods(t *testing.T) {
+func TestGC_ASBCPRelease_MultipleExpiredPods(t *testing.T) {
 	const n = 3
 	wlIDs := make([]string, n)
 	for i := 0; i < n; i++ {
@@ -329,7 +329,7 @@ func TestGC_ManagerRelease_MultipleExpiredPods(t *testing.T) {
 		patchPodExpiry(t, suite.Namespace, "workload-"+id, pastTime)
 	}
 
-	deleted := releaseExpiredWorkloadsViaManager(t, suite.Namespace)
+	deleted := releaseExpiredWorkloadsViaASBCP(t, suite.Namespace)
 	assert.GreaterOrEqual(t, deleted, n, "must delete all %d expired pods", n)
 
 	// All n expired pods must be gone.
@@ -348,7 +348,7 @@ func TestGC_ManagerRelease_MultipleExpiredPods(t *testing.T) {
 // GET reflects offline after deletion
 // ---------------------------------------------------------------------------
 
-// TestGC_GetAfterDeletion verifies that after a pod is deleted through the manager API,
+// TestGC_GetAfterDeletion verifies that after a pod is deleted through the ASBCP API,
 // GET returns phase "offline" rather than the previous phase.
 func TestGC_GetAfterDeletion(t *testing.T) {
 	wlID := uniqueID("gc-get-after")

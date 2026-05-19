@@ -19,7 +19,7 @@ import (
 // Validation – no real K8s pod needed
 // ---------------------------------------------------------------------------
 
-// TestCreate_MissingImage verifies the manager rejects a create request without an image.
+// TestCreate_MissingImage verifies ASBCP rejects a create request without an image.
 func TestCreate_MissingImage(t *testing.T) {
 	resp := newClient().CreateWorkload(t, testWS, testProj, uniqueID("val-no-img"),
 		CreateRequest{Env: map[string]string{"KEY": "value"}})
@@ -131,7 +131,7 @@ func TestFullLifecycle_CreateGetDeleteGet(t *testing.T) {
 	assert.Equal(t, "workload-"+wlID, created.PodName)
 	assert.NotEmpty(t, created.ExpiresAt)
 
-	// Wait for Running via the manager GET endpoint.
+	// Wait for Running via the ASBCP GET endpoint.
 	t.Logf("waiting for workload %s to reach Running", wlID)
 	running := waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 	assert.Equal(t, "Running", running.Phase)
@@ -159,7 +159,7 @@ func TestFullLifecycle_CreateGetDeleteGet(t *testing.T) {
 	// After deletion, K8s pod should be gone.
 	waitPodGone(t, suite.Namespace, podName, 30*time.Second)
 
-	// Manager GET should now return offline.
+	// ASBCP GET should now return offline.
 	getResp := c.GetWorkload(t, testWS, testProj, wlID)
 	var ps PodStatus
 	require.NoError(t, getResp.DecodeJSON(&ps))
@@ -433,7 +433,7 @@ func TestLifecycle_KeepaliveThenGet_ExpiresAtUpdated(t *testing.T) {
 // e.g. GET /v1/workspaces/ws/projects/proj (missing /workloads/{wlId})
 func TestV1Path_TooShort_Returns404(t *testing.T) {
 	c := newClient()
-	shortPath := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s", suite.ManagerURL, testWS, testProj)
+	shortPath := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s", suite.ASBCPURL, testWS, testProj)
 	resp := c.do(t, http.MethodGet, shortPath, nil)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
 		"path without workload ID must return 404")

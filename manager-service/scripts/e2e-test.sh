@@ -13,13 +13,13 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Test configuration
-MANAGER_BIN="${MANAGER_BIN:-./asbcp}"
-MANAGER_PORT="${MANAGER_PORT:-8080}"
+ASBCP_BIN="${ASBCP_BIN:-./asbcp}"
+ASBCP_PORT="${ASBCP_PORT:-8080}"
 SERVICE_KEY="${SERVICE_KEY:-test-e2e-key-12345}"
 CONFIG_FILE="${CONFIG_FILE:-/tmp/e2e-asbcp-config.yaml}"
 NAMESPACE="${NAMESPACE:-sandbox-workloads}"
 LOG_FILE="${LOG_FILE:-/tmp/e2e-test.log}"
-MANAGER_PID=""
+ASBCP_PID=""
 
 # Workload route path components
 WS_ID="ws-1"
@@ -99,15 +99,15 @@ assert_http_status() {
     fi
 }
 
-# Start manager
-start_manager() {
+# Start ASBCP
+start_asbcp() {
     log_info "Starting ASBCP service..."
 
-    # Create config file for the current manager schema
+    # Create config file for the current ASBCP schema
     cat > "$CONFIG_FILE" <<EOF
 version: 1
 server:
-  httpPort: ${MANAGER_PORT}
+  httpPort: ${ASBCP_PORT}
   requestIdHeader: X-Request-Id
   timeouts:
     readHeader: 5s
@@ -126,16 +126,16 @@ kubernetes:
   requestTimeout: 15s
 EOF
 
-    # Start manager in background
-    ASBCP_CONFIG_PATH="$CONFIG_FILE" ASBCP_SERVICE_KEYS="$SERVICE_KEY" nohup "$MANAGER_BIN" > "$LOG_FILE" 2>&1 &
-    MANAGER_PID=$!
+    # Start ASBCP in background
+    ASBCP_CONFIG_PATH="$CONFIG_FILE" ASBCP_SERVICE_KEYS="$SERVICE_KEY" nohup "$ASBCP_BIN" > "$LOG_FILE" 2>&1 &
+    ASBCP_PID=$!
 
-    # Wait for manager to be ready
+    # Wait for ASBCP to be ready
     local max_wait=30
     local waited=0
     while [ $waited -lt $max_wait ]; do
-        if curl -s "http://localhost:$MANAGER_PORT/healthz" > /dev/null 2>&1; then
-            log_info "ASBCP started (PID: $MANAGER_PID)"
+        if curl -s "http://localhost:$ASBCP_PORT/healthz" > /dev/null 2>&1; then
+            log_info "ASBCP started (PID: $ASBCP_PID)"
             return 0
         fi
         sleep 1
@@ -146,20 +146,20 @@ EOF
     return 1
 }
 
-# Stop manager
-stop_manager() {
-    if [ -n "$MANAGER_PID" ]; then
-        log_info "Stopping ASBCP (PID: $MANAGER_PID)..."
-        kill "$MANAGER_PID" 2>/dev/null || true
-        wait "$MANAGER_PID" 2>/dev/null || true
-        MANAGER_PID=""
+# Stop ASBCP
+stop_asbcp() {
+    if [ -n "$ASBCP_PID" ]; then
+        log_info "Stopping ASBCP (PID: $ASBCP_PID)..."
+        kill "$ASBCP_PID" 2>/dev/null || true
+        wait "$ASBCP_PID" 2>/dev/null || true
+        ASBCP_PID=""
     fi
 }
 
 # Cleanup on exit
 cleanup() {
     log_info "Cleaning up..."
-    stop_manager
+    stop_asbcp
 
     # Clean up config file
     rm -f "$CONFIG_FILE"
@@ -231,7 +231,7 @@ http_request() {
 # ============================================================
 
 test_01_healthz_no_auth() {
-    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$MANAGER_PORT/healthz")
+    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$ASBCP_PORT/healthz")
     local status=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | head -n-1)
 
@@ -240,7 +240,7 @@ test_01_healthz_no_auth() {
 }
 
 test_02_readyz_no_auth() {
-    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$MANAGER_PORT/readyz")
+    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$ASBCP_PORT/readyz")
     local status=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | head -n-1)
 
@@ -256,7 +256,7 @@ test_02_readyz_no_auth() {
 }
 
 test_03_metrics_no_auth() {
-    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$MANAGER_PORT/metrics")
+    local response=$(curl -s -w "\n%{http_code}" "http://localhost:$ASBCP_PORT/metrics")
     local status=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | head -n-1)
 
@@ -269,7 +269,7 @@ test_03_metrics_no_auth() {
 
 test_05_auth_no_key() {
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-no-key" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-no-key" \
         -H "Content-Type: application/json" \
         -d '{"image": "ubuntu:22.04"}')
     local status=$(echo "$response" | tail -n1)
@@ -281,7 +281,7 @@ test_05_auth_no_key() {
 
 test_06_auth_invalid_key() {
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-invalid-key" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-invalid-key" \
         -H "X-Service-Key: invalid-key-123" \
         -H "Content-Type: application/json" \
         -d '{"image": "ubuntu:22.04"}')
@@ -294,7 +294,7 @@ test_06_auth_invalid_key() {
 
 test_07_auth_valid_key() {
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-valid-key" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/test-valid-key" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"image": "ubuntu:22.04"}')
@@ -310,7 +310,7 @@ test_07_auth_valid_key() {
 test_08_create_workload_valid_request() {
     local wl_id="e2e-create-$$"
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{
@@ -339,7 +339,7 @@ test_08_create_workload_valid_request() {
 test_09_create_workload_missing_image() {
     local wl_id="e2e-missing-image-$$"
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"env": {"KEY": "value"}}')
@@ -352,7 +352,7 @@ test_09_create_workload_missing_image() {
 
 test_10_create_workload_invalid_id() {
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/Invalid_ID" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/Invalid_ID" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"image": "ubuntu:22.04"}')
@@ -366,7 +366,7 @@ test_10_create_workload_invalid_id() {
 test_11_keepalive_workload() {
     local wl_id="e2e-keepalive-$$"
     local response=$(curl -s -w "\n%{http_code}" -X POST \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/keepalive" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/keepalive" \
         -H "X-Service-Key: $SERVICE_KEY")
     local status=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | head -n-1)
@@ -382,7 +382,7 @@ test_11_keepalive_workload() {
 test_12_exec_valid_command() {
     local wl_id="e2e-exec-$$"
     local response=$(curl -s -w "\n%{http_code}" -X POST \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"cmd": ["echo", "hello"], "timeout_seconds": 10}')
@@ -406,7 +406,7 @@ test_12_exec_valid_command() {
 test_13_exec_missing_command() {
     local wl_id="e2e-exec-missing-$$"
     local response=$(curl -s -w "\n%{http_code}" -X POST \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"timeout_seconds": 10}')
@@ -420,7 +420,7 @@ test_13_exec_missing_command() {
 test_14_exec_invalid_timeout() {
     local wl_id="e2e-exec-timeout-$$"
     local response=$(curl -s -w "\n%{http_code}" -X POST \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"cmd": ["echo", "test"], "timeout_seconds": 500}')
@@ -436,7 +436,7 @@ test_14_exec_invalid_timeout() {
 test_19_delete_workload() {
     local wl_id="e2e-delete-$$"
     local response=$(curl -s -w "\n%{http_code}" -X DELETE \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
         -H "X-Service-Key: $SERVICE_KEY")
     local status=$(echo "$response" | tail -n1)
 
@@ -451,7 +451,7 @@ test_19_delete_workload() {
 test_20_request_id_propagation() {
     local test_id="test-req-id-$$"
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$test_id" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$test_id" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "X-Request-Id: test-request-id-123" \
         -H "Content-Type: application/json" \
@@ -470,10 +470,10 @@ test_20_request_id_propagation() {
 
 test_21_metrics_increments() {
     # Make some requests to increment metrics
-    curl -s "http://localhost:$MANAGER_PORT/healthz" > /dev/null
-    curl -s "http://localhost:$MANAGER_PORT/readyz" > /dev/null
+    curl -s "http://localhost:$ASBCP_PORT/healthz" > /dev/null
+    curl -s "http://localhost:$ASBCP_PORT/readyz" > /dev/null
 
-    local metrics=$(curl -s "http://localhost:$MANAGER_PORT/metrics")
+    local metrics=$(curl -s "http://localhost:$ASBCP_PORT/metrics")
 
     # Check that request counts exist
     if ! echo "$metrics" | grep -q "http_request_total{"; then
@@ -490,7 +490,7 @@ test_21_metrics_increments() {
 test_30_create_and_exec_pod() {
     local wl_id="e2e-integration-$$"
     local response=$(curl -s -w "\n%{http_code}" -X PUT \
-        "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
+        "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id" \
         -H "X-Service-Key: $SERVICE_KEY" \
         -H "Content-Type: application/json" \
         -d '{"image": "ubuntu:22.04", "idle_timeout_sec": 900}')
@@ -507,12 +507,12 @@ test_30_create_and_exec_pod() {
     local waited=0
     while [ $waited -lt $max_wait ]; do
         response=$(curl -s -X POST \
-            "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
+            "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
             -H "X-Service-Key: $SERVICE_KEY" \
             -H "Content-Type: application/json" \
             -d '{"cmd": ["echo", "integration-test"], "timeout_seconds": 10}')
         status=$(curl -s -w "%{http_code}" -X POST \
-            "http://localhost:$MANAGER_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
+            "http://localhost:$ASBCP_PORT/v1/workspaces/$WS_ID/projects/$PROJ_ID/workloads/$wl_id/exec" \
             -H "X-Service-Key: $SERVICE_KEY" \
             -H "Content-Type: application/json" \
             -d '{"cmd": ["echo", "integration-test"], "timeout_seconds": 10}' \
@@ -548,9 +548,9 @@ main() {
     # Check prerequisites
     log_info "Checking prerequisites..."
 
-    if [ ! -f "$MANAGER_BIN" ]; then
-        log_error "ASBCP binary not found: $MANAGER_BIN"
-        log_info "Please build with: go build -o $MANAGER_BIN ./cmd/asbcp"
+    if [ ! -f "$ASBCP_BIN" ]; then
+        log_error "ASBCP binary not found: $ASBCP_BIN"
+        log_info "Please build with: go build -o $ASBCP_BIN ./cmd/asbcp"
         exit 1
     fi
 
@@ -577,9 +577,9 @@ main() {
     log_info "Creating namespace: $NAMESPACE"
     kubectl create namespace "$NAMESPACE" >/dev/null 2>&1 || true
 
-    # Start manager
-    if ! start_manager; then
-        log_error "Failed to start manager"
+    # Start ASBCP
+    if ! start_asbcp; then
+        log_error "Failed to start ASBCP"
         exit 1
     fi
 

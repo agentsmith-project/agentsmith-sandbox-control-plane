@@ -19,7 +19,7 @@ import (
 // ---------------------------------------------------------------------------
 // Workspace binding tests
 //
-// These tests validate the current workspace lifecycle managed by the sandbox manager:
+// These tests validate the current workspace lifecycle managed by ASBCP's internal sandbox execution service:
 //   - a workload uses a stable workspace binding
 //   - the pod mounts the binding PVC at the AFSCP plan mount path
 //   - files written to /home/<task>/workspace persist across pod restarts

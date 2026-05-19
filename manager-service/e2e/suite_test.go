@@ -9,8 +9,8 @@
 //
 // Environment variables (all optional, see defaults below):
 //
-//	E2E_MANAGER_URL        URL of a pre-running ASBCP (skip auto-start if set)
-//	E2E_MANAGER_BIN        Path to ASBCP binary               (default: ../bin/asbcp)
+//	E2E_ASBCP_URL          URL of a pre-running ASBCP (skip auto-start if set)
+//	E2E_ASBCP_BIN          Path to ASBCP binary               (default: ../bin/asbcp)
 //	E2E_SERVICE_KEY        Service key for auth               (default: e2e-test-key)
 //	E2E_NAMESPACE          Workload K8s namespace             (default: sandbox-workloads)
 //	E2E_AFSCP_INTERNAL_BASE_URL AFSCP test double or real internal API base URL
@@ -21,7 +21,7 @@
 //	E2E_STORAGE_CLASS      Binding storage class              (default: "")
 //	E2E_IMAGE              Container image for workloads      (default: ubuntu:22.04)
 //	E2E_JUICEFS            "true" → enable file-persistence tests that require JuiceFS
-//	E2E_MANAGER_PORT       TCP port when auto-starting manager (default: 18080)
+//	E2E_ASBCP_PORT         TCP port when auto-starting ASBCP   (default: 18080)
 //	KUBECONFIG             Standard kubeconfig path
 //
 // Run:
@@ -68,7 +68,7 @@ var (
 
 // SuiteConfig holds the E2E test configuration resolved from env vars.
 type SuiteConfig struct {
-	ManagerURL       string
+	ASBCPURL         string
 	ServiceKey       string
 	Namespace        string
 	AFSCPBaseURL     string
@@ -78,12 +78,12 @@ type SuiteConfig struct {
 	StorageCapacity  string
 	StorageClassName string
 	Image            string
-	ManagerBin       string
+	ASBCPBin         string
 	JuiceFSEnabled   bool // true → file-persistence tests are enabled
 
-	managerCmd *exec.Cmd // non-nil when we started the manager
-	managerLog *os.File
-	afscpSrv   *httptest.Server
+	asbcpCmd *exec.Cmd // non-nil when we started ASBCP
+	asbcpLog *os.File
+	afscpSrv *httptest.Server
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ type SuiteConfig struct {
 
 func TestMain(m *testing.M) {
 	c := &SuiteConfig{
-		ManagerURL:       envOr("E2E_MANAGER_URL", ""),
+		ASBCPURL:         envOr("E2E_ASBCP_URL", ""),
 		ServiceKey:       envOr("E2E_SERVICE_KEY", "e2e-test-key"),
 		Namespace:        envOr("E2E_NAMESPACE", "sandbox-workloads"),
 		AFSCPBaseURL:     envOr("E2E_AFSCP_INTERNAL_BASE_URL", ""),
@@ -102,7 +102,7 @@ func TestMain(m *testing.M) {
 		StorageCapacity:  envOr("E2E_STORAGE_CAPACITY", "1Pi"),
 		StorageClassName: envOr("E2E_STORAGE_CLASS", ""),
 		Image:            envOr("E2E_IMAGE", "ubuntu:22.04"),
-		ManagerBin:       absPath(envOr("E2E_MANAGER_BIN", "../bin/asbcp")),
+		ASBCPBin:         absPath(envOr("E2E_ASBCP_BIN", "../bin/asbcp")),
 		JuiceFSEnabled:   os.Getenv("E2E_JUICEFS") == "true",
 	}
 	suite = c
@@ -117,22 +117,22 @@ func TestMain(m *testing.M) {
 	// ── Namespace ──────────────────────────────────────────────────────────
 	ensureNamespace(cli, c.Namespace)
 
-	// ── Manager ────────────────────────────────────────────────────────────
-	if c.ManagerURL == "" {
+	// ── ASBCP ──────────────────────────────────────────────────────────────
+	if c.ASBCPURL == "" {
 		if c.AFSCPBaseURL == "" {
 			startFakeAFSCP(c)
 		}
-		if _, err := os.Stat(c.ManagerBin); err != nil {
-			log.Fatalf("E2E: ASBCP binary not found at %s\n  hint: run `make build` first", c.ManagerBin)
+		if _, err := os.Stat(c.ASBCPBin); err != nil {
+			log.Fatalf("E2E: ASBCP binary not found at %s\n  hint: run `make build` first", c.ASBCPBin)
 		}
-		url, err := startManager(c)
+		url, err := startASBCP(c)
 		if err != nil {
-			c.stopManager()
+			c.stopASBCP()
 			log.Fatalf("E2E: failed to start ASBCP: %v", err)
 		}
-		c.ManagerURL = url
+		c.ASBCPURL = url
 	} else {
-		log.Printf("E2E: using existing ASBCP at %s", c.ManagerURL)
+		log.Printf("E2E: using existing ASBCP at %s", c.ASBCPURL)
 	}
 
 	// ── Run tests ──────────────────────────────────────────────────────────
@@ -140,21 +140,21 @@ func TestMain(m *testing.M) {
 
 	// ── Teardown ───────────────────────────────────────────────────────────
 	purgeTestWorkloads(cli, c.Namespace)
-	c.stopManager()
+	c.stopASBCP()
 	c.stopAFSCP()
 
 	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
-// Manager lifecycle
+// ASBCP lifecycle
 // ---------------------------------------------------------------------------
 
-func startManager(c *SuiteConfig) (string, error) {
-	portStr := envOr("E2E_MANAGER_PORT", "18080")
+func startASBCP(c *SuiteConfig) (string, error) {
+	portStr := envOr("E2E_ASBCP_PORT", "18080")
 	portNum, err := strconv.Atoi(portStr)
 	if err != nil || portNum < 1 || portNum > 65535 {
-		return "", fmt.Errorf("invalid E2E_MANAGER_PORT %q: must be 1-65535", portStr)
+		return "", fmt.Errorf("invalid E2E_ASBCP_PORT %q: must be 1-65535", portStr)
 	}
 	url := "http://localhost:" + portStr
 
@@ -188,7 +188,7 @@ kubernetes:
 	if err != nil {
 		return "", fmt.Errorf("create log file: %w", err)
 	}
-	c.managerLog = logFile
+	c.asbcpLog = logFile
 
 	// Pass KUBECONFIG explicitly so ASBCP uses same cluster as test (avoids silent wrong-cluster or in-cluster config).
 	kubeconfig := os.Getenv("KUBECONFIG")
@@ -198,7 +198,7 @@ kubernetes:
 		}
 	}
 
-	cmd := exec.Command(c.ManagerBin)
+	cmd := exec.Command(c.ASBCPBin)
 	cmd.Env = append(os.Environ(),
 		"ASBCP_CONFIG_PATH="+cfgPath,
 		"ASBCP_SERVICE_KEYS="+c.ServiceKey,
@@ -221,7 +221,7 @@ kubernetes:
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("exec ASBCP: %w", err)
 	}
-	c.managerCmd = cmd
+	c.asbcpCmd = cmd
 	log.Printf("E2E: started ASBCP pid=%d log=%s", cmd.Process.Pid, logFile.Name())
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -230,15 +230,15 @@ kubernetes:
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				log.Printf("E2E: manager ready at %s", url)
+				log.Printf("E2E: ASBCP ready at %s", url)
 				return url, nil
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	// Include last lines of manager log so failures (e.g. CheckReady, config) are diagnosable.
+	// Include last lines of ASBCP log so failures (e.g. CheckReady, config) are diagnosable.
 	logSnippet := tailFile(logFile.Name(), 30)
-	return "", fmt.Errorf("manager did not become healthy within 30s (log: %s)\n--- last 30 lines ---\n%s",
+	return "", fmt.Errorf("ASBCP did not become healthy within 30s (log: %s)\n--- last 30 lines ---\n%s",
 		logFile.Name(), logSnippet)
 }
 
@@ -260,14 +260,14 @@ func tailFile(path string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (c *SuiteConfig) stopManager() {
-	if c.managerCmd != nil {
-		_ = c.managerCmd.Process.Kill()
-		_ = c.managerCmd.Wait()
-		c.managerCmd = nil
+func (c *SuiteConfig) stopASBCP() {
+	if c.asbcpCmd != nil {
+		_ = c.asbcpCmd.Process.Kill()
+		_ = c.asbcpCmd.Wait()
+		c.asbcpCmd = nil
 	}
-	if c.managerLog != nil {
-		_ = c.managerLog.Close()
+	if c.asbcpLog != nil {
+		_ = c.asbcpLog.Close()
 	}
 }
 
@@ -377,7 +377,7 @@ func purgeTestWorkloads(cli *kubernetes.Clientset, ns string) {
 		if wsID == "" || projID == "" || wlID == "" {
 			continue
 		}
-		url := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s", suite.ManagerURL, wsID, projID, wlID)
+		url := fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s", suite.ASBCPURL, wsID, projID, wlID)
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 		if err != nil {
 			log.Printf("E2E: warning – build workload cleanup request for %s: %v", pod.Name, err)
@@ -386,7 +386,7 @@ func purgeTestWorkloads(cli *kubernetes.Clientset, ns string) {
 		req.Header.Set("X-Service-Key", suite.ServiceKey)
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("E2E: warning – cleanup workload %s via manager failed: %v", pod.Name, err)
+			log.Printf("E2E: warning – cleanup workload %s via ASBCP failed: %v", pod.Name, err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -451,7 +451,7 @@ func podAnnotations(t *testing.T, ns, podName string) map[string]string {
 	return pod.Annotations
 }
 
-func releaseExpiredWorkloadsViaManager(t *testing.T, ns string) int {
+func releaseExpiredWorkloadsViaASBCP(t *testing.T, ns string) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -460,7 +460,7 @@ func releaseExpiredWorkloadsViaManager(t *testing.T, ns string) int {
 		LabelSelector: "app=managed-workload",
 	})
 	if err != nil {
-		t.Logf("releaseExpiredWorkloadsViaManager: list error: %v", err)
+		t.Logf("releaseExpiredWorkloadsViaASBCP: list error: %v", err)
 		return 0
 	}
 

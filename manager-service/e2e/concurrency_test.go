@@ -2,7 +2,7 @@
 
 package e2e_test
 
-// concurrency_test.go – Exercises the sandbox manager under concurrent load.
+// concurrency_test.go – Exercises ASBCP's internal sandbox execution service under concurrent load.
 //
 // Goals:
 //   - Verify N independent workloads can be created in parallel (no shared state, no deadlock)
@@ -257,7 +257,7 @@ func TestConcurrent_ExecParallel(t *testing.T) {
 
 // TestConcurrent_MixedOperations exercises create, get, and keepalive
 // simultaneously on different workloads to verify no shared-state corruption
-// in the manager's routing or K8s API client.
+// in the service routing or K8s API client.
 func TestConcurrent_MixedOperations(t *testing.T) {
 	// Pre-create a workload for the keepalive & GET goroutines.
 	existingWlID := setupRunningWorkload(t, "conc-mixed-base")

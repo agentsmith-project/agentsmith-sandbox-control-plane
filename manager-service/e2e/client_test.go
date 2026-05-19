@@ -13,45 +13,45 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Manager HTTP client (thin wrapper around net/http)
+// ASBCP HTTP client (thin wrapper around net/http)
 // ---------------------------------------------------------------------------
 
-// managerClient sends authenticated requests to the sandbox manager.
-type managerClient struct {
+// asbcpClient sends authenticated requests to ASBCP's internal sandbox execution service.
+type asbcpClient struct {
 	baseURL    string
 	serviceKey string
 	http       *http.Client
 }
 
-func newClient() *managerClient {
-	return &managerClient{
-		baseURL:    suite.ManagerURL,
+func newClient() *asbcpClient {
+	return &asbcpClient{
+		baseURL:    suite.ASBCPURL,
 		serviceKey: suite.ServiceKey,
 		http:       &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
 // newUnauthClient returns a client with no service key (for auth failure tests).
-func newUnauthClient() *managerClient {
+func newUnauthClient() *asbcpClient {
 	c := newClient()
 	c.serviceKey = ""
 	return c
 }
 
 // newWrongKeyClient returns a client with an incorrect service key.
-func newWrongKeyClient() *managerClient {
+func newWrongKeyClient() *asbcpClient {
 	c := newClient()
 	c.serviceKey = "definitely-wrong-key"
 	return c
 }
 
 // workloadURL builds the canonical workload URL.
-func (c *managerClient) workloadURL(wsID, projID, wlID string) string {
+func (c *asbcpClient) workloadURL(wsID, projID, wlID string) string {
 	return fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workloads/%s",
 		c.baseURL, wsID, projID, wlID)
 }
 
-func (c *managerClient) bindingURL(wsID, projID, bindingID string) string {
+func (c *asbcpClient) bindingURL(wsID, projID, bindingID string) string {
 	return fmt.Sprintf("%s/v1/workspaces/%s/projects/%s/workspace-bindings/%s",
 		c.baseURL, wsID, projID, bindingID)
 }
@@ -70,7 +70,7 @@ func (r *Response) DecodeJSON(v interface{}) error {
 func (r *Response) BodyString() string { return string(r.Body) }
 
 // do sends an HTTP request and returns the Response.
-func (c *managerClient) do(t *testing.T, method, url string, body io.Reader) *Response {
+func (c *asbcpClient) do(t *testing.T, method, url string, body io.Reader) *Response {
 	t.Helper()
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
@@ -166,7 +166,7 @@ type ExecResponse struct {
 }
 
 // CreateWorkload sends PUT /v1/workspaces/{wsID}/projects/{projID}/workloads/{wlID}.
-func (c *managerClient) CreateWorkload(t *testing.T, wsID, projID, wlID string, req CreateRequest) *Response {
+func (c *asbcpClient) CreateWorkload(t *testing.T, wsID, projID, wlID string, req CreateRequest) *Response {
 	t.Helper()
 	if c.serviceKey == suite.ServiceKey {
 		ensureWorkspaceBindingForWorkload(t, wsID, projID, wlID, &req)
@@ -174,31 +174,31 @@ func (c *managerClient) CreateWorkload(t *testing.T, wsID, projID, wlID string, 
 	return c.do(t, http.MethodPut, c.workloadURL(wsID, projID, wlID), jsonBody(req))
 }
 
-func (c *managerClient) EnsureWorkspaceBinding(t *testing.T, wsID, projID, bindingID string, req WorkspaceBindingRequest) *Response {
+func (c *asbcpClient) EnsureWorkspaceBinding(t *testing.T, wsID, projID, bindingID string, req WorkspaceBindingRequest) *Response {
 	t.Helper()
 	return c.do(t, http.MethodPut, c.bindingURL(wsID, projID, bindingID), jsonBody(req))
 }
 
 // GetWorkload sends GET /v1/workspaces/{wsID}/projects/{projID}/workloads/{wlID}.
-func (c *managerClient) GetWorkload(t *testing.T, wsID, projID, wlID string) *Response {
+func (c *asbcpClient) GetWorkload(t *testing.T, wsID, projID, wlID string) *Response {
 	t.Helper()
 	return c.do(t, http.MethodGet, c.workloadURL(wsID, projID, wlID), nil)
 }
 
 // DeleteWorkload sends DELETE /v1/workspaces/{wsID}/projects/{projID}/workloads/{wlID}.
-func (c *managerClient) DeleteWorkload(t *testing.T, wsID, projID, wlID string) *Response {
+func (c *asbcpClient) DeleteWorkload(t *testing.T, wsID, projID, wlID string) *Response {
 	t.Helper()
 	return c.do(t, http.MethodDelete, c.workloadURL(wsID, projID, wlID), nil)
 }
 
 // Keepalive sends POST .../keepalive.
-func (c *managerClient) Keepalive(t *testing.T, wsID, projID, wlID string) *Response {
+func (c *asbcpClient) Keepalive(t *testing.T, wsID, projID, wlID string) *Response {
 	t.Helper()
 	return c.do(t, http.MethodPost, c.workloadURL(wsID, projID, wlID)+"/keepalive", nil)
 }
 
 // Exec sends POST .../exec.
-func (c *managerClient) Exec(t *testing.T, wsID, projID, wlID string, cmd []string, timeoutSec int) *Response {
+func (c *asbcpClient) Exec(t *testing.T, wsID, projID, wlID string, cmd []string, timeoutSec int) *Response {
 	t.Helper()
 	payload := map[string]interface{}{"cmd": cmd, "timeout_seconds": timeoutSec}
 	return c.do(t, http.MethodPost, c.workloadURL(wsID, projID, wlID)+"/exec",
@@ -206,19 +206,19 @@ func (c *managerClient) Exec(t *testing.T, wsID, projID, wlID string, cmd []stri
 }
 
 // Healthz sends GET /healthz (no auth required).
-func (c *managerClient) Healthz(t *testing.T) *Response {
+func (c *asbcpClient) Healthz(t *testing.T) *Response {
 	t.Helper()
 	return c.do(t, http.MethodGet, c.baseURL+"/healthz", nil)
 }
 
 // Readyz sends GET /readyz (no auth required).
-func (c *managerClient) Readyz(t *testing.T) *Response {
+func (c *asbcpClient) Readyz(t *testing.T) *Response {
 	t.Helper()
 	return c.do(t, http.MethodGet, c.baseURL+"/readyz", nil)
 }
 
 // Metrics sends GET /metrics (no auth required).
-func (c *managerClient) Metrics(t *testing.T) *Response {
+func (c *asbcpClient) Metrics(t *testing.T) *Response {
 	t.Helper()
 	return c.do(t, http.MethodGet, c.baseURL+"/metrics", nil)
 }

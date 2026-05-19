@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Manager 测试脚本
+# ASBCP 测试脚本
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "$SERVICE_DIR"
 
-echo "[manager] Running tests..."
+echo "[asbcp] Running tests..."
 
 ensure_writable_gocache() {
   if [ -n "${GOCACHE:-}" ]; then
@@ -38,7 +38,7 @@ ensure_writable_gocache
 if [ -d "test" ] || find . -name "*_test.go" | grep -q .; then
     go test ./...
 else
-    echo "[manager] No tests found, skipping"
+    echo "[asbcp] No tests found, skipping"
 fi
 
-echo "[manager] ✓ Tests completed"
+echo "[asbcp] ✓ Tests completed"

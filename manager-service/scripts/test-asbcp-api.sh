@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test script for agentsmith-sandbox-control-plane workspace/project/workload API
-# Usage: ./scripts/test-manager.sh [asbcp-url] [service-key]
-# Example: ./scripts/test-manager.sh http://localhost:8080 test-key-123
+# Usage: ./scripts/test-asbcp-api.sh [asbcp-url] [service-key]
+# Example: ./scripts/test-asbcp-api.sh http://localhost:8080 test-key-123
 
 set -e
 

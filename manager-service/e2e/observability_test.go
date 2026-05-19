@@ -63,7 +63,7 @@ func TestMetricsIncrement(t *testing.T) {
 	assert.Greater(t, after, before, "http_request_total total should increase after requests")
 }
 
-// TestRequestIDHeader verifies the manager echoes back a X-Request-Id in the response.
+// TestRequestIDHeader verifies ASBCP echoes back a X-Request-Id in the response.
 func TestRequestIDHeader(t *testing.T) {
 	c := newClient()
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/healthz", nil)
@@ -76,9 +76,9 @@ func TestRequestIDHeader(t *testing.T) {
 	resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	// The manager must echo the request ID in the response header.
+	// ASBCP must echo the request ID in the response header.
 	assert.Equal(t, "test-request-id-e2e", resp.Header.Get("X-Request-Id"),
-		"manager must propagate X-Request-Id response header")
+		"ASBCP must propagate X-Request-Id response header")
 }
 
 // ---------------------------------------------------------------------------

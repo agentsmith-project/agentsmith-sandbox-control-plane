@@ -10,11 +10,10 @@ resources:
   - resource-quota.yaml
   - configmap.yaml
   - asbcp-configmap.yaml
-  # Legacy filename compatibility only; resource names and labels are ASBCP.
-  - rbac-manager.yaml
+  - rbac-asbcp.yaml
   - workload-rbac.yaml
-  - manager-deployment.yaml
-  - manager-service.yaml
+  - asbcp-deployment.yaml
+  - asbcp-service.yaml
   - workload-networkpolicy.yaml
 
 # 通用标签。不要写入 selectors：workload pods 由 ASBCP 动态创建，
@@ -31,8 +30,8 @@ labels:
 images:
   - name: agentsmith-sandbox-control-plane
     newName: agentsmith-sandbox-control-plane
-    newTag: "2.0.4"
+    newTag: "2.0.5"
 
 # 通用注解
 commonAnnotations:
-  app.kubernetes.io/version: "2.0.4"
+  app.kubernetes.io/version: "2.0.5"
