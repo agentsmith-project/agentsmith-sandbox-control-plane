@@ -32,13 +32,27 @@ func TestK8sIdentityMappingStableLabelSafeAndCollisionResistant(t *testing.T) {
 	}
 }
 
-func TestK8sIdentityLegacyDNSSafeObjectNameIsPreserved(t *testing.T) {
+func TestK8sIdentityObjectNameIncludesHashForDNSSafeValues(t *testing.T) {
 	name := ObjectName("workload", "wl-1")
 
-	if name != "workload-wl-1" {
-		t.Fatalf("DNS-safe legacy object name should be preserved, got %q", name)
+	if name == "workload-wl-1" {
+		t.Fatalf("object name must not use the legacy unsuffixed identity, got %q", name)
+	}
+	if !strings.HasPrefix(name, "workload-wl-1-") {
+		t.Fatalf("object name should preserve a readable slug plus hash, got %q", name)
 	}
 	assertDNSLabel(t, name)
+}
+
+func TestK8sIdentityObjectNameIsInjectiveForMultipartIDs(t *testing.T) {
+	first := ObjectName("workload-fact", "a-b", "c", "d")
+	second := ObjectName("workload-fact", "a", "b-c", "d")
+
+	assertDNSLabel(t, first)
+	assertDNSLabel(t, second)
+	if first == second {
+		t.Fatalf("multipart object names must not collide across segment boundaries: %q", first)
+	}
 }
 
 func assertDNSLabel(t *testing.T, value string) {

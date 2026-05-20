@@ -17,16 +17,18 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type fakeK8sClient struct {
-	pv           *v1.PersistentVolume
-	pvc          *v1.PersistentVolumeClaim
-	pods         []v1.Pod
-	listPodsErr  error
-	deletePVErr  error
-	deletePVCErr error
+	pv            *v1.PersistentVolume
+	pvc           *v1.PersistentVolumeClaim
+	pods          []v1.Pod
+	listSelectors []string
+	listPodsErr   error
+	deletePVErr   error
+	deletePVCErr  error
 }
 
 type testErrorEnvelope struct {
@@ -80,11 +82,25 @@ func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string,
 	f.pvc = nil
 	return nil
 }
-func (f *fakeK8sClient) ListPods(_ context.Context, _ string, _ metav1.ListOptions) (*v1.PodList, error) {
+func (f *fakeK8sClient) ListPods(_ context.Context, _ string, opts metav1.ListOptions) (*v1.PodList, error) {
+	f.listSelectors = append(f.listSelectors, opts.LabelSelector)
 	if f.listPodsErr != nil {
 		return nil, f.listPodsErr
 	}
-	return &v1.PodList{Items: append([]v1.Pod(nil), f.pods...)}, nil
+	if strings.TrimSpace(opts.LabelSelector) == "" {
+		return &v1.PodList{Items: append([]v1.Pod(nil), f.pods...)}, nil
+	}
+	selector, err := labels.Parse(opts.LabelSelector)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]v1.Pod, 0, len(f.pods))
+	for _, pod := range f.pods {
+		if selector.Matches(labels.Set(pod.Labels)) {
+			items = append(items, pod)
+		}
+	}
+	return &v1.PodList{Items: items}, nil
 }
 
 type fakeAFSCPClient struct {
@@ -536,6 +552,54 @@ func TestDeleteBindingBlocksLivePodByPVCClaimName(t *testing.T) {
 				t.Fatalf("pod volume claimName match must block PV/PVC deletion")
 			}
 		})
+	}
+}
+
+func TestDeleteBindingScansAllPodsForPVCReferencesDespiteLabelDrift(t *testing.T) {
+	expectedPVC := PVCName("ws_demo", "proj_demo", "wmb_demo")
+	client := &fakeK8sClient{
+		pv:  &v1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+		pvc: &v1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc"}},
+		pods: []v1.Pod{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "workload-label-drifted",
+					Labels:      map[string]string{"app": "drifted-away"},
+					Annotations: map[string]string{"mbos.io/workload-id": "label-drifted"},
+				},
+				Spec: v1.PodSpec{
+					Volumes: []v1.Volume{
+						{
+							Name: "workspace",
+							VolumeSource: v1.VolumeSource{
+								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+									ClaimName: expectedPVC,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	handler := NewHandler(client, Options{Namespace: "sandbox-workloads", WorkloadFacts: workloadfacts.NewMemoryStore()})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(client.listSelectors) != 1 || client.listSelectors[0] != "" {
+		t.Fatalf("delete guard must scan all pods without a driftable label selector, got %#v", client.listSelectors)
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("PVC reference from label-drifted pod must block PV/PVC deletion")
 	}
 }
 

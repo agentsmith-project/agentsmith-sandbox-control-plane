@@ -53,7 +53,7 @@ func setupPod(t *testing.T, prefix string, req CreateRequest) (wlID string, pod 
 	wlID = uniqueID(prefix)
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, req)
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 	return wlID, fetchPod(t, podName)
 }
@@ -234,7 +234,7 @@ func TestPodSpec_WorkspaceVolumeMount(t *testing.T) {
 	req := CreateRequest{Image: suite.Image}
 	ensureWorkspaceBindingForWorkload(t, wsID, testProj, wlID, &req)
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(wsID, testProj, wlID)
 	createCtx, cancelCreate := context.WithCancel(context.Background())
 	defer cancelCreate()
 	createDone := startCreateWorkloadRequest(createCtx, wsID, testProj, wlID, req)

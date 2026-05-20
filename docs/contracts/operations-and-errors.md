@@ -9,6 +9,7 @@ ASBCP operations must be safe to retry unless explicitly documented otherwise.
 - Keepalive should extend ASBCP and AFSCP lifecycle state.
 - Exec should run against an existing workload Pod and return command output or stream status according to implementation capability.
 - Delete should release AFSCP lifecycle state before reporting the workload released. If both the durable workload terminal fact and Pod are missing, Delete must fail closed with retryable `409` code `workload_release_incomplete`; Pod absence alone is not terminal truth.
+- Workload Pod operations must validate Pod annotations and labels against the URL `{workspace_id, project_id, workload_id}` before acting. Scope metadata drift is a non-retryable `409` `conflict` until the incompatible Pod is reconciled.
 
 ## Error Shape
 

@@ -3,6 +3,7 @@ package workloadfacts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 )
 
@@ -14,9 +15,6 @@ const (
 // ObjectName returns a DNS-label-safe Kubernetes object name with a stable hash suffix.
 func ObjectName(prefix string, rawParts ...string) string {
 	safePrefix := dnsSlug(prefix, "asbcp")
-	if legacyName := legacyObjectName(safePrefix, rawParts...); isDNSLabel(legacyName) {
-		return legacyName
-	}
 	hash := identityHash(rawParts...)
 	slug := dnsSlug(strings.Join(rawParts, "-"), "id")
 
@@ -43,16 +41,15 @@ func LabelValue(rawParts ...string) string {
 }
 
 func identityHash(rawParts ...string) string {
-	sum := sha256.Sum256([]byte(strings.Join(rawParts, "\x00")))
-	return hex.EncodeToString(sum[:])[:hashSuffixLength]
-}
-
-func legacyObjectName(prefix string, rawParts ...string) string {
-	joined := strings.Join(rawParts, "-")
-	if joined == "" {
-		return ""
+	var b strings.Builder
+	for _, part := range rawParts {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+		b.WriteByte('\x00')
 	}
-	return prefix + "-" + joined
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])[:hashSuffixLength]
 }
 
 func isDNSLabel(value string) bool {

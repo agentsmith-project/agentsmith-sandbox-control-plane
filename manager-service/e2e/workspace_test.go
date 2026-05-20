@@ -59,8 +59,8 @@ func TestWorkspace_BindingIsolatedPerWorkload(t *testing.T) {
 		c.DeleteWorkload(t, testWS, testProj, wlID2)
 	})
 
-	pod1 := fetchPod(t, "workload-"+wlID1)
-	pod2 := fetchPod(t, "workload-"+wlID2)
+	pod1 := fetchPod(t, workloadPodName(testWS, testProj, wlID1))
+	pod2 := fetchPod(t, workloadPodName(testWS, testProj, wlID2))
 	require.Len(t, pod1.Spec.Volumes, 1)
 	require.Len(t, pod2.Spec.Volumes, 1)
 	require.NotNil(t, pod1.Spec.Volumes[0].PersistentVolumeClaim)
@@ -102,7 +102,7 @@ func TestWorkspace_PodMountUsesBindingPVC(t *testing.T) {
 	_ = mustCreateWorkload(t, wsID, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, wsID, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(wsID, testProj, wlID)
 	waitPodPhase(t, suite.Namespace, podName, "Running", 3*time.Minute)
 
 	pod, err := k8sCli.CoreV1().Pods(suite.Namespace).Get(
@@ -146,7 +146,7 @@ func TestWorkspace_FilePersistsAcrossRestart(t *testing.T) {
 
 	// Phase 2: Delete the pod.
 	mustDeleteWorkload(t, testWS, testProj, wlID)
-	waitPodGone(t, suite.Namespace, "workload-"+wlID, 60*time.Second)
+	waitPodGone(t, suite.Namespace, workloadPodName(testWS, testProj, wlID), 60*time.Second)
 
 	// Phase 3: Recreate with the same workload ID.
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
@@ -230,8 +230,8 @@ func TestWorkspace_MultiWorkspaceIsolation(t *testing.T) {
 	var ps1, ps2 PodStatus
 	require.NoError(t, get1.DecodeJSON(&ps1))
 	require.NoError(t, get2.DecodeJSON(&ps2))
-	assert.Equal(t, "workload-"+wl1, ps1.PodName)
-	assert.Equal(t, "workload-"+wl2, ps2.PodName)
+	assert.Equal(t, workloadPodName(ws1, proj1, wl1), ps1.PodName)
+	assert.Equal(t, workloadPodName(ws2, proj2, wl2), ps2.PodName)
 	assert.NotEqual(t, ps1.PodName, ps2.PodName)
 
 	pod1 := fetchPod(t, ps1.PodName)

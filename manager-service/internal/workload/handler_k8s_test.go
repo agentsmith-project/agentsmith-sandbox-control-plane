@@ -246,9 +246,6 @@ func newPodRegistry(initial ...*v1.Pod) *podRegistry {
 	}
 	for _, p := range initial {
 		r.pods[p.Name] = p
-		if alias := legacyWorkloadPodAlias(p.Name); alias != "" {
-			r.pods[alias] = p
-		}
 	}
 	return r
 }
@@ -473,24 +470,8 @@ func (r *podRegistry) writeConfigMapIfRequested(w http.ResponseWriter, req *http
 	return true
 }
 
-func legacyWorkloadPodAlias(name string) string {
-	const prefix = "workload-"
-	if !strings.HasPrefix(name, prefix) {
-		return ""
-	}
-	workloadID := strings.TrimPrefix(name, prefix)
-	alias := PodName(workloadID)
-	if alias == name {
-		return ""
-	}
-	return alias
-}
-
 func testPodNameMatches(got, configured string) bool {
-	if got == configured {
-		return true
-	}
-	return got == legacyWorkloadPodAlias(configured)
+	return got == configured
 }
 
 func (r *podRegistry) writeNotFound(w http.ResponseWriter) {
@@ -546,6 +527,31 @@ func workloadPodWithMountAnnotations(name string) *v1.Pod {
 	}
 }
 
+func workloadPodWithScope(name, workspaceID, projectID, workloadID string) *v1.Pod {
+	pod := workloadPodWithMountAnnotations(name)
+	pod.Labels = map[string]string{
+		"app":          WorkloadLabel,
+		"workspace_id": workloadfacts.LabelValue(workspaceID),
+		"project_id":   workloadfacts.LabelValue(projectID),
+		"workload_id":  workloadfacts.LabelValue(workloadID),
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["mbos.io/workspace-id"] = workspaceID
+	pod.Annotations["mbos.io/project-id"] = projectID
+	pod.Annotations["mbos.io/workload-id"] = workloadID
+	return pod
+}
+
+func defaultScopedPodName(workloadID string) string {
+	return PodName("ws-1", "proj-1", workloadID)
+}
+
+func defaultScopedPod(workloadID string) *v1.Pod {
+	return workloadPodWithScope(defaultScopedPodName(workloadID), "ws-1", "proj-1", workloadID)
+}
+
 // shortCtx returns a context that expires quickly so that WaitForPodReady
 // returns promptly in tests that only care about the creation response.
 func shortCtx(t *testing.T) context.Context {
@@ -571,7 +577,7 @@ func TestHandleCreatePod_Returns201WithPodName(t *testing.T) {
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, PodName("wl-1"), got.PodName)
+	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.NotEmpty(t, got.StartedAt)
 	assert.NotEmpty(t, got.ExpiresAt)
 }
@@ -879,7 +885,7 @@ func TestHandleCreatePodSlowReadyReturnsBeforeWriteTimeout(t *testing.T) {
 			podReadyPolls++
 			time.Sleep(650 * time.Millisecond)
 			_ = json.NewEncoder(w).Encode(&v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")},
+				ObjectMeta: metav1.ObjectMeta{Name: defaultScopedPodName("wl-1")},
 				Status:     v1.PodStatus{Phase: v1.PodPending},
 			})
 			return
@@ -921,7 +927,7 @@ func TestCreateResponseContainsWorkloadIDCorrelationIDStatus(t *testing.T) {
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
 	assert.Equal(t, "wl-1", got.WorkloadID)
-	assert.Equal(t, PodName("wl-1"), got.PodName)
+	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.Equal(t, "corr-create", got.CorrelationID)
 	assert.Equal(t, "pending", got.Status)
 }
@@ -931,40 +937,36 @@ func TestCreateResponseContainsWorkloadIDCorrelationIDStatus(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
-	existing := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              PodName("wl-1"),
-			CreationTimestamp: metav1.Now(),
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:       "main",
-					WorkingDir: "/home/task-plan/workspace",
-					Env: []v1.EnvVar{
-						{Name: "TASK_HOME", Value: "/home/task-plan"},
-						{Name: "HOME", Value: "/home/task-plan"},
-						{Name: "WORKSPACE_PATH", Value: "/home/task-plan/workspace"},
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{Name: "workspace", MountPath: "/home/task-plan", ReadOnly: true},
-					},
+	existing := workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1")
+	existing.CreationTimestamp = metav1.Now()
+	existing.Spec = v1.PodSpec{
+		Containers: []v1.Container{
+			{
+				Name:       "main",
+				WorkingDir: "/home/task-plan/workspace",
+				Env: []v1.EnvVar{
+					{Name: "TASK_HOME", Value: "/home/task-plan"},
+					{Name: "HOME", Value: "/home/task-plan"},
+					{Name: "WORKSPACE_PATH", Value: "/home/task-plan/workspace"},
+				},
+				VolumeMounts: []v1.VolumeMount{
+					{Name: "workspace", MountPath: "/home/task-plan", ReadOnly: true},
 				},
 			},
-			Volumes: []v1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
-							ReadOnly:  true,
-						},
+		},
+		Volumes: []v1.Volume{
+			{
+				Name: "workspace",
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+						ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
+						ReadOnly:  true,
 					},
 				},
 			},
 		},
-		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"},
 	}
+	existing.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"}
 	h := newHandlerWithRegistry(t, newPodRegistry(existing))
 
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
@@ -976,45 +978,41 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, PodName("wl-1"), got.PodName)
+	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "pod already exists", got.Message)
 }
 
 func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
-	existing := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              PodName("wl-1"),
-			CreationTimestamp: metav1.Now(),
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:       "main",
-					WorkingDir: "/workspace",
-					Env: []v1.EnvVar{
-						{Name: "TASK_HOME", Value: "/workspace"},
-						{Name: "HOME", Value: "/workspace"},
-						{Name: "WORKSPACE_PATH", Value: "/workspace"},
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{Name: "workspace", MountPath: "/workspace"},
-					},
+	existing := workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1")
+	existing.CreationTimestamp = metav1.Now()
+	existing.Spec = v1.PodSpec{
+		Containers: []v1.Container{
+			{
+				Name:       "main",
+				WorkingDir: "/workspace",
+				Env: []v1.EnvVar{
+					{Name: "TASK_HOME", Value: "/workspace"},
+					{Name: "HOME", Value: "/workspace"},
+					{Name: "WORKSPACE_PATH", Value: "/workspace"},
+				},
+				VolumeMounts: []v1.VolumeMount{
+					{Name: "workspace", MountPath: "/workspace"},
 				},
 			},
-			Volumes: []v1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-							ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
-						},
+		},
+		Volumes: []v1.Volume{
+			{
+				Name: "workspace",
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+						ClaimName: workspacebinding.PVCName("ws-1", "proj-1", "wmb_demo"),
 					},
 				},
 			},
 		},
-		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"},
 	}
+	existing.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"}
 	h := newHandlerWithRegistry(t, newPodRegistry(existing))
 
 	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
@@ -1031,41 +1029,149 @@ func TestHandleCreatePod_AlreadyExistsSpecDrift_Returns409(t *testing.T) {
 // handleGetPod – pod found / annotations
 // ---------------------------------------------------------------------------
 
+func TestWorkloadRoutesDoNotOperateOnSameWorkloadIDAcrossDifferentScope(t *testing.T) {
+	const workloadID = "shared-wl"
+	foreignPod := workloadPodWithScope("workload-"+workloadID, "ws-a", "proj-a", workloadID)
+	for _, tt := range []struct {
+		name       string
+		method     string
+		pathSuffix string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "get returns offline instead of foreign pod status",
+			method:     http.MethodGet,
+			pathSuffix: "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "keepalive cannot patch foreign pod",
+			method:     http.MethodPost,
+			pathSuffix: "/keepalive",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "exec cannot target foreign pod",
+			method:     http.MethodPost,
+			pathSuffix: "/exec",
+			body:       `{"cmd":["echo","hi"]}`,
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "delete cannot release or delete foreign pod",
+			method:     http.MethodDelete,
+			pathSuffix: "",
+			wantStatus: http.StatusConflict,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := newPodRegistry(foreignPod.DeepCopy())
+			h := newHandlerWithRegistry(t, reg)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+
+			req := httptest.NewRequest(
+				tt.method,
+				"/v1/workspaces/ws-b/projects/proj-b/workloads/"+workloadID+tt.pathSuffix,
+				strings.NewReader(tt.body),
+			)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			require.Equal(t, tt.wantStatus, rec.Code, rec.Body.String())
+			if tt.method == http.MethodGet {
+				var got PodStatus
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+				assert.Equal(t, "offline", got.Phase)
+				assert.Empty(t, got.PodName)
+			}
+			reg.mu.Lock()
+			defer reg.mu.Unlock()
+			if _, ok := reg.pods[foreignPod.Name]; !ok {
+				t.Fatalf("foreign scoped pod %s must not be mutated or deleted", foreignPod.Name)
+			}
+		})
+	}
+}
+
+func TestWorkloadRoutesFailClosedWhenPodNameMatchesButScopeMetadataDrifts(t *testing.T) {
+	const workloadID = "scope-drift"
+	requestedName := workloadfacts.ObjectName("workload", "ws-b", "proj-b", workloadID)
+	driftedPod := workloadPodWithScope(requestedName, "ws-a", "proj-a", workloadID)
+	for _, tt := range []struct {
+		name       string
+		method     string
+		pathSuffix string
+		body       string
+	}{
+		{
+			name:       "get",
+			method:     http.MethodGet,
+			pathSuffix: "",
+		},
+		{
+			name:       "keepalive",
+			method:     http.MethodPost,
+			pathSuffix: "/keepalive",
+		},
+		{
+			name:       "exec",
+			method:     http.MethodPost,
+			pathSuffix: "/exec",
+			body:       `{"cmd":["echo","hi"]}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := newPodRegistry(driftedPod.DeepCopy())
+			h := newHandlerWithRegistry(t, reg)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+
+			req := httptest.NewRequest(
+				tt.method,
+				"/v1/workspaces/ws-b/projects/proj-b/workloads/"+workloadID+tt.pathSuffix,
+				strings.NewReader(tt.body),
+			)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			body := decodeError(t, rec)
+			assert.Equal(t, "conflict", body.Error.Code)
+			assert.Contains(t, body.Error.Message, "scope")
+		})
+	}
+}
+
 func TestHandleGetPod_GetPodReturnsInternalError_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"},
-		Status:     v1.PodStatus{Phase: v1.PodRunning},
-	})
-	reg.setForceGetErrorFor("workload-wl-1")
+	reg := newPodRegistry(workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1"))
+	reg.setForceGetErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "wl-1")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestHandleGetPod_RunningPod(t *testing.T) {
 	createdAt := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-1",
-			CreationTimestamp: metav1.NewTime(createdAt),
-		},
-		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "192.168.1.10"},
-	}
+	pod := workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1")
+	pod.CreationTimestamp = metav1.NewTime(createdAt)
+	pod.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "192.168.1.10"}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "wl-1")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, "workload-wl-1", got.PodName)
+	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "192.168.1.10", got.IP)
 
@@ -1079,18 +1185,14 @@ func TestHandleGetPod_RunningPod(t *testing.T) {
 }
 
 func TestHandleGetPod_PendingPod(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-2",
-			CreationTimestamp: metav1.Now(),
-		},
-		Status: v1.PodStatus{Phase: v1.PodPending},
-	}
+	pod := workloadPodWithScope(defaultScopedPodName("wl-2"), "ws-1", "proj-1", "wl-2")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Status = v1.PodStatus{Phase: v1.PodPending}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "wl-2")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-2")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got PodStatus
@@ -1102,22 +1204,16 @@ func TestHandleGetPod_AnnotationsPopulatedInResponse(t *testing.T) {
 	lastActivityAt := "2025-06-01T10:00:00Z"
 	expiresAt := "2025-06-01T10:30:00Z"
 
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-3",
-			CreationTimestamp: metav1.Now(),
-			Annotations: map[string]string{
-				"last_activity_at": lastActivityAt,
-				"expires_at":       expiresAt,
-			},
-		},
-		Status: v1.PodStatus{Phase: v1.PodRunning},
-	}
+	pod := workloadPodWithScope(defaultScopedPodName("wl-3"), "ws-1", "proj-1", "wl-3")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Annotations["last_activity_at"] = lastActivityAt
+	pod.Annotations["expires_at"] = expiresAt
+	pod.Status = v1.PodStatus{Phase: v1.PodRunning}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "wl-3")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-3")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got PodStatus
@@ -1127,19 +1223,14 @@ func TestHandleGetPod_AnnotationsPopulatedInResponse(t *testing.T) {
 }
 
 func TestHandleGetPod_MissingAnnotationsOmittedFromResponse(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl-4",
-			CreationTimestamp: metav1.Now(),
-			// No last_activity_at or expires_at annotations.
-		},
-		Status: v1.PodStatus{Phase: v1.PodRunning},
-	}
+	pod := workloadPodWithScope(defaultScopedPodName("wl-4"), "ws-1", "proj-1", "wl-4")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Status = v1.PodStatus{Phase: v1.PodRunning}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "wl-4")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-4")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got PodStatus
@@ -1153,10 +1244,7 @@ func TestHandleGetPod_MissingAnnotationsOmittedFromResponse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")},
-	}
-	h := newHandlerWithRegistry(t, newPodRegistry(pod))
+	h := newHandlerWithRegistry(t, newPodRegistry(defaultScopedPod("wl-1")))
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
 	rec := httptest.NewRecorder()
@@ -1171,7 +1259,7 @@ func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
 func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
-	reg := newPodRegistry(workloadPodWithMountAnnotations(PodName("wl-1")))
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
@@ -1197,8 +1285,8 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	flush := &fakeStorageFlushBarrier{events: events}
-	podName := PodName("wl-1")
-	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
 
@@ -1215,8 +1303,8 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 
 func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 	events := &eventRecorder{}
-	podName := PodName("wl-1")
-	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	flush := &fakeStorageFlushBarrier{events: events, err: errors.New("sync failed")}
@@ -1238,8 +1326,8 @@ func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 }
 
 func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
-	podName := PodName("wl-1")
-	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
 
@@ -1268,8 +1356,8 @@ func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 
 func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	events := &eventRecorder{}
-	podName := PodName("wl-1")
-	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed token=raw-secret password=p@ss")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
@@ -1301,7 +1389,7 @@ func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 func TestDeleteWorkload_StatusFailureThenRetryContinuesTerminalMarkFromDurableFact(t *testing.T) {
 	events := &eventRecorder{}
 	facts := workloadfacts.NewMemoryStore()
-	reg := newPodRegistry(workloadPodWithMountAnnotations(PodName("wl-1")))
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed")}
 	h := newHandlerWithRegistryAndOptions(t, reg, Options{
@@ -1362,7 +1450,7 @@ func TestDeleteWorkload_AllTerminalFactsSecondDeleteIsIdempotent(t *testing.T) {
 		WorkloadID:         "wl-1",
 		NamespaceID:        "ns_demo",
 		MountBindingID:     "wmb_demo",
-		PodName:            PodName("wl-1"),
+		PodName:            defaultScopedPodName("wl-1"),
 		PodUID:             "uid-1",
 		ReleaseDone:        true,
 		PodDeleted:         true,
@@ -1382,12 +1470,46 @@ func TestDeleteWorkload_AllTerminalFactsSecondDeleteIsIdempotent(t *testing.T) {
 	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Empty(t, events.snapshot(), "terminal fact retry must be idempotent and avoid live pod or AFSCP calls")
+	assert.Equal(t, []string{"confirm-pod-gone"}, events.snapshot(), "terminal fact retry must only prove scoped pod absence")
+}
+
+func TestDeleteWorkload_TerminalFactStillFailsClosedOnScopedPodMetadataDrift(t *testing.T) {
+	const workloadID = "scope-drift-delete"
+	requestedName := PodName("ws-b", "proj-b", workloadID)
+	facts := workloadfacts.NewMemoryStore()
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-b",
+		ProjectID:          "proj-b",
+		WorkloadID:         workloadID,
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            requestedName,
+		PodUID:             "uid-terminal",
+		ReleaseDone:        true,
+		PodDeleted:         true,
+		TerminalStatusDone: true,
+		WorkspaceBindingID: "wmb_demo",
+	}))
+	driftedPod := workloadPodWithScope(requestedName, "ws-a", "proj-a", workloadID)
+	reg := newPodRegistry(driftedPod)
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{WorkloadFactStore: facts})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-b", "proj-b", workloadID)
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	body := decodeError(t, rec)
+	assert.Equal(t, "conflict", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "scope")
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods[requestedName], "scope-drifted pod must not be deleted when terminal fact exists")
 }
 
 func TestHandleDeletePod_GetPodReturnsInternalError_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}})
-	reg.setForceGetErrorFor(PodName("wl-1"))
+	reg := newPodRegistry(workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1"))
+	reg.setForceGetErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -1398,8 +1520,8 @@ func TestHandleDeletePod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 }
 
 func TestHandleDeletePod_DeletePodFails_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}})
-	reg.setForceDeleteErrorFor(PodName("wl-1"))
+	reg := newPodRegistry(workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1"))
+	reg.setForceDeleteErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -1412,8 +1534,8 @@ func TestHandleDeletePod_DeletePodFails_Returns500(t *testing.T) {
 
 func TestHandleDeletePod_DeletePodFailsDoesNotPatchReleasedAndKeepsPodForRetry(t *testing.T) {
 	events := &eventRecorder{}
-	podName := PodName("wl-1")
-	reg := newPodRegistry(workloadPodWithMountAnnotations(podName))
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
 	reg.events = events
 	reg.setForceDeleteErrorFor(podName)
 	lifecycle := &fakeMountLifecycleClient{events: events}
@@ -1439,31 +1561,28 @@ func TestHandleDeletePod_DeletePodFailsDoesNotPatchReleasedAndKeepsPodForRetry(t
 // ---------------------------------------------------------------------------
 
 func TestHandleKeepalive_GetPodReturnsInternalError_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"}})
-	reg.setForceGetErrorFor("workload-wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.setForceGetErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestHandleKeepalive_PatchFails_Returns500(t *testing.T) {
 	now := time.Now().UTC()
-	reg := newPodRegistry(&v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "workload-wl-1",
-			Annotations: map[string]string{"workload/maxExpiresAt": now.Add(24 * time.Hour).Format(time.RFC3339)},
-		},
-	})
-	reg.setForcePatchErrorFor("workload-wl-1")
+	pod := defaultScopedPod("wl-1")
+	pod.Annotations["workload/maxExpiresAt"] = now.Add(24 * time.Hour).Format(time.RFC3339)
+	reg := newPodRegistry(pod)
+	reg.setForcePatchErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "keepalive")
@@ -1471,20 +1590,13 @@ func TestHandleKeepalive_PatchFails_Returns500(t *testing.T) {
 
 func TestHandleKeepalive_ReturnsExpiresAt(t *testing.T) {
 	now := time.Now().UTC()
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-wl-1",
-			Annotations: map[string]string{
-				// maxExpiresAt far in the future so it doesn't interfere.
-				"workload/maxExpiresAt": now.Add(24 * time.Hour).Format(time.RFC3339),
-			},
-		},
-	}
+	pod := defaultScopedPod("wl-1")
+	pod.Annotations["workload/maxExpiresAt"] = now.Add(24 * time.Hour).Format(time.RFC3339)
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got KeepaliveResponse
@@ -1501,12 +1613,12 @@ func TestHandleKeepalive_ReturnsExpiresAt(t *testing.T) {
 
 func TestHandleKeepaliveHeartbeatsAFSCPMount(t *testing.T) {
 	lifecycle := &fakeMountLifecycleClient{}
-	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(defaultScopedPod("wl-1")), Options{AFSCPClient: lifecycle})
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("X-Correlation-Id", "corr-heartbeat")
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "ns_demo", lifecycle.heartbeatNamespaceID)
@@ -1517,7 +1629,7 @@ func TestHandleKeepaliveHeartbeatsAFSCPMount(t *testing.T) {
 
 func TestHandleKeepaliveUsesRequestIDContextForAFSCPCorrelationAndIdempotency(t *testing.T) {
 	lifecycle := &fakeMountLifecycleClient{}
-	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(defaultScopedPod("wl-1")), Options{AFSCPClient: lifecycle})
 	wrapped := observability.RequestIDMiddleware("X-ASBCP-Request-ID")(h)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/projects/proj-1/workloads/wl-1/keepalive", nil)
@@ -1534,21 +1646,21 @@ func TestHandleKeepaliveUsesRequestIDContextForAFSCPCorrelationAndIdempotency(t 
 
 func TestHandleKeepalive_AFSCPHeartbeatFailureLogsRedactedEvidence(t *testing.T) {
 	lifecycle := &fakeMountLifecycleClient{heartbeatErr: errors.New("heartbeat failed token=raw-secret password=p@ss")}
-	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(workloadPodWithMountAnnotations("workload-wl-1")), Options{AFSCPClient: lifecycle})
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(defaultScopedPod("wl-1")), Options{AFSCPClient: lifecycle})
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("X-Correlation-Id", "corr-heartbeat")
 	req.Header.Set("X-Request-Id", "req-heartbeat")
 	rec := httptest.NewRecorder()
 	logs := captureStandardLog(t)
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "AFSCP workload mount heartbeat failed")
 	assert.NotContains(t, rec.Body.String(), "raw-secret")
 
 	logOutput := logs.String()
-	for _, token := range []string{"AFSCP workload mount heartbeat failed", "workload=wl-1", "pod=workload-wl-1", "mount_binding_id=wmb_demo", "request_id=req-heartbeat", "correlation_id=corr-heartbeat", "[REDACTED]"} {
+	for _, token := range []string{"AFSCP workload mount heartbeat failed", "workload=wl-1", "pod=" + defaultScopedPodName("wl-1"), "mount_binding_id=wmb_demo", "request_id=req-heartbeat", "correlation_id=corr-heartbeat", "[REDACTED]"} {
 		assert.Contains(t, logOutput, token)
 	}
 	assert.NotContains(t, logOutput, "raw-secret")
@@ -1558,20 +1670,14 @@ func TestHandleKeepalive_AFSCPHeartbeatFailureLogsRedactedEvidence(t *testing.T)
 func TestHandleKeepalive_UsesCustomIdleTimeoutFromAnnotation(t *testing.T) {
 	const customIdleSec = 600
 	now := time.Now().UTC()
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-wl-1",
-			Annotations: map[string]string{
-				"workload/idleTimeoutSec": strconv.Itoa(customIdleSec),
-				"workload/maxExpiresAt":   now.Add(24 * time.Hour).Format(time.RFC3339),
-			},
-		},
-	}
+	pod := defaultScopedPod("wl-1")
+	pod.Annotations["workload/idleTimeoutSec"] = strconv.Itoa(customIdleSec)
+	pod.Annotations["workload/maxExpiresAt"] = now.Add(24 * time.Hour).Format(time.RFC3339)
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got KeepaliveResponse
@@ -1587,20 +1693,13 @@ func TestHandleKeepalive_UsesCustomIdleTimeoutFromAnnotation(t *testing.T) {
 func TestHandleKeepalive_CappedByMaxExpiresAt(t *testing.T) {
 	// maxExpiresAt is only 1 minute from now – much less than the default 30-min idle timeout.
 	maxExpires := time.Now().UTC().Add(1 * time.Minute)
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-wl-1",
-			Annotations: map[string]string{
-				"workload/maxExpiresAt": maxExpires.Format(time.RFC3339),
-				// No idleTimeoutSec – falls back to 30-min default which exceeds maxExpiresAt.
-			},
-		},
-	}
+	pod := defaultScopedPod("wl-1")
+	pod.Annotations["workload/maxExpiresAt"] = maxExpires.Format(time.RFC3339)
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got KeepaliveResponse
@@ -1619,19 +1718,13 @@ func TestHandleKeepalive_CappedByMaxExpiresAt(t *testing.T) {
 func TestHandleKeepalive_NotCapWhenMaxExpiresAtIsFarFuture(t *testing.T) {
 	now := time.Now().UTC()
 	maxExpires := now.Add(48 * time.Hour) // far future – should not cap
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-wl-1",
-			Annotations: map[string]string{
-				"workload/maxExpiresAt": maxExpires.Format(time.RFC3339),
-			},
-		},
-	}
+	pod := defaultScopedPod("wl-1")
+	pod.Annotations["workload/maxExpiresAt"] = maxExpires.Format(time.RFC3339)
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "wl-1")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "wl-1")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got KeepaliveResponse
@@ -1650,28 +1743,25 @@ func TestHandleKeepalive_NotCapWhenMaxExpiresAtIsFarFuture(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleExec_PodExistsReturnsError_Returns500(t *testing.T) {
-	reg := newPodRegistry(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"}})
-	reg.setForceGetErrorFor("workload-wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.setForceGetErrorFor(defaultScopedPodName("wl-1"))
 	h := newHandlerWithRegistry(t, reg)
 
 	payload, _ := json.Marshal(ExecRequest{Cmd: []string{"echo", "hi"}})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "wl-1")
+	h.handleExec(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestHandleExec_PodExistsButExecFails(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "workload-wl-1"},
-	}
-	h := newHandlerWithRegistry(t, newPodRegistry(pod))
+	h := newHandlerWithRegistry(t, newPodRegistry(defaultScopedPod("wl-1")))
 
 	payload, _ := json.Marshal(ExecRequest{Cmd: []string{"echo", "hello"}})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "wl-1")
+	h.handleExec(rec, req, "ws-1", "proj-1", "wl-1")
 
 	// The pod exists so the handler must NOT return 404 (pod not found).
 	// It will return either 200 (exec result returned even on SPDY error) or 500.
@@ -1684,13 +1774,9 @@ func TestHandleExec_PodExistsButExecFails(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServeHTTP_GetWorkload_RunningPod(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-my-agent",
-			CreationTimestamp: metav1.Now(),
-		},
-		Status: v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.10.10.10"},
-	}
+	pod := workloadPodWithScope(PodName("ws-1", "proj-1", "my-agent"), "ws-1", "proj-1", "my-agent")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.10.10.10"}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	mux := http.NewServeMux()
@@ -1707,15 +1793,13 @@ func TestServeHTTP_GetWorkload_RunningPod(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, "workload-my-agent", got.PodName)
+	assert.Equal(t, PodName("ws-1", "proj-1", "my-agent"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "10.10.10.10", got.IP)
 }
 
 func TestServeHTTP_DeleteWorkload_Success(t *testing.T) {
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "workload-agent-del"},
-	}
+	pod := workloadPodWithScope(PodName("ws-1", "proj-1", "agent-del"), "ws-1", "proj-1", "agent-del")
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	mux := http.NewServeMux()
@@ -1737,14 +1821,8 @@ func TestServeHTTP_DeleteWorkload_Success(t *testing.T) {
 
 func TestServeHTTP_KeepaliveWorkload_Success(t *testing.T) {
 	now := time.Now().UTC()
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "workload-agent-ka",
-			Annotations: map[string]string{
-				"workload/maxExpiresAt": now.Add(24 * time.Hour).Format(time.RFC3339),
-			},
-		},
-	}
+	pod := workloadPodWithScope(PodName("ws-1", "proj-1", "agent-ka"), "ws-1", "proj-1", "agent-ka")
+	pod.Annotations["workload/maxExpiresAt"] = now.Add(24 * time.Hour).Format(time.RFC3339)
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	mux := http.NewServeMux()

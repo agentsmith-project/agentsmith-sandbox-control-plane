@@ -43,10 +43,16 @@ Workload create request fields:
 - `image`: Workload container image selected by AgentSmith.
 - `command`: Optional command selected by AgentSmith.
 - `env`: Optional environment variables selected by AgentSmith.
-- `resources`: Optional resource requests and limits.
-- `timeouts`: Optional lifecycle timeouts.
+- `cpu_request`: Optional CPU request quantity.
+- `cpu_limit`: Optional CPU limit quantity.
+- `memory_request`: Optional memory request quantity.
+- `memory_limit`: Optional memory limit quantity.
+- `idle_timeout_sec`: Optional idle timeout in seconds.
+- `max_lifetime_sec`: Optional maximum lifetime in seconds.
 
 ASBCP does not choose the runner image and does not own AgentSmith task policy.
+
+Kubernetes object identity is scope-qualified. Workload Pod lookup and mutation are keyed by `{workspace_id, project_id, workload_id}` and must verify Pod annotations and labels match that URL scope before status, keepalive, exec, release, or delete behavior proceeds. Workspace binding PV/PVC and workload fact object names are also generated from structured identity parts with a bounded DNS-label slug plus hash suffix, not by ambiguous hyphen concatenation.
 
 ## Compatibility
 

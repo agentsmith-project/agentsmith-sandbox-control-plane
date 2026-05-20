@@ -79,8 +79,70 @@ type responseStatusError struct {
 	message string
 }
 
+var errWorkloadScopeMismatch = stderrors.New("workload pod scope mismatch")
+
 func (e responseStatusError) Error() string {
 	return e.message
+}
+
+type workloadScope struct {
+	WorkspaceID string
+	ProjectID   string
+	WorkloadID  string
+}
+
+func newWorkloadScope(workspaceID, projectID, workloadID string) workloadScope {
+	return workloadScope{
+		WorkspaceID: strings.TrimSpace(workspaceID),
+		ProjectID:   strings.TrimSpace(projectID),
+		WorkloadID:  strings.TrimSpace(workloadID),
+	}
+}
+
+func (s workloadScope) podName() string {
+	return workloadfacts.ObjectName("workload", s.WorkspaceID, s.ProjectID, s.WorkloadID)
+}
+
+func (s workloadScope) validatePod(pod *v1.Pod) error {
+	if pod == nil {
+		return fmt.Errorf("%w: pod is required", errWorkloadScopeMismatch)
+	}
+	if got, want := strings.TrimSpace(pod.GetName()), s.podName(); got != want {
+		return fmt.Errorf("%w: pod name %q does not match scoped workload identity %q", errWorkloadScopeMismatch, got, want)
+	}
+	annotations := pod.GetAnnotations()
+	labels := pod.GetLabels()
+	if err := requireScopeValue("workspace annotation", annotations["mbos.io/workspace-id"], s.WorkspaceID); err != nil {
+		return err
+	}
+	if err := requireScopeValue("project annotation", annotations["mbos.io/project-id"], s.ProjectID); err != nil {
+		return err
+	}
+	if err := requireScopeValue("workload annotation", annotations["mbos.io/workload-id"], s.WorkloadID); err != nil {
+		return err
+	}
+	if err := requireScopeValue("workspace label", labels["workspace_id"], workloadfacts.LabelValue(s.WorkspaceID)); err != nil {
+		return err
+	}
+	if err := requireScopeValue("project label", labels["project_id"], workloadfacts.LabelValue(s.ProjectID)); err != nil {
+		return err
+	}
+	if err := requireScopeValue("workload label", labels["workload_id"], workloadfacts.LabelValue(s.WorkloadID)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requireScopeValue(name, got, want string) error {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if got == "" {
+		return fmt.Errorf("%w: %s is missing", errWorkloadScopeMismatch, name)
+	}
+	if got != want {
+		return fmt.Errorf("%w: %s mismatch", errWorkloadScopeMismatch, name)
+	}
+	return nil
 }
 
 // NewHandler creates a new workload handler.
@@ -154,11 +216,11 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	case action == "" && r.Method == http.MethodDelete:
 		h.handleDeletePod(w, r, workspaceID, projectID, workloadID)
 	case action == "" && r.Method == http.MethodGet:
-		h.handleGetPod(w, r, workloadID)
+		h.handleGetPod(w, r, workspaceID, projectID, workloadID)
 	case action == "keepalive" && r.Method == http.MethodPost:
-		h.handleKeepalive(w, r, workloadID)
+		h.handleKeepalive(w, r, workspaceID, projectID, workloadID)
 	case action == "exec" && r.Method == http.MethodPost:
-		h.handleExec(w, r, workloadID)
+		h.handleExec(w, r, workspaceID, projectID, workloadID)
 	default:
 		jsonError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
@@ -209,7 +271,8 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		expiresAt = idleExpiresAt
 	}
 
-	podName := PodName(workloadID)
+	scope := newWorkloadScope(workspaceID, projectID, workloadID)
+	podName := scope.podName()
 
 	env := make(map[string]string)
 	for k, v := range req.Env {
@@ -225,7 +288,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	createdPod, err := h.k8sClient.Clientset().CoreV1().Pods(h.k8sClient.Namespace()).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			existingPod, getErr := h.k8sClient.GetPod(ctx, podName)
+			existingPod, getErr := h.getScopedWorkloadPod(ctx, scope)
 			if getErr == nil {
 				if drift := workloadPodSpecDrift(existingPod, pod); drift != "" {
 					jsonError(w, r, http.StatusConflict, "conflict", "existing pod spec drift: "+drift)
@@ -246,6 +309,11 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 					CorrelationID: requestCorrelationID(r),
 					Message:       "pod already exists",
 				})
+				return
+			}
+			if stderrors.Is(getErr, errWorkloadScopeMismatch) {
+				log.Printf("workload/%s: existing pod scope mismatch: %s", workloadID, observability.RedactLogValue(getErr))
+				jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
 				return
 			}
 		}
@@ -283,7 +351,8 @@ func decodeCreateRequest(r *http.Request, req *CreateRequest) error {
 
 func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
-	podName := PodName(workloadID)
+	scope := newWorkloadScope(workspaceID, projectID, workloadID)
+	podName := scope.podName()
 	store := h.workloadFactStore()
 
 	fact, hasFact, err := h.loadWorkloadFact(ctx, store, workspaceID, projectID, workloadID)
@@ -293,18 +362,35 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 	if hasFact && fact.Terminal() {
-		observability.GetMetrics().RecordWorkloadDelete()
-		jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
-		return
+		if _, err := h.getScopedWorkloadPod(ctx, scope); err == nil {
+			jsonError(w, r, http.StatusConflict, errorCodeWorkloadReleaseIncomplete, "workload terminal fact says pod deleted but scoped pod still exists")
+			return
+		} else if apierrors.IsNotFound(err) {
+			observability.GetMetrics().RecordWorkloadDelete()
+			jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
+			return
+		} else if stderrors.Is(err, errWorkloadScopeMismatch) {
+			log.Printf("workload/%s: pod scope mismatch before terminal delete retry: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
+			return
+		} else {
+			log.Printf("workload/%s: pod lookup failed before terminal delete retry: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
+			return
+		}
 	}
 
 	var pod *v1.Pod
 	podMissing := false
 	if !hasFact || !fact.PodDeleted {
-		pod, err = h.k8sClient.GetPod(ctx, podName)
+		pod, err = h.getScopedWorkloadPod(ctx, scope)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				podMissing = true
+			} else if stderrors.Is(err, errWorkloadScopeMismatch) {
+				log.Printf("workload/%s: pod scope mismatch before delete: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
+				return
 			} else {
 				log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
 				jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
@@ -407,14 +493,19 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 	jsonResponse(w, http.StatusOK, DeleteResponse{Message: "pod deleted"})
 }
 
-func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadID string) {
+func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
-	podName := PodName(workloadID)
+	scope := newWorkloadScope(workspaceID, projectID, workloadID)
 
-	pod, err := h.k8sClient.GetPod(ctx, podName)
+	pod, err := h.getScopedWorkloadPod(ctx, scope)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			jsonResponse(w, http.StatusOK, PodStatus{Status: "offline", Phase: "offline"})
+			return
+		}
+		if stderrors.Is(err, errWorkloadScopeMismatch) {
+			log.Printf("workload/%s: pod scope mismatch before get: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
 			return
 		}
 		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
@@ -441,14 +532,20 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workloadI
 
 // handleKeepalive updates the pod's last-activity and expires_at. Clients must send keepalive
 // periodically; expired workloads must be released through the workload delete API.
-func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, workloadID string) {
+func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
-	podName := PodName(workloadID)
+	scope := newWorkloadScope(workspaceID, projectID, workloadID)
+	podName := scope.podName()
 
-	pod, err := h.k8sClient.GetPod(ctx, podName)
+	pod, err := h.getScopedWorkloadPod(ctx, scope)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
+			return
+		}
+		if stderrors.Is(err, errWorkloadScopeMismatch) {
+			log.Printf("workload/%s: pod scope mismatch before keepalive: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
 			return
 		}
 		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
@@ -492,7 +589,7 @@ func (h *Handler) handleKeepalive(w http.ResponseWriter, r *http.Request, worklo
 	})
 }
 
-func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID string) {
+func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	var req ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, r, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error())
@@ -504,16 +601,22 @@ func (h *Handler) handleExec(w http.ResponseWriter, r *http.Request, workloadID 
 	}
 
 	ctx := r.Context()
-	podName := PodName(workloadID)
+	scope := newWorkloadScope(workspaceID, projectID, workloadID)
+	podName := scope.podName()
 
-	exists, err := h.k8sClient.PodExists(ctx, podName)
+	_, err := h.getScopedWorkloadPod(ctx, scope)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
+			return
+		}
+		if stderrors.Is(err, errWorkloadScopeMismatch) {
+			log.Printf("workload/%s: pod scope mismatch before exec: %s", workloadID, observability.RedactLogValue(err))
+			jsonError(w, r, http.StatusConflict, "conflict", "workload pod scope mismatch")
+			return
+		}
 		log.Printf("workload/%s: pod lookup failed before exec: %s", workloadID, observability.RedactLogValue(err))
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
-		return
-	}
-	if !exists {
-		jsonError(w, r, http.StatusNotFound, "not_found", "pod not found")
 		return
 	}
 
@@ -1125,6 +1228,17 @@ func (h *Handler) workloadFactStore() workloadfacts.Store {
 	return workloadfacts.NewConfigMapStore(h.k8sClient.Clientset().CoreV1().ConfigMaps(h.k8sClient.Namespace()))
 }
 
+func (h *Handler) getScopedWorkloadPod(ctx context.Context, scope workloadScope) (*v1.Pod, error) {
+	pod, err := h.k8sClient.GetPod(ctx, scope.podName())
+	if err != nil {
+		return nil, err
+	}
+	if err := scope.validatePod(pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
 func (h *Handler) loadWorkloadFact(ctx context.Context, store workloadfacts.Store, workspaceID, projectID, workloadID string) (workloadfacts.Fact, bool, error) {
 	fact, err := store.Get(ctx, workloadfacts.Key{WorkspaceID: workspaceID, ProjectID: projectID, WorkloadID: workloadID})
 	if err != nil {
@@ -1494,9 +1608,9 @@ func podPhaseString(pod *v1.Pod) string {
 	return string(pod.Status.Phase)
 }
 
-// PodName returns the pod name for a workload.
-func PodName(workloadID string) string {
-	return workloadfacts.ObjectName("workload", workloadID)
+// PodName returns the scope-qualified pod name for a workload.
+func PodName(workspaceID, projectID, workloadID string) string {
+	return newWorkloadScope(workspaceID, projectID, workloadID).podName()
 }
 
 func boolPtr(b bool) *bool {

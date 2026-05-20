@@ -21,7 +21,7 @@ if [ -f /tmp/asbcp-smoke-pod-name.txt ]; then
     export WORKLOAD_POD_NAME
     rm /tmp/asbcp-smoke-pod-name.txt
 fi
-pod_name="${WORKLOAD_POD_NAME:-workload-${WORKLOAD_ID}}"
+pod_name="${WORKLOAD_POD_NAME:-}"
 
 echo "Cleaning up workload ${WORKLOAD_ID} (pod: ${pod_name})..."
 
@@ -35,6 +35,11 @@ fi
 echo -e "  ${COLOR_GREEN}Workload deleted${COLOR_NC}"
 
 # 2. Wait for pod to be deleted
+if [ -z "${pod_name}" ]; then
+    echo -e "  ${COLOR_YELLOW}⊘ SKIPPED: no recorded pod_name; API delete completed${COLOR_NC}"
+    exit 0
+fi
+
 echo "  Waiting for pod to be deleted..."
 
 for i in {1..30}; do

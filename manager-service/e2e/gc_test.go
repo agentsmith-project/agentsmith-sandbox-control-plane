@@ -38,7 +38,7 @@ func TestGC_ExpiresAtAnnotationSetOnCreate(t *testing.T) {
 
 	// mustCreateWorkload waits for the pod to be Ready before returning,
 	// so the pod already exists and all annotations are set at this point.
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 
 	ann := podAnnotations(t, suite.Namespace, podName)
@@ -66,7 +66,7 @@ func TestGC_MaxExpiresAtAnnotationSetOnCreate(t *testing.T) {
 	})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 
 	ann := podAnnotations(t, suite.Namespace, podName)
@@ -92,7 +92,7 @@ func TestGC_IdleTimeoutAnnotationReflectsRequest(t *testing.T) {
 	})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 
 	ann := podAnnotations(t, suite.Namespace, podName)
@@ -109,7 +109,7 @@ func TestGC_LastActivityAtAnnotationSetOnCreate(t *testing.T) {
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitPodExists(t, suite.Namespace, podName, 10*time.Second)
 	after := time.Now().UTC()
 
@@ -136,7 +136,7 @@ func TestGC_KeepaliveUpdatesExpiresAt(t *testing.T) {
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	// Record pre-keepalive annotation.
@@ -188,7 +188,7 @@ func TestGC_KeepaliveDoesNotExceedMaxLifetime(t *testing.T) {
 	})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	ann := podAnnotations(t, suite.Namespace, podName)
@@ -260,7 +260,7 @@ func TestGC_ASBCPRelease_DeletesExpiredPod(t *testing.T) {
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	t.Cleanup(func() { newClient().DeleteWorkload(t, testWS, testProj, wlID) })
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	// Force-expire the pod.
@@ -326,7 +326,7 @@ func TestGC_ASBCPRelease_MultipleExpiredPods(t *testing.T) {
 	// Force-expire the n batch pods.
 	pastTime := time.Now().UTC().Add(-1 * time.Hour)
 	for _, id := range wlIDs {
-		patchPodExpiry(t, suite.Namespace, "workload-"+id, pastTime)
+		patchPodExpiry(t, suite.Namespace, workloadPodName(testWS, testProj, id), pastTime)
 	}
 
 	deleted := releaseExpiredWorkloadsViaASBCP(t, suite.Namespace)
@@ -334,7 +334,7 @@ func TestGC_ASBCPRelease_MultipleExpiredPods(t *testing.T) {
 
 	// All n expired pods must be gone.
 	for _, id := range wlIDs {
-		waitPodGone(t, suite.Namespace, "workload-"+id, 60*time.Second)
+		waitPodGone(t, suite.Namespace, workloadPodName(testWS, testProj, id), 60*time.Second)
 	}
 
 	// The active pod must still be alive.
@@ -357,7 +357,7 @@ func TestGC_GetAfterDeletion(t *testing.T) {
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	mustDeleteWorkload(t, testWS, testProj, wlID)
-	waitPodGone(t, suite.Namespace, "workload-"+wlID, 60*time.Second)
+	waitPodGone(t, suite.Namespace, workloadPodName(testWS, testProj, wlID), 60*time.Second)
 
 	resp := newClient().GetWorkload(t, testWS, testProj, wlID)
 	require.Equal(t, http.StatusOK, resp.StatusCode)

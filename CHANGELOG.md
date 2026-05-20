@@ -6,6 +6,21 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+No unreleased changes.
+
+## [v2.0.7] - 2026-05-20
+
+### Breaking Changes
+
+- ASBCP-BC-0002: pre-GA workload and binding Kubernetes object names are now scope-qualified hashed identities; workload Pod status, keepalive, exec, release, and delete paths validate Pod annotations and labels against URL workspace/project/workload scope before operating.
+
+### Changed
+
+- Workspace binding delete scans all pods for PVC references instead of relying on the driftable `app=managed-workload` label selector.
+- Workload DELETE retries with durable terminal facts now still prove scoped Pod absence; the terminal DELETE scope-drift fail-closed path rejects a same-name Pod with mismatched workspace/project/workload metadata.
+- Workload create contract docs now list the flat `cpu_*`, `memory_*`, `idle_timeout_sec`, and `max_lifetime_sec` fields.
+- Prepared BC0002 release evidence under `v2.0.7`; the already-published `v2.0.6` image identity remains the BC0001 release and is not retconned to include scoped workload identity behavior.
+
 ## [v2.0.6] - 2026-05-19
 
 ### Breaking Changes
@@ -14,8 +29,8 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ### Changed
 
-- Moved the current release-impacting workload truth evidence to the new `v2.0.6` release track because the existing `v2.0.5` tag is already published at an older commit.
-- Recorded release-impacting workload truth changes: durable terminal truth is required before DELETE success, the DELETE 404-to-409 fail-closed contract is explicit, ConfigMap fact store/RBAC is part of the provider prerequisite surface, and workspace-binding uncertainty is fail-closed.
+- Moved the BC0001 workload terminal truth evidence to the `v2.0.6` release track because the existing `v2.0.5` tag is already published at an older commit.
+- Recorded BC0001 workload truth changes: durable terminal truth is required before DELETE success, the DELETE 404-to-409 fail-closed contract is explicit, ConfigMap fact store/RBAC is part of the provider prerequisite surface, and workspace-binding uncertainty is fail-closed.
 
 ## [v2.0.5] - 2026-05-19
 

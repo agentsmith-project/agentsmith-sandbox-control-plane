@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/workload"
 )
 
 // ---------------------------------------------------------------------------
@@ -271,6 +273,10 @@ func taskWorkspacePath(wlID string) string {
 
 func bindingIDForWorkload(wlID string) string {
 	return "wmb_" + wlID
+}
+
+func workloadPodName(wsID, projID, wlID string) string {
+	return workload.PodName(wsID, projID, wlID)
 }
 
 // mustDeleteWorkload deletes a workload and fails the test if response isn't 200.

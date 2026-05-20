@@ -104,6 +104,7 @@ Expected behavior:
 - Runtime env includes `TASK_HOME`, `HOME`, and `WORKSPACE_PATH` derived from the plan.
 - Caller-provided mount path, sub path, working directory, storage backend settings, and storage auth material are rejected.
 - Unavailable or changed plans fail closed.
+- Pod identity is scope-qualified by `{workspace_id, project_id, workload_id}`. All status, keepalive, exec, release, and delete paths validate Pod annotations and labels against the URL scope before operating on the Pod.
 
 ## 3. Start Agent Process
 

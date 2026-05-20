@@ -64,6 +64,10 @@ Base path:
   "env": {
     "AGENT_ID": "agent-001"
   },
+  "cpu_request": "250m",
+  "cpu_limit": "1",
+  "memory_request": "512Mi",
+  "memory_limit": "1Gi",
   "workspace_binding_id": "wmb_demo",
   "idle_timeout_sec": 1800,
   "max_lifetime_sec": 86400
@@ -78,6 +82,7 @@ Expected behavior:
 - `TASK_HOME`, `HOME`, and `WORKSPACE_PATH` are derived from the AFSCP plan.
 - Caller-provided mount path, sub path, working directory, storage backend settings, and storage auth material are rejected.
 - If an existing Pod differs from the plan-derived spec, ASBCP returns a lifecycle conflict.
+- Pod identity is scoped by `{workspace_id, project_id, workload_id}`. ASBCP validates Pod annotations and labels against the URL scope before GET status, keepalive, exec, release, or delete operations.
 
 ### GET
 

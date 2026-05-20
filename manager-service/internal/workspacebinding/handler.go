@@ -320,7 +320,7 @@ func (h *Handler) activeWorkloadsForBinding(ctx context.Context, workspaceID, pr
 		addActiveWorkloadName(active, fact.WorkloadID, fact.PodName)
 	}
 
-	pods, err := h.k8sClient.ListPods(ctx, h.options.Namespace, metav1.ListOptions{LabelSelector: "app=managed-workload"})
+	pods, err := h.k8sClient.ListPods(ctx, h.options.Namespace, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -536,6 +536,11 @@ func names(workspaceID, projectID, bindingID string) (pvName, pvcName string) {
 func PVCName(workspaceID, projectID, bindingID string) string {
 	_, pvcName := names(workspaceID, projectID, bindingID)
 	return pvcName
+}
+
+func PVName(workspaceID, projectID, bindingID string) string {
+	pvName, _ := names(workspaceID, projectID, bindingID)
+	return pvName
 }
 
 func volumeHandle(workspaceID, projectID, bindingID string) string {

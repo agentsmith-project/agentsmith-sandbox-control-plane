@@ -217,10 +217,10 @@ func decodeError(t *testing.T, rec *httptest.ResponseRecorder) testErrorEnvelope
 // ---------------------------------------------------------------------------
 
 func TestPodName(t *testing.T) {
-	assert.Equal(t, workloadfacts.ObjectName("workload", "abc-123"), PodName("abc-123"))
-	assert.Equal(t, workloadfacts.ObjectName("workload", ""), PodName(""))
-	assert.Equal(t, workloadfacts.ObjectName("workload", "x"), PodName("x"))
-	assert.Equal(t, workloadfacts.ObjectName("workload", "with spaces"), PodName("with spaces"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "ws-1", "proj-1", "abc-123"), PodName("ws-1", "proj-1", "abc-123"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "ws-1", "proj-1", ""), PodName("ws-1", "proj-1", ""))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "ws-1", "proj-1", "x"), PodName("ws-1", "proj-1", "x"))
+	assert.Equal(t, workloadfacts.ObjectName("workload", "ws 1", "proj 1", "with spaces"), PodName("ws 1", "proj 1", "with spaces"))
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ func TestHandleExec_K8sErrorUsesStableEnvelopeWithoutRawLeak(t *testing.T) {
 	req.Header.Set("X-Request-Id", "req-k8s")
 	rec := httptest.NewRecorder()
 
-	h.handleExec(rec, req, "nonexistent")
+	h.handleExec(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	body := decodeError(t, rec)
@@ -551,7 +551,7 @@ func TestRouteRequest_WorkloadIDExtracted(t *testing.T) {
 }
 
 func TestRouteRequest_DangerousTailDeleteDoesNotDeletePod(t *testing.T) {
-	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("wl-1")}}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: PodName("ws-1", "proj-1", "wl-1")}}
 	reg := newPodRegistry(pod)
 	h := newHandlerWithRegistry(t, reg)
 
@@ -562,7 +562,7 @@ func TestRouteRequest_DangerousTailDeleteDoesNotDeletePod(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code)
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	assert.NotNil(t, reg.pods[PodName("wl-1")], "extra route tail must not hit workload DELETE handler")
+	assert.NotNil(t, reg.pods[PodName("ws-1", "proj-1", "wl-1")], "extra route tail must not hit workload DELETE handler")
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +645,7 @@ func TestHandleExec_InvalidJSON(t *testing.T) {
 	h := &Handler{}
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("{bad")))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "wl-1")
+	h.handleExec(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	body := decodeError(t, rec)
@@ -657,7 +657,7 @@ func TestHandleExec_EmptyCmd(t *testing.T) {
 	payload, _ := json.Marshal(ExecRequest{Cmd: []string{}})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "wl-1")
+	h.handleExec(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	body := decodeError(t, rec)
@@ -669,7 +669,7 @@ func TestHandleExec_MissingCmd(t *testing.T) {
 	payload, _ := json.Marshal(ExecRequest{})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "wl-1")
+	h.handleExec(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	body := decodeError(t, rec)
@@ -685,7 +685,7 @@ func TestHandleExec_PodNotFound(t *testing.T) {
 	payload, _ := json.Marshal(ExecRequest{Cmd: []string{"echo", "hello"}})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
-	h.handleExec(rec, req, "nonexistent")
+	h.handleExec(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	body := decodeError(t, rec)
@@ -751,7 +751,7 @@ func TestHandleGetPod_NotFound(t *testing.T) {
 	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleGetPod(rec, req, "nonexistent")
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
@@ -788,7 +788,7 @@ func TestHandleKeepalive_NotFound(t *testing.T) {
 	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	h.handleKeepalive(rec, req, "nonexistent")
+	h.handleKeepalive(rec, req, "ws-1", "proj-1", "nonexistent")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	body := decodeError(t, rec)

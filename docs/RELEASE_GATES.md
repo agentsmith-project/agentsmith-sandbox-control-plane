@@ -28,7 +28,7 @@ Release mode must cover:
 - `known_risk_status` must come from `scripts/verify-release.sh --risk-status-json`, which reads the `Release-blocking` column in `docs/RISK_REGISTER.md`.
 - The ASBCP service prerequisite contract in `docs/contracts/asbcp-provider-prerequisites.v1.json` must cover Kubernetes RBAC, secret/env projections, AFSCP caller identity, allowed caller, `orchestrator_mount`, and no-public-ingress.
 - Readiness evidence manifest must not contain `pending` or `deferred` required release evidence.
-- Fake-fixture smoke for health/ready handlers, workspace binding, workload create/keepalive/release/delete paths, and exec route/error contract.
+- Fake-fixture smoke for health/ready handlers, workspace binding PVC safety, workload scoped identity, workload create/keepalive/release/delete paths, and exec route/error contract.
 - Source tests and binary build checks for the ASBCP service.
 - Dockerfile contract and Docker image build with root `VERSION` metadata.
 - `kubectl kustomize` render for dev, staging, and production overlays.

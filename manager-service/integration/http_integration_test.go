@@ -366,7 +366,7 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 }
 
 func testBindingPVName(workspaceID, projectID, bindingID string) string {
-	return "juicefs-pv-" + workspaceID + "-" + projectID + "-" + strings.ReplaceAll(bindingID, "_", "-")
+	return workspacebinding.PVName(workspaceID, projectID, bindingID)
 }
 
 type testErrorEnvelope struct {
@@ -744,7 +744,7 @@ func TestIntegration_FullLifecycle_CreateGetKeepaliveDeleteGet(t *testing.T) {
 	resp.Body.Close()
 
 	stateful.mu.Lock()
-	createdPod := stateful.pods["workload-wl1"]
+	createdPod := stateful.pods[workload.PodName("ws", "p", "wl1")]
 	stateful.mu.Unlock()
 	require.NotNil(t, createdPod)
 	require.Len(t, createdPod.Spec.Containers, 1)
@@ -803,9 +803,20 @@ func TestIntegration_FullLifecycle_GetKeepaliveDeleteGet(t *testing.T) {
 	stateful := newStatefulPodFake(t)
 	stateful.addPod(&v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "workload-wl1",
+			Name:              workload.PodName("ws", "p", "wl1"),
 			CreationTimestamp: metav1.Now(),
-			Annotations:       map[string]string{"workload/maxExpiresAt": "2030-01-01T00:00:00Z"},
+			Labels: map[string]string{
+				"app":          workload.WorkloadLabel,
+				"workspace_id": workloadfacts.LabelValue("ws"),
+				"project_id":   workloadfacts.LabelValue("p"),
+				"workload_id":  workloadfacts.LabelValue("wl1"),
+			},
+			Annotations: map[string]string{
+				"workload/maxExpiresAt": "2030-01-01T00:00:00Z",
+				"mbos.io/workspace-id":  "ws",
+				"mbos.io/project-id":    "p",
+				"mbos.io/workload-id":   "wl1",
+			},
 		},
 		Status: v1.PodStatus{Phase: v1.PodRunning},
 	})

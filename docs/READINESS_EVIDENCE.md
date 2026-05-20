@@ -2,6 +2,8 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
+Current release-prep target: `v2.0.7`. The already-published `v2.0.6` image remains the BC0001 durable terminal truth release; BC0002 scoped workload identity behavior is prepared for `v2.0.7` and must not be treated as published `v2.0.6` behavior.
+
 | Evidence | Required for release | Current status |
 | --- | --- | --- |
 | Governance guard | Yes | Added in `.github/tests/asbcp-governance-guard.sh` |
@@ -10,8 +12,8 @@ This ledger records ASBCP release-readiness evidence. It is intentionally lightw
 | Service auth contract skeleton | Yes | Added under `docs/contracts/` |
 | AFSCP mount-plan dependency contract | Yes | Added under `docs/contracts/` |
 | Health and readiness smoke | Yes | Fake-fixture smoke covers `healthz`, `readyz`, and authenticated v1 health path |
-| Workspace binding fixture | Yes | Fake AFSCP/Kubernetes fixture proves mount-plan consumption |
-| Workload lifecycle and exec route/error smoke | Yes | Fake-fixture smoke covers create, keepalive, exec route/error contract, AFSCP release, and delete paths |
+| Workspace binding fixture | Yes | Fake AFSCP/Kubernetes fixture proves mount-plan consumption and label-independent PVC reference safety |
+| Workload lifecycle and exec route/error smoke | Yes | Fake-fixture smoke covers create, scope-qualified Pod identity, keepalive, exec route/error contract, AFSCP release, terminal DELETE scope-drift fail-closed behavior, and delete paths |
 | Kubernetes render check | Yes | Enforced by `scripts/verify-release.sh` |
 | Dockerfile contract and image build | Yes | Enforced by `scripts/verify-release.sh` |
 | CHANGELOG release evidence | Yes | `scripts/verify-release.sh` parses the current tag section into structured `known_breaking_changes` objects and `changelog_summary` before image publication; the workflow reuses that JSON for the final manifest |

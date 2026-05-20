@@ -3,6 +3,13 @@
   "short_name": "ASBCP",
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
+  "release_preparation": {
+    "target_version": "v2.0.7",
+    "status": "pre-tag release prep; no git tag or push performed",
+    "supersedes_published_version": "v2.0.6",
+    "breaking_change_id": "ASBCP-BC-0002",
+    "summary": "BC0002 scope-qualified workload identity, label-independent PVC safety, flat workload create docs, and terminal DELETE scope-drift fail-closed coverage belong to the v2.0.7 release candidate, not to the already-published v2.0.6 image."
+  },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",
     "digest_required": true,
@@ -79,12 +86,12 @@
     },
     {
       "id": "workspace_binding_fixture",
-      "description": "Fixture proves AFSCP mount plan consumption for workspace binding.",
+      "description": "Fixture proves AFSCP mount plan consumption for workspace binding and label-independent PVC reference safety.",
       "status": "added"
     },
     {
       "id": "workload_lifecycle_smoke",
-      "description": "Fake-fixture smoke verifies create, keepalive, exec route/error contract, AFSCP release, and delete lifecycle paths.",
+      "description": "Fake-fixture smoke verifies create, scope-qualified Pod identity, keepalive, exec route/error contract, AFSCP release, terminal DELETE scope-drift fail-closed behavior, and delete lifecycle paths.",
       "status": "added"
     },
     {

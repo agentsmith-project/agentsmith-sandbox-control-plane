@@ -140,7 +140,7 @@ func TestFullLifecycle_CreateGetDeleteGet(t *testing.T) {
 
 	var created PodStatus
 	require.NoError(t, createResp.DecodeJSON(&created))
-	assert.Equal(t, "workload-"+wlID, created.PodName)
+	assert.Equal(t, workloadPodName(testWS, testProj, wlID), created.PodName)
 	assert.NotEmpty(t, created.ExpiresAt)
 
 	// Wait for Running via the ASBCP GET endpoint.
@@ -152,7 +152,7 @@ func TestFullLifecycle_CreateGetDeleteGet(t *testing.T) {
 	assert.NotEmpty(t, running.LastActivityAt)
 
 	// Verify the pod exists in K8s with correct labels.
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	pod, err := k8sCli.CoreV1().Pods(suite.Namespace).Get(
 		context.Background(), podName, metav1.GetOptions{})
 	require.NoError(t, err, "pod must exist in K8s")
@@ -199,7 +199,7 @@ func TestCreate_Idempotent(t *testing.T) {
 	var ps PodStatus
 	require.NoError(t, second.DecodeJSON(&ps))
 	assert.Equal(t, "pod already exists", ps.Message)
-	assert.Equal(t, "workload-"+wlID, ps.PodName)
+	assert.Equal(t, workloadPodName(testWS, testProj, wlID), ps.PodName)
 
 	// Cleanup
 	mustDeleteWorkload(t, testWS, testProj, wlID)
@@ -214,7 +214,7 @@ func TestKeepalive_UpdatesExpiresAt(t *testing.T) {
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 
 	// Record the current expires_at from the pod annotation.
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	before := podAnnotations(t, suite.Namespace, podName)["expires_at"]
 
 	// Wait a second so time.Now() clearly advances.
@@ -259,7 +259,7 @@ func TestKeepalive_MaxExpiresAtCapped(t *testing.T) {
 	// A keepalive after 3+ minutes of pod startup means maxExpiresAt is already in the past or close.
 	// The keepalive should return an expires_at ≤ maxExpiresAt.
 
-	podName := "workload-" + wlID
+	podName := workloadPodName(testWS, testProj, wlID)
 	maxExpiresStr := podAnnotations(t, suite.Namespace, podName)["workload/maxExpiresAt"]
 	require.NotEmpty(t, maxExpiresStr)
 	maxExpires, err := time.Parse(time.RFC3339, maxExpiresStr)
@@ -312,7 +312,7 @@ func TestLifecycle_ExecAfterDelete_Returns404(t *testing.T) {
 	_ = mustCreateWorkload(t, testWS, testProj, wlID, CreateRequest{Image: suite.Image})
 	waitWorkloadRunning(t, testWS, testProj, wlID, 3*time.Minute)
 	mustDeleteWorkload(t, testWS, testProj, wlID)
-	waitPodGone(t, suite.Namespace, "workload-"+wlID, 60*time.Second)
+	waitPodGone(t, suite.Namespace, workloadPodName(testWS, testProj, wlID), 60*time.Second)
 
 	resp := newClient().Exec(t, testWS, testProj, wlID, []string{"echo", "x"}, 5)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "exec after delete must return 404")

@@ -108,7 +108,10 @@ check_pod_ready() {
     local workload_id=${1:-${WORKLOAD_ID}}
     local namespace=${2:-${WORKLOAD_NAMESPACE}}
 
-    local pod_name="${WORKLOAD_POD_NAME:-workload-${workload_id}}"
+    local pod_name="${WORKLOAD_POD_NAME:-}"
+    if [ -z "${pod_name}" ]; then
+        return 1
+    fi
 
     kubectl get pod "${pod_name}" -n "${namespace}" &> /dev/null
     if [ $? -ne 0 ]; then
