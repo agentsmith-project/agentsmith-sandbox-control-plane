@@ -8,6 +8,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 No unreleased changes.
 
+## [v2.0.9] - 2026-05-27
+
+### Changed
+
+- Workspace binding JuiceFS CSI PVs now add `attr-cache=0s`, `entry-cache=0s`, `dir-entry-cache=0s`, and `negative-entry-cache=0s` mount options while preserving the AFSCP payload `subdir`, prioritizing pre-GA cross-client delete visibility correctness.
+
 ## [v2.0.8] - 2026-05-27
 
 ### Changed

@@ -184,6 +184,13 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	if !hasMountOption(client.pv.Spec.MountOptions, "subdir=afscp/ns_demo/repos/repo_demo/payload") {
 		t.Fatalf("expected PV mountOptions to carry AFSCP payload subdir, got %#v", client.pv.Spec.MountOptions)
 	}
+	assertMountOptionsInclude(t, client.pv.Spec.MountOptions,
+		"subdir=afscp/ns_demo/repos/repo_demo/payload",
+		"attr-cache=0s",
+		"entry-cache=0s",
+		"dir-entry-cache=0s",
+		"negative-entry-cache=0s",
+	)
 	if got := client.pv.Spec.CSI.VolumeAttributes["subdir"]; got != "" {
 		t.Fatalf("VolumeAttributes[subdir] must not be the isolation source, got %q", got)
 	}
@@ -282,6 +289,39 @@ func TestEnsureBindingMountOptionsAreRepoPayloadScoped(t *testing.T) {
 	}
 }
 
+func TestBuildPVIncludesPayloadSubdirAndJuiceFSConsistencyMountOptions(t *testing.T) {
+	plan := validPlan()
+	status := BindingStatus{
+		PVName:              "juicefs-pv-test",
+		WorkspaceID:         "ws_demo",
+		ProjectID:           "proj_demo",
+		MountBindingID:      plan.MountBindingID,
+		VolumeHandle:        "juicefs-test",
+		NamespaceID:         "ns_demo",
+		VolumeID:            plan.VolumeID,
+		PayloadVolumeSubdir: plan.PayloadVolumeSubdir,
+		MountPath:           plan.MountPath,
+		ReadOnly:            plan.ReadOnly,
+		StorageClassName:    "juicefs-static",
+		CreatedAt:           "2026-05-27T00:00:00Z",
+		UpdatedAt:           "2026-05-27T00:00:00Z",
+	}
+	handler := NewHandler(&fakeK8sClient{}, Options{
+		CSIDriver:       "csi.juicefs.com",
+		StorageCapacity: "1Pi",
+	})
+
+	pv := handler.buildPV(status, plan)
+
+	assertMountOptionsInclude(t, pv.Spec.MountOptions,
+		"subdir=afscp/ns_demo/repos/repo_demo/payload",
+		"attr-cache=0s",
+		"entry-cache=0s",
+		"dir-entry-cache=0s",
+		"negative-entry-cache=0s",
+	)
+}
+
 func ensureBindingPVForTest(t *testing.T, plan afscp.OrchestratorMountPlan) *v1.PersistentVolume {
 	t.Helper()
 	client := &fakeK8sClient{}
@@ -312,6 +352,15 @@ func hasMountOption(options []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertMountOptionsInclude(t *testing.T, options []string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if !hasMountOption(options, want) {
+			t.Fatalf("PV mountOptions missing %q, got %#v", want, options)
+		}
+	}
 }
 
 func TestEnsureBindingRejectsRawJuiceFSFields(t *testing.T) {

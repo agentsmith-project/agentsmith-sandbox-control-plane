@@ -107,6 +107,10 @@ const (
 	annotationRunAsNonRoot             = "mbos.io/run-as-non-root"
 	annotationAllowPrivileged          = "mbos.io/allow-privileged"
 	annotationJVSControlOutsidePayload = "mbos.io/jvs-control-outside-payload"
+	juiceFSMountOptionAttrCache        = "attr-cache=0s"
+	juiceFSMountOptionEntryCache       = "entry-cache=0s"
+	juiceFSMountOptionDirEntryCache    = "dir-entry-cache=0s"
+	juiceFSMountOptionNegativeCache    = "negative-entry-cache=0s"
 )
 
 func NewHandler(k8sClient k8sClient, options Options) *Handler {
@@ -448,7 +452,7 @@ func (h *Handler) buildPV(status BindingStatus, plan afscp.OrchestratorMountPlan
 			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimRetain,
 			VolumeMode:                    func() *v1.PersistentVolumeMode { m := v1.PersistentVolumeFilesystem; return &m }(),
 			StorageClassName:              status.StorageClassName,
-			MountOptions:                  []string{payloadSubdirMountOption(plan.PayloadVolumeSubdir)},
+			MountOptions:                  juiceFSMountOptions(plan.PayloadVolumeSubdir),
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
 					Driver:       firstNonEmpty(h.options.CSIDriver, "csi.juicefs.com"),
@@ -783,6 +787,16 @@ func ResolvedMountFromPVC(pvc *v1.PersistentVolumeClaim) (ResolvedMount, error) 
 
 func payloadSubdirMountOption(payloadVolumeSubdir string) string {
 	return "subdir=" + strings.TrimSpace(payloadVolumeSubdir)
+}
+
+func juiceFSMountOptions(payloadVolumeSubdir string) []string {
+	return []string{
+		payloadSubdirMountOption(payloadVolumeSubdir),
+		juiceFSMountOptionAttrCache,
+		juiceFSMountOptionEntryCache,
+		juiceFSMountOptionDirEntryCache,
+		juiceFSMountOptionNegativeCache,
+	}
 }
 
 func validatePVPayloadMountOptions(pv *v1.PersistentVolume, payloadVolumeSubdir string) error {

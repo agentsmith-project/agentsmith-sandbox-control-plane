@@ -656,10 +656,10 @@ func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testin
 	)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
-		"ASBCP_VERSION=v2.0.8",
-		"ASBCP_GIT_TAG=v2.0.8",
-		"ASBCP_TAG_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
-		"ASBCP_IMAGE_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@"+digest,
+		"ASBCP_VERSION=v2.0.9",
+		"ASBCP_GIT_TAG=v2.0.9",
+		"ASBCP_TAG_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9",
+		"ASBCP_IMAGE_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9@"+digest,
 		"ASBCP_IMAGE_DIGEST="+digest,
 		"ANONYMOUS_PULL_RESULT=ok",
 		"TAG_RESOLVED_DIGEST="+digest,
@@ -714,7 +714,7 @@ func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testin
 	if manifest.ManifestSchemaVersion != "v1" {
 		violations = append(violations, "manifest_schema_version must be v1")
 	}
-	if manifest.ASBCPVersion != "v2.0.8" || manifest.GitTag != "v2.0.8" {
+	if manifest.ASBCPVersion != "v2.0.9" || manifest.GitTag != "v2.0.9" {
 		violations = append(violations, "asbcp_version and git_tag must use the v-prefixed release tag")
 	}
 	if manifest.CommitSHA != strings.Repeat("b", 40) {
@@ -749,10 +749,10 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 	digest := "sha256:" + strings.Repeat("a", 64)
 	baseEnv := map[string]string{
-		"ASBCP_VERSION":           "v2.0.8",
-		"ASBCP_GIT_TAG":           "v2.0.8",
-		"ASBCP_TAG_REF":           "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
-		"ASBCP_IMAGE_REF":         "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@" + digest,
+		"ASBCP_VERSION":           "v2.0.9",
+		"ASBCP_GIT_TAG":           "v2.0.9",
+		"ASBCP_TAG_REF":           "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9",
+		"ASBCP_IMAGE_REF":         "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9@" + digest,
 		"ASBCP_IMAGE_DIGEST":      digest,
 		"ANONYMOUS_PULL_RESULT":   "ok",
 		"TAG_RESOLVED_DIGEST":     digest,
@@ -770,7 +770,7 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 		{
 			name: "version must match schema pattern",
 			override: map[string]string{
-				"ASBCP_VERSION": "2.0.8",
+				"ASBCP_VERSION": "2.0.9",
 			},
 			want: "asbcp_version",
 		},
@@ -787,14 +787,14 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 				"ASBCP_IMAGE_DIGEST":  "sha256:" + strings.Repeat("g", 64),
 				"TAG_RESOLVED_DIGEST": "sha256:" + strings.Repeat("g", 64),
 				"ANONYMOUS_DIGEST":    "sha256:" + strings.Repeat("g", 64),
-				"ASBCP_IMAGE_REF":     "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@sha256:" + strings.Repeat("g", 64),
+				"ASBCP_IMAGE_REF":     "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9@sha256:" + strings.Repeat("g", 64),
 			},
 			want: "image_digest",
 		},
 		{
 			name: "image ref must include immutable digest",
 			override: map[string]string{
-				"ASBCP_IMAGE_REF": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
+				"ASBCP_IMAGE_REF": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.9",
 			},
 			want: "image_ref",
 		},
@@ -1194,15 +1194,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionMetadataPreparesV208AndKeepsPublishedSectionsImmutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV209AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.8" {
-		t.Fatalf("VERSION must be bumped to 2.0.8 for the workload DELETE storage flush release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.9" {
+		t.Fatalf("VERSION must be bumped to 2.0.9 for the JuiceFS mount cache consistency release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1211,31 +1211,34 @@ func TestReleaseVersionMetadataPreparesV208AndKeepsPublishedSectionsImmutable(t 
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	for _, token := range []string{"storage flush barrier", "terminal close"} {
+	for _, token := range []string{"JuiceFS CSI PVs", "negative entry caches"} {
 		if strings.Contains(unreleased, token) {
-			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.8", token)
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.9", token)
 		}
 	}
 
-	section208 := changelogSection(changelog, "v2.0.8")
-	if section208 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.8 release section for the workload DELETE storage flush fix")
+	section209 := changelogSection(changelog, "v2.0.9")
+	if section209 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.9 release section for the JuiceFS mount cache consistency fix")
 	}
 	var violations []string
-	required208 := []string{
-		"storage flush barrier",
-		"before releasing the AFSCP mount",
-		"deleting the pod",
-		"terminal close",
+	required209 := []string{
+		"JuiceFS CSI PVs",
+		"`attr-cache=0s`",
+		"`entry-cache=0s`",
+		"`dir-entry-cache=0s`",
+		"`negative-entry-cache=0s`",
+		"AFSCP payload `subdir`",
+		"pre-GA cross-client delete visibility correctness",
 	}
-	for _, token := range required208 {
-		if !strings.Contains(section208, token) {
-			violations = append(violations, "v2.0.8 changelog missing "+token)
+	for _, token := range required209 {
+		if !strings.Contains(section209, token) {
+			violations = append(violations, "v2.0.9 changelog missing "+token)
 		}
 	}
 	for _, token := range []string{"ASBCP-BC-"} {
-		if strings.Contains(section208, token) {
-			violations = append(violations, "v2.0.8 changelog must not introduce "+token)
+		if strings.Contains(section209, token) {
+			violations = append(violations, "v2.0.9 changelog must not introduce "+token)
 		}
 	}
 
@@ -1253,13 +1256,13 @@ func TestReleaseVersionMetadataPreparesV208AndKeepsPublishedSectionsImmutable(t 
 	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
 		t.Fatalf("parse release evidence manifest: %v", err)
 	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.8" {
-		violations = append(violations, "release manifest target_version must be v2.0.8")
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.9" {
+		violations = append(violations, "release manifest target_version must be v2.0.9")
 	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.7" {
-		violations = append(violations, "release manifest must record v2.0.7 as superseded published version")
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.8" {
+		violations = append(violations, "release manifest must record v2.0.8 as superseded published version")
 	}
-	for _, token := range []string{"storage flush barrier", "before releasing the AFSCP mount", "deleting the Pod", "terminal close"} {
+	for _, token := range []string{"JuiceFS CSI PVs", "attr-cache=0s", "entry-cache=0s", "dir-entry-cache=0s", "negative-entry-cache=0s", "AFSCP payload subdir", "pre-GA cross-client delete visibility correctness"} {
 		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary missing "+token)
 		}
@@ -1267,6 +1270,27 @@ func TestReleaseVersionMetadataPreparesV208AndKeepsPublishedSectionsImmutable(t 
 	for _, token := range []string{"ASBCP-BC-"} {
 		if strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary must not introduce "+token)
+		}
+	}
+
+	section208 := changelogSection(changelog, "v2.0.8")
+	if section208 == "" {
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.8 section")
+	}
+	required208 := []string{
+		"storage flush barrier",
+		"before releasing the AFSCP mount",
+		"deleting the pod",
+		"terminal close",
+	}
+	for _, token := range required208 {
+		if !strings.Contains(section208, token) {
+			violations = append(violations, "v2.0.8 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"JuiceFS CSI PVs", "negative entry caches"} {
+		if strings.Contains(section208, token) {
+			violations = append(violations, "published v2.0.8 section was retconned with "+token)
 		}
 	}
 

@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.8",
+    "target_version": "v2.0.9",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.7",
-    "summary": "Workload DELETE establishes the storage flush barrier before releasing the AFSCP mount or deleting the Pod, keeping data written before terminal close visible after delete."
+    "supersedes_published_version": "v2.0.8",
+    "summary": "Workspace binding JuiceFS CSI PVs add attr-cache=0s, entry-cache=0s, dir-entry-cache=0s, and negative-entry-cache=0s mount options while preserving the AFSCP payload subdir, prioritizing pre-GA cross-client delete visibility correctness."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",
