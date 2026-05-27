@@ -418,7 +418,17 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 		hasFact = true
 	}
 
+	storageFlushed := false
 	if !fact.ReleaseDone {
+		if !podMissing && pod != nil {
+			if err := h.flushWorkloadStorage(ctx, pod); err != nil {
+				log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
+				jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
+				return
+			}
+			storageFlushed = true
+		}
+
 		if err := h.releaseWorkloadMountFromFact(ctx, r, fact); err != nil {
 			logWorkloadFactDependencyFailure(r, "AFSCP workload mount release failed", err, workspaceID, projectID, workloadID, fact)
 			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
@@ -441,10 +451,12 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 				return
 			}
 		} else {
-			if err := h.flushWorkloadStorage(ctx, pod); err != nil {
-				log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
-				jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
-				return
+			if !storageFlushed {
+				if err := h.flushWorkloadStorage(ctx, pod); err != nil {
+					log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
+					jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
+					return
+				}
 			}
 
 			if err := retryutil.Retry(ctx, k8sRetryConfig, func() error {

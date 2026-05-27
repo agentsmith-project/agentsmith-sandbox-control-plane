@@ -8,6 +8,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 No unreleased changes.
 
+## [v2.0.8] - 2026-05-27
+
+### Changed
+
+- Workload DELETE now establishes the storage flush barrier before releasing the AFSCP mount or deleting the pod, keeping data written before terminal close visible after delete.
+
 ## [v2.0.7] - 2026-05-20
 
 ### Breaking Changes

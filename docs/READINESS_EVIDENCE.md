@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current release-prep target: `v2.0.7`. The already-published `v2.0.6` image remains the BC0001 durable terminal truth release; BC0002 scoped workload identity behavior is prepared for `v2.0.7` and must not be treated as published `v2.0.6` behavior.
+Current release-prep target: `v2.0.8`. This release candidate records the workload DELETE storage flush barrier before AFSCP release and pod deletion, so data written before terminal close remains visible after delete.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |

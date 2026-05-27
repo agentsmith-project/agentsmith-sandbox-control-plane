@@ -1028,7 +1028,7 @@ run_release_fixture_smoke() {
   run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/observability -run 'TestHealthChecker_HandleHealthz_Returns200|TestHealthChecker_HandleReadyz_AllChecksPassing_Returns200'"
   run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/k8s -run 'TestBuildExecURL'"
   run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/workspacebinding -run 'TestEnsureAndGetBindingUsesAFSCPPlan|TestDeleteBinding'"
-  run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/workload -run 'TestBuildPod_UsesAFSCPPlanPaths|TestHandleDeletePodReleasesAFSCPMountAndMarksReleased|TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod|TestHandleKeepaliveHeartbeatsAFSCPMount|TestHandleExec_PodExistsReturnsError_Returns500|TestHandleExec_PodExistsButExecFails'"
+  run bash -c "cd '${ROOT}/manager-service' && go test -count=1 ./internal/workload -run 'TestBuildPod_UsesAFSCPPlanPaths|TestHandleDeletePod_WithNoCustomFlushBarrierReleasesDeletesAndMarksReleased|TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod|TestHandleKeepaliveHeartbeatsAFSCPMount|TestHandleExec_PodExistsReturnsError_Returns500|TestHandleExec_PodExistsButExecFails'"
   run bash -c "cd '${ROOT}/manager-service' && go test -tags=integration -count=1 ./integration -run 'TestHTTPStack_HealthAndV1WithAuth|TestHTTPStack_Exec_InvalidBody_Returns400|TestIntegration_FullLifecycle_CreateGetKeepaliveDeleteGet|TestIntegration_FullLifecycle_GetKeepaliveDeleteGet'"
 }
 

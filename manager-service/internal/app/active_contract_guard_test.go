@@ -656,10 +656,10 @@ func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testin
 	)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
-		"ASBCP_VERSION=v2.0.7",
-		"ASBCP_GIT_TAG=v2.0.7",
-		"ASBCP_TAG_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7",
-		"ASBCP_IMAGE_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7@"+digest,
+		"ASBCP_VERSION=v2.0.8",
+		"ASBCP_GIT_TAG=v2.0.8",
+		"ASBCP_TAG_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
+		"ASBCP_IMAGE_REF=ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@"+digest,
 		"ASBCP_IMAGE_DIGEST="+digest,
 		"ANONYMOUS_PULL_RESULT=ok",
 		"TAG_RESOLVED_DIGEST="+digest,
@@ -714,7 +714,7 @@ func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testin
 	if manifest.ManifestSchemaVersion != "v1" {
 		violations = append(violations, "manifest_schema_version must be v1")
 	}
-	if manifest.ASBCPVersion != "v2.0.7" || manifest.GitTag != "v2.0.7" {
+	if manifest.ASBCPVersion != "v2.0.8" || manifest.GitTag != "v2.0.8" {
 		violations = append(violations, "asbcp_version and git_tag must use the v-prefixed release tag")
 	}
 	if manifest.CommitSHA != strings.Repeat("b", 40) {
@@ -725,9 +725,6 @@ func TestFinalManifestFixtureConformsToSchemaAndContainsAdoptionFields(t *testin
 	}
 	if manifest.APIContractVersion != "v1" {
 		violations = append(violations, "api_contract_version must come from docs/contracts/api-contract.md")
-	}
-	if len(manifest.KnownBreakingChanges) == 0 {
-		violations = append(violations, "known_breaking_changes must be structured non-empty objects")
 	}
 	for index, change := range manifest.KnownBreakingChanges {
 		if change.ID == "" || change.Summary == "" {
@@ -752,10 +749,10 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 	digest := "sha256:" + strings.Repeat("a", 64)
 	baseEnv := map[string]string{
-		"ASBCP_VERSION":           "v2.0.7",
-		"ASBCP_GIT_TAG":           "v2.0.7",
-		"ASBCP_TAG_REF":           "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7",
-		"ASBCP_IMAGE_REF":         "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7@" + digest,
+		"ASBCP_VERSION":           "v2.0.8",
+		"ASBCP_GIT_TAG":           "v2.0.8",
+		"ASBCP_TAG_REF":           "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
+		"ASBCP_IMAGE_REF":         "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@" + digest,
 		"ASBCP_IMAGE_DIGEST":      digest,
 		"ANONYMOUS_PULL_RESULT":   "ok",
 		"TAG_RESOLVED_DIGEST":     digest,
@@ -773,7 +770,7 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 		{
 			name: "version must match schema pattern",
 			override: map[string]string{
-				"ASBCP_VERSION": "2.0.7",
+				"ASBCP_VERSION": "2.0.8",
 			},
 			want: "asbcp_version",
 		},
@@ -790,14 +787,14 @@ func TestFinalManifestGeneratorRejectsSchemaCriticalMismatches(t *testing.T) {
 				"ASBCP_IMAGE_DIGEST":  "sha256:" + strings.Repeat("g", 64),
 				"TAG_RESOLVED_DIGEST": "sha256:" + strings.Repeat("g", 64),
 				"ANONYMOUS_DIGEST":    "sha256:" + strings.Repeat("g", 64),
-				"ASBCP_IMAGE_REF":     "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7@sha256:" + strings.Repeat("g", 64),
+				"ASBCP_IMAGE_REF":     "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8@sha256:" + strings.Repeat("g", 64),
 			},
 			want: "image_digest",
 		},
 		{
 			name: "image ref must include immutable digest",
 			override: map[string]string{
-				"ASBCP_IMAGE_REF": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.7",
+				"ASBCP_IMAGE_REF": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane:v2.0.8",
 			},
 			want: "image_ref",
 		},
@@ -958,9 +955,6 @@ func TestBreakingChangesUseStableIds(t *testing.T) {
 			violations = append(violations, "duplicate breaking change id "+change.ID)
 		}
 		seen[change.ID] = true
-	}
-	if len(payload.KnownBreakingChanges) == 0 {
-		violations = append(violations, "known_breaking_changes must not be empty for current release")
 	}
 	if len(violations) > 0 {
 		t.Fatalf("breaking changes must use stable id + summary objects:\n%s", strings.Join(violations, "\n"))
@@ -1200,15 +1194,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionBumpKeepsPublishedV206Immutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV208AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.7" {
-		t.Fatalf("VERSION must be bumped to 2.0.7 for the BC0002 scoped identity release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.8" {
+		t.Fatalf("VERSION must be bumped to 2.0.8 for the workload DELETE storage flush release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1217,12 +1211,68 @@ func TestReleaseVersionBumpKeepsPublishedV206Immutable(t *testing.T) {
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	if strings.Contains(unreleased, "ASBCP-BC-0002") {
-		t.Fatalf("CHANGELOG.md must move ASBCP-BC-0002 out of Unreleased into v2.0.7")
+	for _, token := range []string{"storage flush barrier", "terminal close"} {
+		if strings.Contains(unreleased, token) {
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.8", token)
+		}
 	}
+
+	section208 := changelogSection(changelog, "v2.0.8")
+	if section208 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.8 release section for the workload DELETE storage flush fix")
+	}
+	var violations []string
+	required208 := []string{
+		"storage flush barrier",
+		"before releasing the AFSCP mount",
+		"deleting the pod",
+		"terminal close",
+	}
+	for _, token := range required208 {
+		if !strings.Contains(section208, token) {
+			violations = append(violations, "v2.0.8 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-"} {
+		if strings.Contains(section208, token) {
+			violations = append(violations, "v2.0.8 changelog must not introduce "+token)
+		}
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "release-evidence", "release-manifest.json"))
+	if err != nil {
+		t.Fatalf("read release evidence manifest: %v", err)
+	}
+	var releaseManifest struct {
+		ReleasePreparation struct {
+			TargetVersion              string `json:"target_version"`
+			SupersedesPublishedVersion string `json:"supersedes_published_version"`
+			Summary                    string `json:"summary"`
+		} `json:"release_preparation"`
+	}
+	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
+		t.Fatalf("parse release evidence manifest: %v", err)
+	}
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.8" {
+		violations = append(violations, "release manifest target_version must be v2.0.8")
+	}
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.7" {
+		violations = append(violations, "release manifest must record v2.0.7 as superseded published version")
+	}
+	for _, token := range []string{"storage flush barrier", "before releasing the AFSCP mount", "deleting the Pod", "terminal close"} {
+		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
+			violations = append(violations, "release manifest summary missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-"} {
+		if strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
+			violations = append(violations, "release manifest summary must not introduce "+token)
+		}
+	}
+
 	section207 := changelogSection(changelog, "v2.0.7")
 	if section207 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.7 release section for BC0002")
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.7 section")
 	}
 	required207 := []string{
 		"ASBCP-BC-0002",
@@ -1233,39 +1283,14 @@ func TestReleaseVersionBumpKeepsPublishedV206Immutable(t *testing.T) {
 		"flat `cpu_*`",
 		"already-published `v2.0.6`",
 	}
-	var violations []string
 	for _, token := range required207 {
 		if !strings.Contains(section207, token) {
 			violations = append(violations, "v2.0.7 changelog missing "+token)
 		}
 	}
-	manifestBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "release-evidence", "release-manifest.json"))
-	if err != nil {
-		t.Fatalf("read release evidence manifest: %v", err)
-	}
-	var releaseManifest struct {
-		ReleasePreparation struct {
-			TargetVersion              string `json:"target_version"`
-			SupersedesPublishedVersion string `json:"supersedes_published_version"`
-			BreakingChangeID           string `json:"breaking_change_id"`
-			Summary                    string `json:"summary"`
-		} `json:"release_preparation"`
-	}
-	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
-		t.Fatalf("parse release evidence manifest: %v", err)
-	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.7" {
-		violations = append(violations, "release manifest target_version must be v2.0.7")
-	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.6" {
-		violations = append(violations, "release manifest must record v2.0.6 as already-published superseded identity")
-	}
-	if releaseManifest.ReleasePreparation.BreakingChangeID != "ASBCP-BC-0002" {
-		violations = append(violations, "release manifest breaking_change_id must be ASBCP-BC-0002")
-	}
-	for _, token := range []string{"BC0002", "v2.0.7", "not to the already-published v2.0.6"} {
-		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
-			violations = append(violations, "release manifest summary missing "+token)
+	for _, token := range []string{"storage flush barrier", "terminal close"} {
+		if strings.Contains(section207, token) {
+			violations = append(violations, "published v2.0.7 section was retconned with "+token)
 		}
 	}
 

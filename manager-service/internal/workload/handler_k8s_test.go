@@ -1256,7 +1256,7 @@ func TestHandleDeletePod_ExistingPod_Returns200(t *testing.T) {
 	assert.Equal(t, "pod deleted", got.Message)
 }
 
-func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
+func TestHandleDeletePod_WithNoCustomFlushBarrierReleasesDeletesAndMarksReleased(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
 	reg := newPodRegistry(defaultScopedPod("wl-1"))
@@ -1278,7 +1278,9 @@ func TestHandleDeletePodReleasesAFSCPMountAndMarksReleased(t *testing.T) {
 	assert.Equal(t, "released", lifecycle.statusValue)
 	assert.Equal(t, "workload pod deleted", lifecycle.statusReason)
 	assert.Equal(t, "corr-delete", lifecycle.statusCorrelationID)
-	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+	gotEvents := events.snapshot()
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, gotEvents)
+	assert.NotContains(t, gotEvents, "flush-"+defaultScopedPodName("wl-1")+":/home/task-plan", "this fixture uses the no-op storage flush barrier injected by the test helper")
 }
 
 func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
@@ -1298,7 +1300,139 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, podName, flush.podName)
 	assert.Equal(t, "/home/task-plan", flush.mountPath)
-	assert.Equal(t, []string{"release", "flush-" + podName + ":/home/task-plan", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+}
+
+func TestHandleDeletePod_ReleaseDoneFactFlushesBeforeDeletingPod(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	podName := defaultScopedPodName("wl-1")
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-1",
+		ProjectID:          "proj-1",
+		WorkloadID:         "wl-1",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            podName,
+		PodUID:             "uid-1",
+		ReleaseDone:        true,
+		PodDeleted:         false,
+		TerminalStatusDone: false,
+		WorkspaceBindingID: "wmb_demo",
+	}))
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		AFSCPClient:         lifecycle,
+		StorageFlushBarrier: flush,
+		WorkloadFactStore:   facts,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, podName, flush.podName)
+	assert.Equal(t, "/home/task-plan", flush.mountPath)
+	assert.Empty(t, lifecycle.releaseMountBindingID, "retry with durable ReleaseDone must not re-release AFSCP mount")
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+	got, err := facts.Get(context.Background(), workloadfacts.Key{WorkspaceID: "ws-1", ProjectID: "proj-1", WorkloadID: "wl-1"})
+	require.NoError(t, err)
+	assert.True(t, got.Terminal())
+}
+
+func TestHandleDeletePod_ReleaseDoneFactFlushFailureKeepsPodForRetry(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	podName := defaultScopedPodName("wl-1")
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-1",
+		ProjectID:          "proj-1",
+		WorkloadID:         "wl-1",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            podName,
+		PodUID:             "uid-1",
+		ReleaseDone:        true,
+		PodDeleted:         false,
+		TerminalStatusDone: false,
+		WorkspaceBindingID: "wmb_demo",
+	}))
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events, err: errors.New("sync failed")}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		AFSCPClient:         lifecycle,
+		StorageFlushBarrier: flush,
+		WorkloadFactStore:   facts,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "storage flush barrier failed")
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan"}, events.snapshot())
+	assert.Empty(t, lifecycle.releaseMountBindingID, "retry with durable ReleaseDone must not re-release AFSCP mount")
+	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when storage flush fails")
+
+	reg.mu.Lock()
+	assert.NotNil(t, reg.pods[podName], "failed storage flush must leave pod available for retry")
+	reg.mu.Unlock()
+
+	got, err := facts.Get(context.Background(), workloadfacts.Key{WorkspaceID: "ws-1", ProjectID: "proj-1", WorkloadID: "wl-1"})
+	require.NoError(t, err)
+	assert.True(t, got.ReleaseDone)
+	assert.False(t, got.PodDeleted)
+	assert.False(t, got.TerminalStatusDone)
+}
+
+func TestHandleDeletePod_MissingPodWithDurableFactReleasesWithoutFlush(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	podName := defaultScopedPodName("wl-1")
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-1",
+		ProjectID:          "proj-1",
+		WorkloadID:         "wl-1",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            podName,
+		PodUID:             "uid-1",
+		ReleaseDone:        false,
+		PodDeleted:         false,
+		TerminalStatusDone: false,
+		WorkspaceBindingID: "wmb_demo",
+	}))
+	reg := newPodRegistry()
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{
+		AFSCPClient:         lifecycle,
+		StorageFlushBarrier: flush,
+		WorkloadFactStore:   facts,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, flush.podName, "missing pod cannot be flushed")
+	assert.Equal(t, "wmb_demo", lifecycle.releaseMountBindingID)
+	assert.Equal(t, []string{"confirm-pod-gone", "release", "status-released"}, events.snapshot())
+	got, err := facts.Get(context.Background(), workloadfacts.Key{WorkspaceID: "ws-1", ProjectID: "proj-1", WorkloadID: "wl-1"})
+	require.NoError(t, err)
+	assert.True(t, got.Terminal())
 }
 
 func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
@@ -1317,7 +1451,8 @@ func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "storage flush barrier failed")
-	assert.Equal(t, []string{"release", "flush-" + podName + ":/home/task-plan"}, events.snapshot())
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan"}, events.snapshot())
+	assert.Empty(t, lifecycle.releaseMountBindingID, "AFSCP release must not run when storage flush fails")
 	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when storage flush fails")
 
 	reg.mu.Lock()
@@ -1326,10 +1461,13 @@ func TestHandleDeletePod_FlushFailureKeepsPodForRetry(t *testing.T) {
 }
 
 func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
+	events := &eventRecorder{}
 	podName := defaultScopedPodName("wl-1")
 	reg := newPodRegistry(defaultScopedPod("wl-1"))
-	lifecycle := &fakeMountLifecycleClient{releaseErr: errors.New("release failed token=raw-secret password=p@ss")}
-	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{events: events, releaseErr: errors.New("release failed token=raw-secret password=p@ss")}
+	flush := &fakeStorageFlushBarrier{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
 
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
 	req.Header.Set("X-Correlation-Id", "corr-delete")
@@ -1341,6 +1479,8 @@ func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "release failed")
 	assert.NotContains(t, rec.Body.String(), "raw-secret")
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "release"}, events.snapshot())
+	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written when AFSCP release fails")
 
 	logOutput := logs.String()
 	for _, token := range []string{"AFSCP workload mount release failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "pod=" + podName, "mount_binding_id=wmb_demo", "request_id=req-delete", "correlation_id=corr-delete", "[REDACTED]"} {
