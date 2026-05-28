@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: asbcp
-        image: agentsmith-sandbox-control-plane:2.0.9
+        image: agentsmith-sandbox-control-plane:2.0.10
         imagePullPolicy: IfNotPresent
         ports:
         - name: http

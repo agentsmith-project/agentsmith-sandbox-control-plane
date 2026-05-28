@@ -75,6 +75,9 @@ func TestPodStatus_JSON_Roundtrip(t *testing.T) {
 		PodName:   "workload-xyz",
 		Phase:     "Running",
 		IP:        "10.0.0.1",
+		Image:     "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageRef:  "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageID:   "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123",
 		StartedAt: "2026-03-01T00:00:00Z",
 		ExpiresAt: "2026-03-01T01:00:00Z",
 	}

@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.9",
+    "target_version": "v2.0.10",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.8",
-    "summary": "Workspace binding JuiceFS CSI PVs add attr-cache=0s, entry-cache=0s, dir-entry-cache=0s, and negative-entry-cache=0s mount options while preserving the AFSCP payload subdir, prioritizing pre-GA cross-client delete visibility correctness."
+    "supersedes_published_version": "v2.0.9",
+    "summary": "Workload status responses expose the main container desired image reference as image/image_ref and live Kubernetes imageID as image_id for AgentSmith managed runner image identity checks."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

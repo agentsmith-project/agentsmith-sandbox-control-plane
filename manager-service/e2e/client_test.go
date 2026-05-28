@@ -143,6 +143,9 @@ type PodStatus struct {
 	PodName        string `json:"pod_name"`
 	Phase          string `json:"phase"`
 	IP             string `json:"ip"`
+	Image          string `json:"image"`
+	ImageRef       string `json:"image_ref"`
+	ImageID        string `json:"image_id"`
 	StartedAt      string `json:"started_at"`
 	LastActivityAt string `json:"last_activity_at"`
 	ExpiresAt      string `json:"expires_at"`

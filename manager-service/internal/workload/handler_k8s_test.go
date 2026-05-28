@@ -939,10 +939,13 @@ func TestCreateResponseContainsWorkloadIDCorrelationIDStatus(t *testing.T) {
 func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 	existing := workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1")
 	existing.CreationTimestamp = metav1.Now()
+	expectedImage := "ubuntu:22.04"
+	expectedImageID := "docker-pullable://example.invalid/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	existing.Spec = v1.PodSpec{
 		Containers: []v1.Container{
 			{
 				Name:       "main",
+				Image:      expectedImage,
 				WorkingDir: "/home/task-plan/workspace",
 				Env: []v1.EnvVar{
 					{Name: "TASK_HOME", Value: "/home/task-plan"},
@@ -966,10 +969,20 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 			},
 		},
 	}
-	existing.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "10.0.0.5"}
+	existing.Status = v1.PodStatus{
+		Phase: v1.PodRunning,
+		PodIP: "10.0.0.5",
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name:    "main",
+				Image:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ImageID: expectedImageID,
+			},
+		},
+	}
 	h := newHandlerWithRegistry(t, newPodRegistry(existing))
 
-	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: expectedImage}))
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
@@ -980,6 +993,9 @@ func TestHandleCreatePod_AlreadyExists_Returns200(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
 	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
+	assert.Equal(t, expectedImage, got.Image)
+	assert.Equal(t, expectedImage, got.ImageRef)
+	assert.Equal(t, expectedImageID, got.ImageID)
 	assert.Equal(t, "pod already exists", got.Message)
 }
 
@@ -1158,9 +1174,22 @@ func TestHandleGetPod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 
 func TestHandleGetPod_RunningPod(t *testing.T) {
 	createdAt := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	expectedImage := "kind-registry:5000/mbos/agentsmith-managed-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	expectedImageID := "docker-pullable://kind-registry:5000/mbos/agentsmith-managed-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	pod := workloadPodWithScope(defaultScopedPodName("wl-1"), "ws-1", "proj-1", "wl-1")
 	pod.CreationTimestamp = metav1.NewTime(createdAt)
-	pod.Status = v1.PodStatus{Phase: v1.PodRunning, PodIP: "192.168.1.10"}
+	pod.Spec.Containers = []v1.Container{{Name: "main", Image: expectedImage}}
+	pod.Status = v1.PodStatus{
+		Phase: v1.PodRunning,
+		PodIP: "192.168.1.10",
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name:    "main",
+				Image:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ImageID: expectedImageID,
+			},
+		},
+	}
 	h := newHandlerWithRegistry(t, newPodRegistry(pod))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1174,6 +1203,9 @@ func TestHandleGetPod_RunningPod(t *testing.T) {
 	assert.Equal(t, defaultScopedPodName("wl-1"), got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "192.168.1.10", got.IP)
+	assert.Equal(t, expectedImage, got.Image)
+	assert.Equal(t, expectedImage, got.ImageRef)
+	assert.Equal(t, expectedImageID, got.ImageID)
 
 	// The handler formats CreationTimestamp with RFC3339, which preserves the local timezone
 	// of the deserialized time.Time. Compare by parsing to avoid timezone representation drift.
@@ -1182,6 +1214,34 @@ func TestHandleGetPod_RunningPod(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, gotTime.Equal(createdAt),
 		"started_at %q should represent %v", got.StartedAt, createdAt)
+}
+
+func TestHandleGetPod_DoesNotPromoteBareContainerStatusImageToImageID(t *testing.T) {
+	expectedImage := "kind-registry:5000/mbos/agentsmith-managed-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pod := workloadPodWithScope(defaultScopedPodName("wl-image"), "ws-1", "proj-1", "wl-image")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Spec.Containers = []v1.Container{{Name: "main", Image: expectedImage}}
+	pod.Status = v1.PodStatus{
+		Phase: v1.PodRunning,
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name:  "main",
+				Image: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+		},
+	}
+	h := newHandlerWithRegistry(t, newPodRegistry(pod))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-image")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var got PodStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, expectedImage, got.Image)
+	assert.Equal(t, expectedImage, got.ImageRef)
+	assert.Empty(t, got.ImageID)
 }
 
 func TestHandleGetPod_PendingPod(t *testing.T) {

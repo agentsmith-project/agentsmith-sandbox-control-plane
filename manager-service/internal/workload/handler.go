@@ -305,6 +305,9 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 					Status:        workloadStatusForPod(existingPod),
 					Phase:         podPhaseString(existingPod),
 					IP:            existingPod.Status.PodIP,
+					Image:         mainContainerImage(existingPod),
+					ImageRef:      mainContainerImage(existingPod),
+					ImageID:       mainContainerImageID(existingPod),
 					StartedAt:     existingPod.CreationTimestamp.Format(time.RFC3339),
 					CorrelationID: requestCorrelationID(r),
 					Message:       "pod already exists",
@@ -334,6 +337,9 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		PodName:       createdPod.Name,
 		Status:        workloadStatusForPod(createdPod),
 		Phase:         podPhaseString(createdPod),
+		Image:         mainContainerImage(createdPod),
+		ImageRef:      mainContainerImage(createdPod),
+		ImageID:       mainContainerImageID(createdPod),
 		StartedAt:     createdPod.CreationTimestamp.Format(time.RFC3339),
 		ExpiresAt:     expiresAt.Format(time.RFC3339),
 		CorrelationID: requestCorrelationID(r),
@@ -530,6 +536,9 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workspace
 		Status:    workloadStatusForPod(pod),
 		Phase:     podPhaseString(pod),
 		IP:        pod.Status.PodIP,
+		Image:     mainContainerImage(pod),
+		ImageRef:  mainContainerImage(pod),
+		ImageID:   mainContainerImageID(pod),
 		StartedAt: pod.CreationTimestamp.Format(time.RFC3339),
 	}
 	if v, ok := pod.Annotations["last_activity_at"]; ok {
@@ -1204,6 +1213,29 @@ func findContainer(containers []v1.Container, name string) (v1.Container, bool) 
 		}
 	}
 	return v1.Container{}, false
+}
+
+func mainContainerImage(pod *v1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	container, ok := findContainer(pod.Spec.Containers, "main")
+	if !ok {
+		return ""
+	}
+	return container.Image
+}
+
+func mainContainerImageID(pod *v1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "main" {
+			return status.ImageID
+		}
+	}
+	return ""
 }
 
 func findVolumeMount(mounts []v1.VolumeMount, name string) (v1.VolumeMount, bool) {

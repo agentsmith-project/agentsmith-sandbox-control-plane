@@ -52,6 +52,8 @@ Workload create request fields:
 
 ASBCP does not choose the runner image and does not own AgentSmith task policy.
 
+Workload status responses may include image identity fields. `image` and `image_ref` come from the main workload container spec image and describe the desired image reference. `image_id` comes only from Kubernetes status for the main workload container `ImageID` when available, and ASBCP must not synthesize it from `containerStatuses[].image` or the spec image.
+
 Kubernetes object identity is scope-qualified. Workload Pod lookup and mutation are keyed by `{workspace_id, project_id, workload_id}` and must verify Pod annotations and labels match that URL scope before status, keepalive, exec, release, or delete behavior proceeds. Workspace binding PV/PVC and workload fact object names are also generated from structured identity parts with a bounded DNS-label slug plus hash suffix, not by ambiguous hyphen concatenation.
 
 ## Compatibility

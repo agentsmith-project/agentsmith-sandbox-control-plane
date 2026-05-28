@@ -8,6 +8,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 No unreleased changes.
 
+## [v2.0.10] - 2026-05-28
+
+### Changed
+
+- Workload status responses now expose the main container desired image reference (`image`/`image_ref`) and live Kubernetes imageID (`image_id`) for AgentSmith managed runner image identity checks.
+
 ## [v2.0.9] - 2026-05-27
 
 ### Changed

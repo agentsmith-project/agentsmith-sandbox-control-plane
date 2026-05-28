@@ -87,6 +87,7 @@ Expected behavior:
 ### GET
 
 Returns workload Pod status, or an offline/missing status when absent.
+Status may include `image` and `image_ref` from the main container spec image. `image_id` is returned only when Kubernetes status exposes the main container `ImageID`; ASBCP does not derive it from `containerStatuses[].image` or spec image.
 
 ### POST `/keepalive`
 

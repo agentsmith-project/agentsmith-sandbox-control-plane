@@ -361,6 +361,9 @@ func TestJsonResponse_PodStatusFields(t *testing.T) {
 		PodName:        "my-pod",
 		Phase:          "Running",
 		IP:             "10.0.0.1",
+		Image:          "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageRef:       "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageID:        "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123",
 		StartedAt:      "2025-01-01T00:00:00Z",
 		LastActivityAt: "2025-01-01T01:00:00Z",
 		ExpiresAt:      "2025-01-02T00:00:00Z",
@@ -372,6 +375,9 @@ func TestJsonResponse_PodStatusFields(t *testing.T) {
 	assert.Equal(t, "my-pod", got.PodName)
 	assert.Equal(t, "Running", got.Phase)
 	assert.Equal(t, "10.0.0.1", got.IP)
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", got.Image)
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", got.ImageRef)
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123", got.ImageID)
 	assert.Equal(t, "2025-01-01T00:00:00Z", got.StartedAt)
 	assert.Equal(t, "2025-01-01T01:00:00Z", got.LastActivityAt)
 	assert.Equal(t, "2025-01-02T00:00:00Z", got.ExpiresAt)
@@ -389,6 +395,12 @@ func TestJsonResponse_OmitsEmptyFields(t *testing.T) {
 	assert.False(t, hasPodName, "empty pod_name should be omitted")
 	_, hasIP := raw["ip"]
 	assert.False(t, hasIP, "empty ip should be omitted")
+	_, hasImage := raw["image"]
+	assert.False(t, hasImage, "empty image should be omitted")
+	_, hasImageRef := raw["image_ref"]
+	assert.False(t, hasImageRef, "empty image_ref should be omitted")
+	_, hasImageID := raw["image_id"]
+	assert.False(t, hasImageID, "empty image_id should be omitted")
 }
 
 func TestJsonError(t *testing.T) {
@@ -1498,6 +1510,9 @@ func TestPodStatus_JSONFieldNames(t *testing.T) {
 		PodName:        "workload-abc",
 		Phase:          "Running",
 		IP:             "10.0.0.1",
+		Image:          "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageRef:       "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageID:        "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123",
 		StartedAt:      "2025-01-01T00:00:00Z",
 		LastActivityAt: "2025-01-01T01:00:00Z",
 		ExpiresAt:      "2025-01-02T00:00:00Z",
@@ -1512,6 +1527,9 @@ func TestPodStatus_JSONFieldNames(t *testing.T) {
 	assert.Equal(t, "workload-abc", raw["pod_name"])
 	assert.Equal(t, "Running", raw["phase"])
 	assert.Equal(t, "10.0.0.1", raw["ip"])
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", raw["image"])
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", raw["image_ref"])
+	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123", raw["image_id"])
 	assert.Equal(t, "2025-01-01T00:00:00Z", raw["started_at"])
 	assert.Equal(t, "2025-01-01T01:00:00Z", raw["last_activity_at"])
 	assert.Equal(t, "2025-01-02T00:00:00Z", raw["expires_at"])
@@ -1613,7 +1631,7 @@ func TestPodStatus_OmitsZeroValues(t *testing.T) {
 	require.NoError(t, json.Unmarshal(b, &raw))
 
 	assert.Equal(t, "offline", raw["phase"])
-	for _, key := range []string{"pod_name", "ip", "started_at", "last_activity_at", "expires_at", "message"} {
+	for _, key := range []string{"pod_name", "ip", "image", "image_ref", "image_id", "started_at", "last_activity_at", "expires_at", "message"} {
 		_, ok := raw[key]
 		assert.False(t, ok, "zero-value field %q must be omitted from JSON", key)
 	}
