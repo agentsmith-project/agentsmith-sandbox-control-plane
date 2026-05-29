@@ -8,6 +8,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 No unreleased changes.
 
+## [v2.0.11] - 2026-05-29
+
+### Fixed
+
+- Workspace init containers now run as `root:1000` only for task directory preparation while managed workload containers remain non-root `1000:1000`, fixing root-owned CSI/JuiceFS payload mounts where non-root init could not prepare writable task HOME, workspace, and workspace `.artifacts` directories.
+
 ## [v2.0.10] - 2026-05-28
 
 ### Changed

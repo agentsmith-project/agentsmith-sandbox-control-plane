@@ -940,9 +940,11 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	require.Len(t, init.Command, 3)
 	assert.Equal(t, "sh", init.Command[0])
 	assert.Equal(t, "-ceu", init.Command[1])
-	assert.Contains(t, init.Command[2], "mkdir -p")
+	assert.Contains(t, init.Command[2], `mkdir -p "$TASK_HOME" "$WORKSPACE_PATH" "$ARTIFACTS_PATH"`)
 	assert.Contains(t, init.Command[2], "$WORKSPACE_PATH")
 	assert.Contains(t, init.Command[2], "$ARTIFACTS_PATH")
+	assert.Contains(t, init.Command[2], `chgrp 1000 "$dir"`)
+	assert.Contains(t, init.Command[2], `chmod g+rwx "$dir"`)
 	assert.Contains(t, init.Command[2], "test -w")
 
 	envMap := envVarMap(init.Env)
@@ -959,9 +961,9 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 
 	require.NotNil(t, init.SecurityContext)
 	require.NotNil(t, init.SecurityContext.RunAsNonRoot)
-	assert.True(t, *init.SecurityContext.RunAsNonRoot)
+	assert.False(t, *init.SecurityContext.RunAsNonRoot)
 	require.NotNil(t, init.SecurityContext.RunAsUser)
-	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsUser)
+	assert.Equal(t, int64(0), *init.SecurityContext.RunAsUser)
 	require.NotNil(t, init.SecurityContext.RunAsGroup)
 	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsGroup)
 	require.NotNil(t, init.SecurityContext.AllowPrivilegeEscalation)
@@ -970,6 +972,31 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	assert.Contains(t, init.SecurityContext.Capabilities.Drop, v1.Capability("ALL"))
 	require.NotNil(t, init.SecurityContext.SeccompProfile)
 	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, init.SecurityContext.SeccompProfile.Type)
+
+	require.Len(t, pod.Spec.Containers, 1)
+	main := pod.Spec.Containers[0]
+	assert.Equal(t, "main", main.Name)
+	require.NotNil(t, pod.Spec.SecurityContext)
+
+	mainRunAsNonRoot := pod.Spec.SecurityContext.RunAsNonRoot
+	mainRunAsUser := pod.Spec.SecurityContext.RunAsUser
+	mainRunAsGroup := pod.Spec.SecurityContext.RunAsGroup
+	require.NotNil(t, main.SecurityContext)
+	if main.SecurityContext.RunAsNonRoot != nil {
+		mainRunAsNonRoot = main.SecurityContext.RunAsNonRoot
+	}
+	if main.SecurityContext.RunAsUser != nil {
+		mainRunAsUser = main.SecurityContext.RunAsUser
+	}
+	if main.SecurityContext.RunAsGroup != nil {
+		mainRunAsGroup = main.SecurityContext.RunAsGroup
+	}
+	require.NotNil(t, mainRunAsNonRoot)
+	assert.True(t, *mainRunAsNonRoot)
+	require.NotNil(t, mainRunAsUser)
+	assert.Equal(t, int64(1000), *mainRunAsUser)
+	require.NotNil(t, mainRunAsGroup)
+	assert.Equal(t, int64(1000), *mainRunAsGroup)
 }
 
 func TestBuildPod_ReadOnlyAFSCPPlanDoesNotPrepareWritableDirs(t *testing.T) {
