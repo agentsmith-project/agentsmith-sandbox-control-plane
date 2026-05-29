@@ -846,8 +846,8 @@ func (h *Handler) buildPod(
 }
 
 func buildWorkspaceInitContainer(image string, paths workloadPaths) v1.Container {
-	nonRoot := false
-	var runAsUser int64 = 0
+	nonRoot := true
+	var runAsUser int64 = workloadRunAsUID
 	var runAsGroup int64 = workloadRunAsUID
 
 	return v1.Container{
@@ -857,13 +857,11 @@ func buildWorkspaceInitContainer(image string, paths workloadPaths) v1.Container
 		Command: []string{
 			"sh",
 			"-ceu",
-			fmt.Sprintf(`umask 0007
+			`umask 0007
 mkdir -p "$TASK_HOME" "$WORKSPACE_PATH" "$ARTIFACTS_PATH"
 for dir in "$TASK_HOME" "$WORKSPACE_PATH" "$ARTIFACTS_PATH"; do
-  chgrp %d "$dir"
-  chmod g+rwx "$dir"
   test -w "$dir"
-done`, workloadRunAsUID),
+done`,
 		},
 		Env: []v1.EnvVar{
 			{Name: "ARTIFACTS_PATH", Value: path.Join(paths.workingDir, workspaceArtifactsDirectory)},

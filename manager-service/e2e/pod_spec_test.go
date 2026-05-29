@@ -9,6 +9,7 @@ package e2e_test
 //   - Annotations carry the lifecycle metadata (expires_at, last_activity_at, timeouts)
 //   - Pod-level SecurityContext enforces non-root execution with correct UID/GID
 //   - Container-level SecurityContext complies with K8s "restricted" PSS
+//   - Workspace init container also runs non-root and complies with restricted PSS
 //   - PVC volume mount uses the mount path from the AFSCP plan
 //   - Container working directory is the plan mount path plus /workspace
 //   - RestartPolicy=Never and AutomountServiceAccountToken=false are set
@@ -219,6 +220,39 @@ func TestPodSpec_ContainerSecurityContext(t *testing.T) {
 	require.NotNil(t, csc.SeccompProfile, "SeccompProfile must be set")
 	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, csc.SeccompProfile.Type,
 		"SeccompProfile.Type must be RuntimeDefault (PSS restricted)")
+}
+
+// TestPodSpec_WorkspaceInitContainerSecurityContext verifies the workspace
+// init container stays inside the restricted Pod Security Standard and the
+// same non-root UID/GID contract as managed workload containers.
+func TestPodSpec_WorkspaceInitContainerSecurityContext(t *testing.T) {
+	_, pod := setupPod(t, "spec-init-sc", CreateRequest{Image: suite.Image})
+
+	require.Len(t, pod.Spec.InitContainers, 1, "writable workspace mounts must have exactly one init container")
+	isc := pod.Spec.InitContainers[0].SecurityContext
+	require.NotNil(t, isc, "init container SecurityContext must not be nil")
+
+	require.NotNil(t, isc.RunAsNonRoot, "init RunAsNonRoot must be set")
+	assert.True(t, *isc.RunAsNonRoot, "init RunAsNonRoot must be true")
+
+	require.NotNil(t, isc.RunAsUser, "init RunAsUser must be set")
+	assert.Equal(t, int64(1000), *isc.RunAsUser, "init RunAsUser must be 1000")
+
+	require.NotNil(t, isc.RunAsGroup, "init RunAsGroup must be set")
+	assert.Equal(t, int64(1000), *isc.RunAsGroup, "init RunAsGroup must be 1000")
+
+	require.NotNil(t, isc.AllowPrivilegeEscalation, "init AllowPrivilegeEscalation must be set")
+	assert.False(t, *isc.AllowPrivilegeEscalation,
+		"init AllowPrivilegeEscalation must be false (PSS restricted)")
+
+	require.NotNil(t, isc.Capabilities, "init Capabilities must be set")
+	require.NotEmpty(t, isc.Capabilities.Drop, "init Capabilities.Drop must not be empty")
+	assert.Contains(t, isc.Capabilities.Drop, v1.Capability("ALL"),
+		"init Capabilities.Drop must include ALL (PSS restricted)")
+
+	require.NotNil(t, isc.SeccompProfile, "init SeccompProfile must be set")
+	assert.Equal(t, v1.SeccompProfileTypeRuntimeDefault, isc.SeccompProfile.Type,
+		"init SeccompProfile.Type must be RuntimeDefault (PSS restricted)")
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,18 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 No unreleased changes.
 
+## [v2.0.12] - 2026-05-29
+
+### Fixed
+
+- Workspace init containers are restored to restricted-compatible non-root `1000:1000` execution with only fail-fast `mkdir -p` and `test -w` checks for `TASK_HOME`, `WORKSPACE_PATH`, and `ARTIFACTS_PATH`; writable directories are provided by the substrate/CSI fsGroup-capable volume contract.
+- `v2.0.11` is superseded by `v2.0.12` and is not the recommended adoption version because it used a root workspace-init workaround.
+
 ## [v2.0.11] - 2026-05-29
+
+### Release Status
+
+- Superseded by `v2.0.12`; not recommended for adoption.
 
 ### Fixed
 

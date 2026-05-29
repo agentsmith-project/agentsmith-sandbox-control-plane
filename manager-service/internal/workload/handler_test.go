@@ -943,9 +943,9 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 	assert.Contains(t, init.Command[2], `mkdir -p "$TASK_HOME" "$WORKSPACE_PATH" "$ARTIFACTS_PATH"`)
 	assert.Contains(t, init.Command[2], "$WORKSPACE_PATH")
 	assert.Contains(t, init.Command[2], "$ARTIFACTS_PATH")
-	assert.Contains(t, init.Command[2], `chgrp 1000 "$dir"`)
-	assert.Contains(t, init.Command[2], `chmod g+rwx "$dir"`)
 	assert.Contains(t, init.Command[2], "test -w")
+	assert.NotContains(t, init.Command[2], "chgrp")
+	assert.NotContains(t, init.Command[2], "chmod")
 
 	envMap := envVarMap(init.Env)
 	assert.Equal(t, taskHome, envMap["TASK_HOME"])
@@ -961,9 +961,9 @@ func TestBuildPod_WorkspaceInitContainerPreparesWritableDirs(t *testing.T) {
 
 	require.NotNil(t, init.SecurityContext)
 	require.NotNil(t, init.SecurityContext.RunAsNonRoot)
-	assert.False(t, *init.SecurityContext.RunAsNonRoot)
+	assert.True(t, *init.SecurityContext.RunAsNonRoot)
 	require.NotNil(t, init.SecurityContext.RunAsUser)
-	assert.Equal(t, int64(0), *init.SecurityContext.RunAsUser)
+	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsUser)
 	require.NotNil(t, init.SecurityContext.RunAsGroup)
 	assert.Equal(t, int64(1000), *init.SecurityContext.RunAsGroup)
 	require.NotNil(t, init.SecurityContext.AllowPrivilegeEscalation)

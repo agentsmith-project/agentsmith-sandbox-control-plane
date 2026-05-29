@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.11",
+    "target_version": "v2.0.12",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.10",
-    "summary": "Workspace init containers run as root:1000 only for task directory preparation while managed workload containers remain non-root 1000:1000, fixing root-owned CSI/JuiceFS payload mounts where non-root init could not prepare writable task HOME, workspace, and workspace .artifacts directories."
+    "supersedes_published_version": "v2.0.11",
+    "summary": "Workspace init containers are restored to restricted-compatible non-root 1000:1000 execution with fail-fast mkdir -p and test -w checks only. Writable task HOME, workspace, and workspace .artifacts directories are provided by the substrate/CSI fsGroup-capable volume contract; v2.0.11 is superseded and not recommended for adoption."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",
