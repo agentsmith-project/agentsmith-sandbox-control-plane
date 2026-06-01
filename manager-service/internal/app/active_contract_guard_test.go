@@ -1194,15 +1194,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionMetadataPreparesV212AndKeepsPublishedSectionsImmutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV213AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.12" {
-		t.Fatalf("VERSION must be bumped to 2.0.12 for the restricted-compatible workspace-init release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.13" {
+		t.Fatalf("VERSION must be bumped to 2.0.13 for the provider-neutral runner fixture release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1211,37 +1211,31 @@ func TestReleaseVersionMetadataPreparesV212AndKeepsPublishedSectionsImmutable(t 
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	for _, token := range []string{"restricted-compatible non-root", "substrate/CSI fsGroup-capable", "`v2.0.11` is superseded"} {
+	for _, token := range []string{"provider-specific Jira", "runner fixture", "provider-neutral"} {
 		if strings.Contains(unreleased, token) {
-			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.12", token)
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.13", token)
 		}
 	}
 
-	section212 := changelogSection(changelog, "v2.0.12")
-	if section212 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.12 release section for the restricted-compatible workspace-init fix")
+	section213 := changelogSection(changelog, "v2.0.13")
+	if section213 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.13 release section for the provider-neutral runner fixture cleanup")
 	}
 	var violations []string
-	required212 := []string{
-		"Workspace init containers",
-		"restricted-compatible non-root `1000:1000`",
-		"fail-fast `mkdir -p`",
-		"`test -w`",
-		"`TASK_HOME`",
-		"`WORKSPACE_PATH`",
-		"`ARTIFACTS_PATH`",
-		"substrate/CSI fsGroup-capable volume contract",
-		"`v2.0.11` is superseded by `v2.0.12`",
-		"not the recommended adoption version",
+	required213 := []string{
+		"provider-specific Jira Python dependency",
+		"runner fixture",
+		"offline bundle inputs",
+		"provider-neutral",
 	}
-	for _, token := range required212 {
-		if !strings.Contains(section212, token) {
-			violations = append(violations, "v2.0.12 changelog missing "+token)
+	for _, token := range required213 {
+		if !strings.Contains(section213, token) {
+			violations = append(violations, "v2.0.13 changelog missing "+token)
 		}
 	}
 	for _, token := range []string{"ASBCP-BC-"} {
-		if strings.Contains(section212, token) {
-			violations = append(violations, "v2.0.12 changelog must not introduce "+token)
+		if strings.Contains(section213, token) {
+			violations = append(violations, "v2.0.13 changelog must not introduce "+token)
 		}
 	}
 
@@ -1259,13 +1253,13 @@ func TestReleaseVersionMetadataPreparesV212AndKeepsPublishedSectionsImmutable(t 
 	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
 		t.Fatalf("parse release evidence manifest: %v", err)
 	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.12" {
-		violations = append(violations, "release manifest target_version must be v2.0.12")
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.13" {
+		violations = append(violations, "release manifest target_version must be v2.0.13")
 	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.11" {
-		violations = append(violations, "release manifest must record v2.0.11 as superseded published version")
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.12" {
+		violations = append(violations, "release manifest must record v2.0.12 as superseded published version")
 	}
-	for _, token := range []string{"Workspace init containers", "restricted-compatible", "non-root 1000:1000", "fail-fast mkdir -p and test -w", "substrate/CSI fsGroup-capable volume contract", "v2.0.11", "not recommended for adoption"} {
+	for _, token := range []string{"provider-specific Jira", "runner fixture dependency", "offline bundle inputs", "provider-neutral", "no ASBCP control-plane functional code changes"} {
 		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary missing "+token)
 		}
@@ -1273,6 +1267,33 @@ func TestReleaseVersionMetadataPreparesV212AndKeepsPublishedSectionsImmutable(t 
 	for _, token := range []string{"ASBCP-BC-"} {
 		if strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary must not introduce "+token)
+		}
+	}
+
+	section212 := changelogSection(changelog, "v2.0.12")
+	if section212 == "" {
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.12 section")
+	}
+	required212 := []string{
+		"Workspace init containers",
+		"restricted-compatible non-root `1000:1000`",
+		"fail-fast `mkdir -p`",
+		"`test -w`",
+		"`TASK_HOME`",
+		"`WORKSPACE_PATH`",
+		"`ARTIFACTS_PATH`",
+		"substrate/CSI fsGroup-capable volume contract",
+		"`v2.0.11` is superseded by `v2.0.12`",
+		"not the recommended adoption version",
+	}
+	for _, token := range required212 {
+		if !strings.Contains(section212, token) {
+			violations = append(violations, "v2.0.12 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-", "provider-specific Jira"} {
+		if strings.Contains(section212, token) {
+			violations = append(violations, "v2.0.12 changelog must not introduce "+token)
 		}
 	}
 

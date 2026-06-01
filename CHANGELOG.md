@@ -6,7 +6,11 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
-No unreleased changes.
+## [v2.0.13] - 2026-06-01
+
+### Changed
+
+- Removed the provider-specific Jira Python dependency from the runner fixture and offline bundle inputs so ASBCP runner assets remain provider-neutral.
 
 ## [v2.0.12] - 2026-05-29
 
