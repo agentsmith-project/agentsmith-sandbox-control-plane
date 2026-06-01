@@ -183,8 +183,6 @@ RUN export HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" http_proxy="$
     aiofiles \
     # 命令行工具
     invoke \
-    # Jira API client
-    jira \
     # 文档生成
     sphinx mkdocs python-docx
 
