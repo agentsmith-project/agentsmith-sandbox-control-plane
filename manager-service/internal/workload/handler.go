@@ -923,6 +923,12 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 			message: "workspace binding is not ready; re-ensure workspace binding",
 		}
 	}
+	if err := workspacebinding.RequirePVCBound(pvc); err != nil {
+		return workspacebinding.ResolvedMount{}, responseStatusError{
+			status:  http.StatusServiceUnavailable,
+			message: "workspace binding is not ready: " + err.Error() + "; retry after workspace binding is Bound",
+		}
+	}
 	mount, err := workspacebinding.ResolvedMountFromPVC(pvc)
 	if err != nil {
 		return workspacebinding.ResolvedMount{}, responseStatusError{

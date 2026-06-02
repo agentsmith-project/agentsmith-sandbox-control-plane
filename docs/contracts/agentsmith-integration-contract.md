@@ -73,6 +73,8 @@ Expected behavior:
 - `mount_binding_id` matches `binding_id`.
 - ASBCP fetches the AFSCP plan with canonical service identity.
 - ASBCP creates or reuses Kubernetes binding resources from the plan.
+- Binding readiness requires the per-binding PVC to be `Bound` with a `volumeName`; static PV/PVC binding may complete asynchronously.
+- If the PVC is not yet `Bound`, ASBCP may return `503` code `not_ready` with `Retry-After`. This is a per-binding readiness gap and does not necessarily mean the ASBCP service is unavailable.
 - Response returns only sanitized binding status.
 - Storage backend settings and storage auth material in request bodies are rejected.
 
@@ -104,6 +106,7 @@ Expected behavior:
 - Runtime env includes `TASK_HOME`, `HOME`, and `WORKSPACE_PATH` derived from the plan.
 - Caller-provided mount path, sub path, working directory, storage backend settings, and storage auth material are rejected.
 - Unavailable or changed plans fail closed.
+- If the workspace binding PVC is not yet `Bound`, workload create fails with retryable `503` code `not_ready`; AgentSmith should retry binding ensure before retrying workload create.
 - Pod identity is scope-qualified by `{workspace_id, project_id, workload_id}`. All status, keepalive, exec, release, and delete paths validate Pod annotations and labels against the URL scope before operating on the Pod.
 - Workload status returns `image`/`image_ref` from the main container spec image and returns `image_id` only from the main container Kubernetes `ImageID` when status exposes it; `containerStatuses[].image` is not live image identity.
 

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/observability"
@@ -22,13 +23,16 @@ import (
 )
 
 type fakeK8sClient struct {
-	pv            *v1.PersistentVolume
-	pvc           *v1.PersistentVolumeClaim
-	pods          []v1.Pod
-	listSelectors []string
-	listPodsErr   error
-	deletePVErr   error
-	deletePVCErr  error
+	pv             *v1.PersistentVolume
+	pvc            *v1.PersistentVolumeClaim
+	pods           []v1.Pod
+	listSelectors  []string
+	listPodsErr    error
+	deletePVErr    error
+	deletePVCErr   error
+	ensurePVCPhase v1.PersistentVolumeClaimPhase
+	getPVCPhases   []v1.PersistentVolumeClaimPhase
+	getPVCCalls    int
 }
 
 type testErrorEnvelope struct {
@@ -67,12 +71,25 @@ func (f *fakeK8sClient) DeletePersistentVolume(_ context.Context, _ string) erro
 }
 func (f *fakeK8sClient) EnsurePersistentVolumeClaim(_ context.Context, _ string, claim *v1.PersistentVolumeClaim) error {
 	f.pvc = claim
+	if f.ensurePVCPhase != "" {
+		f.pvc.Status.Phase = f.ensurePVCPhase
+	} else {
+		f.pvc.Status.Phase = v1.ClaimBound
+	}
 	return nil
 }
 func (f *fakeK8sClient) GetPersistentVolumeClaim(_ context.Context, _ string, _ string) (*v1.PersistentVolumeClaim, error) {
 	if f.pvc == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumeclaims"}, "missing")
 	}
+	if len(f.getPVCPhases) > 0 {
+		phaseIdx := f.getPVCCalls
+		if phaseIdx >= len(f.getPVCPhases) {
+			phaseIdx = len(f.getPVCPhases) - 1
+		}
+		f.pvc.Status.Phase = f.getPVCPhases[phaseIdx]
+	}
+	f.getPVCCalls++
 	return f.pvc, nil
 }
 func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string, _ string) error {
@@ -141,6 +158,59 @@ func validPlan() afscp.OrchestratorMountPlan {
 		ReadOnly:            true,
 		SecretRef:           afscp.SecretRef{Namespace: "afscp-mounts", Name: "juicefs-vol-demo"},
 		SecurityPolicy:      afscp.SecurityPolicy{RunAsNonRoot: true, AllowPrivileged: false, JVSControlOutsidePayload: true},
+	}
+}
+
+func TestRequirePVCBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		pvc     *v1.PersistentVolumeClaim
+		wantErr string
+	}{
+		{
+			name:    "nil",
+			pvc:     nil,
+			wantErr: "workspace binding pvc is required",
+		},
+		{
+			name: "pending",
+			pvc: &v1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "pvc-demo"},
+				Status:     v1.PersistentVolumeClaimStatus{Phase: v1.ClaimPending},
+			},
+			wantErr: `persistent volume claim "pvc-demo" is Pending, not Bound`,
+		},
+		{
+			name: "bound without volume name",
+			pvc: &v1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "pvc-demo"},
+				Status:     v1.PersistentVolumeClaimStatus{Phase: v1.ClaimBound},
+			},
+			wantErr: `persistent volume claim "pvc-demo" is Bound but has no volumeName`,
+		},
+		{
+			name: "bound",
+			pvc: &v1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "pvc-demo"},
+				Spec:       v1.PersistentVolumeClaimSpec{VolumeName: "pv-demo"},
+				Status:     v1.PersistentVolumeClaimStatus{Phase: v1.ClaimBound},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RequirePVCBound(tt.pvc)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected nil error, got %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("expected error %q, got %v", tt.wantErr, err)
+			}
+		})
 	}
 }
 
@@ -226,6 +296,122 @@ func TestEnsureAndGetBindingUsesAFSCPPlan(t *testing.T) {
 	}
 	if strings.Contains(getRec.Body.String(), "payload_volume_subdir") || strings.Contains(getRec.Body.String(), "secret_ref") || strings.Contains(getRec.Body.String(), "juicefs-vol-demo") {
 		t.Fatalf("binding status leaked orchestrator-only fields: %s", getRec.Body.String())
+	}
+}
+
+func TestEnsureBindingPollsUntilPVCBound(t *testing.T) {
+	client := &fakeK8sClient{
+		ensurePVCPhase: v1.ClaimPending,
+		getPVCPhases:   []v1.PersistentVolumeClaimPhase{v1.ClaimPending, v1.ClaimBound},
+	}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.getPVCCalls != 2 {
+		t.Fatalf("expected two PVC reads before Bound, got %d", client.getPVCCalls)
+	}
+	var status BindingStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.Status != "ready" || status.PVCName == "" {
+		t.Fatalf("unexpected binding status after PVC bound poll: %+v", status)
+	}
+}
+
+func TestEnsureBindingReturnsNotReadyWhenPVCBoundPollTimesOut(t *testing.T) {
+	client := &fakeK8sClient{ensurePVCPhase: v1.ClaimPending}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "not_ready" {
+		t.Fatalf("expected not_ready code, got %+v", body.Error)
+	}
+	if rec.Header().Get("Retry-After") != ensurePVCBoundRetryAfter {
+		t.Fatalf("expected Retry-After %q, got %q", ensurePVCBoundRetryAfter, rec.Header().Get("Retry-After"))
+	}
+	if !strings.Contains(body.Error.Message, "persistent volume claim") || !strings.Contains(body.Error.Message, "Pending") {
+		t.Fatalf("expected PVC pending not-ready message, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("ensure should still create PV/PVC before reporting binding not ready")
+	}
+	if client.getPVCCalls < 2 {
+		t.Fatalf("expected bounded poll to read PVC more than once, got %d", client.getPVCCalls)
+	}
+}
+
+func TestGetBindingReturnsNotReadyWhenPVCUnbound(t *testing.T) {
+	plan := validPlan()
+	handler := NewHandler(&fakeK8sClient{
+		pv: &v1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: PVName("ws_demo", "proj_demo", "wmb_demo")},
+			Spec: v1.PersistentVolumeSpec{
+				MountOptions: []string{"subdir=" + plan.PayloadVolumeSubdir},
+				PersistentVolumeSource: v1.PersistentVolumeSource{
+					CSI: &v1.CSIPersistentVolumeSource{},
+				},
+			},
+		},
+		pvc: &v1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: PVCName("ws_demo", "proj_demo", "wmb_demo"),
+				Annotations: map[string]string{
+					annotationAFSCPNamespaceID:         "ns_demo",
+					annotationAFSCPMountBindingID:      "wmb_demo",
+					annotationAFSCPVolumeID:            plan.VolumeID,
+					annotationPayloadVolumeSubdir:      plan.PayloadVolumeSubdir,
+					annotationMountPath:                plan.MountPath,
+					annotationReadOnly:                 boolString(plan.ReadOnly),
+					annotationRunAsNonRoot:             "true",
+					annotationAllowPrivileged:          "false",
+					annotationJVSControlOutsidePayload: "true",
+				},
+			},
+			Spec:   v1.PersistentVolumeClaimSpec{VolumeName: PVName("ws_demo", "proj_demo", "wmb_demo")},
+			Status: v1.PersistentVolumeClaimStatus{Phase: v1.ClaimPending},
+		},
+	}, Options{Namespace: "sandbox-workloads"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "not_ready" {
+		t.Fatalf("expected not_ready code, got %+v", body.Error)
 	}
 }
 

@@ -131,6 +131,7 @@ func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolu
 		Spec: v1.PersistentVolumeClaimSpec{
 			VolumeName: pvName,
 		},
+		Status: v1.PersistentVolumeClaimStatus{Phase: v1.ClaimBound},
 	}
 }
 

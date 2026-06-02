@@ -725,6 +725,29 @@ func TestHandleCreatePod_VerifiesBindingStillActiveBeforeCreate(t *testing.T) {
 	assert.Equal(t, "corr-create", lifecycle.planCorrelationID)
 }
 
+func TestHandleCreatePod_RejectsUnboundPVCBeforeCreate(t *testing.T) {
+	pvc := testBindingPVC("ws-1", "proj-1", "wmb_demo")
+	pvc.Status.Phase = v1.ClaimPending
+	reg := newPodRegistry()
+	reg.bindingPVC = pvc
+	h := newHandlerWithRegistry(t, reg)
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	body := decodeError(t, rec)
+	assert.Equal(t, "not_ready", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "workspace binding is not ready")
+	assert.Contains(t, body.Error.Message, "Pending")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "unbound PVC must fail before pod creation")
+}
+
 func TestHandleCreatePod_RejectsStaleBindingBeforeCreate(t *testing.T) {
 	reg := newPodRegistry()
 	stalePlan := validAFSCPMountPlan("wmb_demo")

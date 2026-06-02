@@ -39,7 +39,7 @@ The envelope must include a stable machine-readable `code`, a human-readable `me
 | `429` | Rate limited |
 | `500` | Internal ASBCP failure |
 | `502` | AFSCP or Kubernetes dependency failure |
-| `503` | ASBCP not ready |
+| `503` | ASBCP not ready, or a workspace binding exists but its per-binding PVC is not yet `Bound` |
 
 ## Stable 409 Codes
 
@@ -48,6 +48,12 @@ The envelope must include a stable machine-readable `code`, a human-readable `me
 | `workload_release_incomplete` | Workload DELETE cannot yet prove durable release terminal truth. Retry the workload release/delete path. |
 | `workspace_binding_release_incomplete` | Workspace binding DELETE cannot prove every workload for the binding is released, or the fact source needed for that proof is unavailable. Retry after workload release state is reconciled. |
 | `conflict` | Generic non-release conflict, such as incompatible existing resources. Do not treat every `409` as release retryable. |
+
+## Stable 503 Codes
+
+| Code | Meaning |
+| --- | --- |
+| `not_ready` | Retryable readiness gap. This can mean ASBCP service readiness, or for workspace binding ensure/get and workload create, that the binding PVC is still Pending/unbound after ASBCP created or reused PV/PVC objects. `Retry-After` may be present. |
 
 ## Operational Logging
 

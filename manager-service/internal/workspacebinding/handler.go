@@ -111,6 +111,9 @@ const (
 	juiceFSMountOptionEntryCache       = "entry-cache=0s"
 	juiceFSMountOptionDirEntryCache    = "dir-entry-cache=0s"
 	juiceFSMountOptionNegativeCache    = "negative-entry-cache=0s"
+	ensurePVCBoundTimeout              = time.Second
+	ensurePVCBoundPollInterval         = 50 * time.Millisecond
+	ensurePVCBoundRetryAfter           = "1"
 )
 
 func NewHandler(k8sClient k8sClient, options Options) *Handler {
@@ -243,7 +246,8 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 		UpdatedAt:           now,
 	}
 
-	if err := h.k8sClient.EnsurePersistentVolume(ctx, h.buildPV(status, plan)); err != nil {
+	builtPV := h.buildPV(status, plan)
+	if err := h.k8sClient.EnsurePersistentVolume(ctx, builtPV); err != nil {
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "ensure persistent volume failed")
 		return
 	}
@@ -251,7 +255,69 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "ensure persistent volume claim failed")
 		return
 	}
+	readyPVC, err := h.waitForPVCBound(ctx, h.options.Namespace, pvc)
+	if err != nil && errors.Is(err, errPVCBoundNotReady) {
+		w.Header().Set("Retry-After", ensurePVCBoundRetryAfter)
+		jsonError(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error())
+		return
+	}
+	if err != nil {
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	status, err = bindingStatusFromObjects(workspaceID, projectID, bindingID, h.options.Namespace, builtPV, readyPVC)
+	if err != nil {
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "workspace binding status is invalid")
+		return
+	}
 	jsonResponse(w, http.StatusOK, status)
+}
+
+var errPVCBoundNotReady = errors.New("persistent volume claim is not bound")
+
+type pvcBoundNotReadyError struct {
+	err error
+}
+
+func (e pvcBoundNotReadyError) Error() string {
+	return e.err.Error()
+}
+
+func (e pvcBoundNotReadyError) Unwrap() error {
+	return errPVCBoundNotReady
+}
+
+func (h *Handler) waitForPVCBound(ctx context.Context, namespace, name string) (*v1.PersistentVolumeClaim, error) {
+	ctx, cancel := context.WithTimeout(ctx, ensurePVCBoundTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(ensurePVCBoundPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, namespace, name)
+		if err != nil {
+			if ctx.Err() != nil && lastErr != nil {
+				return nil, pvcBoundNotReadyError{err: lastErr}
+			}
+			return nil, errors.New("get persistent volume claim failed")
+		}
+		if err := RequirePVCBound(pvc); err == nil {
+			return pvc, nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return nil, pvcBoundNotReadyError{err: lastErr}
+			}
+			return nil, pvcBoundNotReadyError{err: ctx.Err()}
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID, projectID, bindingID string) {
@@ -273,6 +339,10 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 			return
 		}
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "get persistent volume claim failed")
+		return
+	}
+	if err := RequirePVCBound(pvc); err != nil {
+		jsonError(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error())
 		return
 	}
 	status, err := bindingStatusFromObjects(workspaceID, projectID, bindingID, h.options.Namespace, pv, pvc)
@@ -783,6 +853,23 @@ func ResolvedMountFromPVC(pvc *v1.PersistentVolumeClaim) (ResolvedMount, error) 
 		return ResolvedMount{}, fmt.Errorf("binding security policy is not allowed")
 	}
 	return resolved, nil
+}
+
+func RequirePVCBound(pvc *v1.PersistentVolumeClaim) error {
+	if pvc == nil {
+		return errors.New("workspace binding pvc is required")
+	}
+	phase := pvc.Status.Phase
+	if phase != v1.ClaimBound {
+		if phase == "" {
+			return fmt.Errorf("persistent volume claim %q is not Bound", pvc.GetName())
+		}
+		return fmt.Errorf("persistent volume claim %q is %s, not Bound", pvc.GetName(), phase)
+	}
+	if strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		return fmt.Errorf("persistent volume claim %q is Bound but has no volumeName", pvc.GetName())
+	}
+	return nil
 }
 
 func payloadSubdirMountOption(payloadVolumeSubdir string) string {
