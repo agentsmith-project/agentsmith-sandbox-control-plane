@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.15",
+    "target_version": "v2.0.16",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.14",
-    "summary": "Workspace binding PVC briefly NotFound/unobservable now remains a retryable 503 not_ready readiness gap, while non-readiness PVC get errors still fail fast."
+    "supersedes_published_version": "v2.0.15",
+    "summary": "Workload create now treats temporarily invisible workspace PVCs (NotFound) as retryable 503 not_ready readiness with Retry-After, while RBAC/generic PVC get errors still fail fast."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

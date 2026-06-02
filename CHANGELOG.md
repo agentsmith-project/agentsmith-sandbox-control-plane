@@ -6,6 +6,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.16] - 2026-06-02
+
+### Fixed
+
+- Workload create now treats temporarily invisible workspace PVCs (`NotFound`) as retryable `503 not_ready` readiness with `Retry-After`, while RBAC/generic PVC get errors still fail fast.
+
 ## [v2.0.15] - 2026-06-02
 
 ### Fixed
