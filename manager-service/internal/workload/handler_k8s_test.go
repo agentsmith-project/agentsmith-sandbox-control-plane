@@ -43,6 +43,8 @@ type podRegistry struct {
 	events     *eventRecorder
 	bindingPVC *v1.PersistentVolumeClaim
 	bindingPV  *v1.PersistentVolume
+	// Optional: return this Kubernetes status for workspace binding PVC GETs.
+	bindingPVCStatus *metav1.Status
 	// Optional: return 500 for GET/DELETE/PATCH for this pod name (for error-path tests).
 	forceGetErrorFor    string
 	forceDeleteErrorFor string
@@ -253,6 +255,9 @@ func newPodRegistry(initial ...*v1.Pod) *podRegistry {
 func (r *podRegistry) setForceGetErrorFor(name string)    { r.forceGetErrorFor = name }
 func (r *podRegistry) setForceDeleteErrorFor(name string) { r.forceDeleteErrorFor = name }
 func (r *podRegistry) setForcePatchErrorFor(name string)  { r.forcePatchErrorFor = name }
+func (r *podRegistry) setBindingPVCStatus(status metav1.Status) {
+	r.bindingPVCStatus = &status
+}
 
 func (r *podRegistry) makeServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -265,7 +270,7 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := req.URL.Path
 
-	if writeTestBindingResourceIfRequested(w, req, r.bindingPVC, r.bindingPV, "ws-1", "proj-1", "wmb_demo") {
+	if r.writeBindingResourceIfRequested(w, req) {
 		return
 	}
 	if r.writeConfigMapIfRequested(w, req) {
@@ -385,6 +390,22 @@ func (r *podRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (r *podRegistry) writeBindingResourceIfRequested(w http.ResponseWriter, req *http.Request) bool {
+	if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/persistentvolumeclaims/") && r.bindingPVCStatus != nil {
+		status := r.bindingPVCStatus.DeepCopy()
+		code := int(status.Code)
+		if code == 0 {
+			code = http.StatusInternalServerError
+			status.Code = int32(code)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(status)
+		return true
+	}
+	return writeTestBindingResourceIfRequested(w, req, r.bindingPVC, r.bindingPV, "ws-1", "proj-1", "wmb_demo")
 }
 
 func (r *podRegistry) writeConfigMapIfRequested(w http.ResponseWriter, req *http.Request) bool {
@@ -574,6 +595,7 @@ func TestHandleCreatePod_Returns201WithPodName(t *testing.T) {
 	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Empty(t, rec.Header().Get("Retry-After"))
 
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
@@ -723,6 +745,85 @@ func TestHandleCreatePod_VerifiesBindingStillActiveBeforeCreate(t *testing.T) {
 	assert.Equal(t, "ns_demo", lifecycle.planNamespaceID)
 	assert.Equal(t, "wmb_demo", lifecycle.planMountBindingID)
 	assert.Equal(t, "corr-create", lifecycle.planCorrelationID)
+}
+
+func TestHandleCreatePod_ReturnsNotReadyWhenBindingPVCNotFoundBeforeCreate(t *testing.T) {
+	reg := newPodRegistry()
+	reg.setBindingPVCStatus(metav1.Status{
+		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+		Status:   metav1.StatusFailure,
+		Reason:   metav1.StatusReasonNotFound,
+		Code:     http.StatusNotFound,
+		Message:  "persistentvolumeclaims not found",
+	})
+	h := newHandlerWithRegistry(t, reg)
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
+	body := decodeError(t, rec)
+	assert.Equal(t, "not_ready", body.Error.Code)
+	assert.Contains(t, body.Error.Message, "workspace binding is not ready")
+	assert.Contains(t, body.Error.Message, "not visible yet")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "transient PVC NotFound must fail before pod creation")
+}
+
+func TestHandleCreatePod_FailsFastWhenBindingPVCGetReturnsNonReadinessError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status metav1.Status
+	}{
+		{
+			name: "forbidden",
+			status: metav1.Status{
+				TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+				Status:   metav1.StatusFailure,
+				Reason:   metav1.StatusReasonForbidden,
+				Code:     http.StatusForbidden,
+				Message:  "rbac denied",
+			},
+		},
+		{
+			name: "generic",
+			status: metav1.Status{
+				TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+				Status:   metav1.StatusFailure,
+				Reason:   metav1.StatusReasonInternalError,
+				Code:     http.StatusInternalServerError,
+				Message:  "apiserver unavailable",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := newPodRegistry()
+			reg.setBindingPVCStatus(tt.status)
+			h := newHandlerWithRegistry(t, reg)
+
+			payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+			req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+			rec := httptest.NewRecorder()
+			h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+			require.Equal(t, http.StatusConflict, rec.Code)
+			assert.Empty(t, rec.Header().Get("Retry-After"))
+			body := decodeError(t, rec)
+			assert.Equal(t, "conflict", body.Error.Code)
+			assert.Contains(t, body.Error.Message, "re-ensure workspace binding")
+
+			reg.mu.Lock()
+			defer reg.mu.Unlock()
+			assert.Empty(t, reg.pods, "PVC get errors outside readiness must fail before pod creation")
+		})
+	}
 }
 
 func TestHandleCreatePod_RejectsUnboundPVCBeforeCreate(t *testing.T) {

@@ -38,6 +38,7 @@ const (
 	workspaceVolumeName         = "workspace"
 	workspaceInitContainerName  = "workspace-init"
 	workspaceArtifactsDirectory = ".artifacts"
+	workspaceMountRetryAfter    = "1"
 
 	errorCodeWorkloadReleaseIncomplete = "workload_release_incomplete"
 )
@@ -75,8 +76,9 @@ type Options struct {
 }
 
 type responseStatusError struct {
-	status  int
-	message string
+	status     int
+	message    string
+	retryAfter string
 }
 
 var errWorkloadScopeMismatch = stderrors.New("workload pod scope mismatch")
@@ -250,6 +252,9 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 	mount, err := h.resolveWorkspaceMount(ctx, r, workspaceID, projectID, workloadID, req.WorkspaceBindingID)
 	if err != nil {
 		status := statusCodeForError(err, http.StatusBadRequest)
+		if retryAfter := retryAfterForError(err); retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
 		jsonError(w, r, status, httperror.CodeForStatus(status), err.Error())
 		return
 	}
@@ -918,6 +923,13 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 	pvcName := workspacebinding.PVCName(workspaceID, projectID, bindingID)
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.k8sClient.Namespace(), pvcName)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return workspacebinding.ResolvedMount{}, responseStatusError{
+				status:     http.StatusServiceUnavailable,
+				message:    fmt.Sprintf("workspace binding is not ready: persistent volume claim %q is not visible yet; retry after workspace binding is Bound", pvcName),
+				retryAfter: workspaceMountRetryAfter,
+			}
+		}
 		return workspacebinding.ResolvedMount{}, responseStatusError{
 			status:  http.StatusConflict,
 			message: "workspace binding is not ready; re-ensure workspace binding",
@@ -1080,6 +1092,14 @@ func statusCodeForError(err error, fallback int) int {
 		return statusErr.status
 	}
 	return fallback
+}
+
+func retryAfterForError(err error) string {
+	var statusErr responseStatusError
+	if stderrors.As(err, &statusErr) {
+		return strings.TrimSpace(statusErr.retryAfter)
+	}
+	return ""
 }
 
 func buildRuntimeEnvVars(env map[string]string, paths workloadPaths) []v1.EnvVar {
