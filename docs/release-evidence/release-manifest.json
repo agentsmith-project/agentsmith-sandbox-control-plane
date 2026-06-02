@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.13",
+    "target_version": "v2.0.14",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.12",
-    "summary": "Removed the provider-specific Jira runner fixture dependency from ASBCP offline bundle inputs so runner fixture assets stay provider-neutral; no ASBCP control-plane functional code changes are included in this release prep."
+    "supersedes_published_version": "v2.0.13",
+    "summary": "Workspace binding/workload create now waits for each per-binding PVC to be Bound; Pending/unbound PVCs return retryable 503 not_ready, avoiding sandbox Pod creation before its PVC is bound."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

@@ -1194,15 +1194,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionMetadataPreparesV213AndKeepsPublishedSectionsImmutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV214AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.13" {
-		t.Fatalf("VERSION must be bumped to 2.0.13 for the provider-neutral runner fixture release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.14" {
+		t.Fatalf("VERSION must be bumped to 2.0.14 for the PVC readiness release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1211,17 +1211,40 @@ func TestReleaseVersionMetadataPreparesV213AndKeepsPublishedSectionsImmutable(t 
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	for _, token := range []string{"provider-specific Jira", "runner fixture", "provider-neutral"} {
+	for _, token := range []string{"per-binding PVC", "retryable `503 not_ready`", "sandbox Pod creation"} {
 		if strings.Contains(unreleased, token) {
-			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.13", token)
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.14", token)
+		}
+	}
+
+	section214 := changelogSection(changelog, "v2.0.14")
+	if section214 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.14 release section for the PVC readiness release")
+	}
+	var violations []string
+	required214 := []string{
+		"Workspace binding/workload create",
+		"per-binding PVC",
+		"`Bound`",
+		"`Pending`/unbound PVCs",
+		"retryable `503 not_ready`",
+		"sandbox Pod creation",
+	}
+	for _, token := range required214 {
+		if !strings.Contains(section214, token) {
+			violations = append(violations, "v2.0.14 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-"} {
+		if strings.Contains(section214, token) {
+			violations = append(violations, "v2.0.14 changelog must not introduce "+token)
 		}
 	}
 
 	section213 := changelogSection(changelog, "v2.0.13")
 	if section213 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.13 release section for the provider-neutral runner fixture cleanup")
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.13 section")
 	}
-	var violations []string
 	required213 := []string{
 		"provider-specific Jira Python dependency",
 		"runner fixture",
@@ -1253,13 +1276,13 @@ func TestReleaseVersionMetadataPreparesV213AndKeepsPublishedSectionsImmutable(t 
 	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
 		t.Fatalf("parse release evidence manifest: %v", err)
 	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.13" {
-		violations = append(violations, "release manifest target_version must be v2.0.13")
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.14" {
+		violations = append(violations, "release manifest target_version must be v2.0.14")
 	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.12" {
-		violations = append(violations, "release manifest must record v2.0.12 as superseded published version")
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.13" {
+		violations = append(violations, "release manifest must record v2.0.13 as superseded published version")
 	}
-	for _, token := range []string{"provider-specific Jira", "runner fixture dependency", "offline bundle inputs", "provider-neutral", "no ASBCP control-plane functional code changes"} {
+	for _, token := range []string{"per-binding PVC", "Bound", "Pending/unbound PVCs", "retryable 503 not_ready", "sandbox Pod creation"} {
 		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary missing "+token)
 		}

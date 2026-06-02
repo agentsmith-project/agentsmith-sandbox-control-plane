@@ -6,6 +6,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.14] - 2026-06-02
+
+### Fixed
+
+- Workspace binding/workload create now waits for each per-binding PVC to be `Bound`; `Pending`/unbound PVCs return retryable `503 not_ready`, avoiding sandbox Pod creation before its PVC is bound.
+
 ## [v2.0.13] - 2026-06-01
 
 ### Changed
