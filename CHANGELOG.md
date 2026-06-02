@@ -6,6 +6,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.15] - 2026-06-02
+
+### Fixed
+
+- Workspace binding PVC briefly `NotFound`/unobservable now remains a retryable `503 not_ready` readiness gap, while non-readiness PVC get errors still fail fast.
+
 ## [v2.0.14] - 2026-06-02
 
 ### Fixed

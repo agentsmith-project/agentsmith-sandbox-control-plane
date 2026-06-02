@@ -298,15 +298,21 @@ func (h *Handler) waitForPVCBound(ctx context.Context, namespace, name string) (
 	for {
 		pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, namespace, name)
 		if err != nil {
-			if ctx.Err() != nil && lastErr != nil {
-				return nil, pvcBoundNotReadyError{err: lastErr}
+			if apierrors.IsNotFound(err) {
+				lastErr = fmt.Errorf("persistent volume claim %q is not visible yet", name)
+			} else {
+				isContextDoneError := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+				if ctx.Err() != nil && lastErr != nil && isContextDoneError {
+					return nil, pvcBoundNotReadyError{err: lastErr}
+				}
+				return nil, errors.New("get persistent volume claim failed")
 			}
-			return nil, errors.New("get persistent volume claim failed")
-		}
-		if err := RequirePVCBound(pvc); err == nil {
-			return pvc, nil
 		} else {
-			lastErr = err
+			if err := RequirePVCBound(pvc); err == nil {
+				return pvc, nil
+			} else {
+				lastErr = err
+			}
 		}
 
 		select {
@@ -335,7 +341,8 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.options.Namespace, pvcName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			jsonError(w, r, http.StatusNotFound, "not_found", "workspace binding not found")
+			message := fmt.Sprintf("workspace binding is not ready: persistent volume claim %q is not visible yet", pvcName)
+			jsonError(w, r, http.StatusServiceUnavailable, "not_ready", message)
 			return
 		}
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "get persistent volume claim failed")

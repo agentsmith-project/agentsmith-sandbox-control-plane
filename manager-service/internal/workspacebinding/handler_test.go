@@ -32,6 +32,8 @@ type fakeK8sClient struct {
 	deletePVCErr   error
 	ensurePVCPhase v1.PersistentVolumeClaimPhase
 	getPVCPhases   []v1.PersistentVolumeClaimPhase
+	getPVCErr      error
+	getPVCErrs     []error
 	getPVCCalls    int
 }
 
@@ -79,17 +81,24 @@ func (f *fakeK8sClient) EnsurePersistentVolumeClaim(_ context.Context, _ string,
 	return nil
 }
 func (f *fakeK8sClient) GetPersistentVolumeClaim(_ context.Context, _ string, _ string) (*v1.PersistentVolumeClaim, error) {
+	callIdx := f.getPVCCalls
+	f.getPVCCalls++
+	if callIdx < len(f.getPVCErrs) && f.getPVCErrs[callIdx] != nil {
+		return nil, f.getPVCErrs[callIdx]
+	}
+	if f.getPVCErr != nil {
+		return nil, f.getPVCErr
+	}
 	if f.pvc == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumeclaims"}, "missing")
 	}
 	if len(f.getPVCPhases) > 0 {
-		phaseIdx := f.getPVCCalls
+		phaseIdx := callIdx
 		if phaseIdx >= len(f.getPVCPhases) {
 			phaseIdx = len(f.getPVCPhases) - 1
 		}
 		f.pvc.Status.Phase = f.getPVCPhases[phaseIdx]
 	}
-	f.getPVCCalls++
 	return f.pvc, nil
 }
 func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string, _ string) error {
@@ -332,6 +341,40 @@ func TestEnsureBindingPollsUntilPVCBound(t *testing.T) {
 	}
 }
 
+func TestEnsureBindingPollsThroughTransientPVCNotFoundUntilBound(t *testing.T) {
+	client := &fakeK8sClient{
+		getPVCErrs: []error{
+			apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumeclaims"}, "pvc-ws-demo-proj-demo-wmb-demo"),
+		},
+	}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.getPVCCalls != 2 {
+		t.Fatalf("expected one NotFound read and one Bound read, got %d", client.getPVCCalls)
+	}
+	var status BindingStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.Status != "ready" || status.PVCName == "" {
+		t.Fatalf("unexpected binding status after transient PVC NotFound: %+v", status)
+	}
+}
+
 func TestEnsureBindingReturnsNotReadyWhenPVCBoundPollTimesOut(t *testing.T) {
 	client := &fakeK8sClient{ensurePVCPhase: v1.ClaimPending}
 	handler := NewHandler(client, Options{
@@ -367,6 +410,110 @@ func TestEnsureBindingReturnsNotReadyWhenPVCBoundPollTimesOut(t *testing.T) {
 	}
 	if client.getPVCCalls < 2 {
 		t.Fatalf("expected bounded poll to read PVC more than once, got %d", client.getPVCCalls)
+	}
+}
+
+func TestEnsureBindingReturnsNotReadyWhenPVCNotFoundPollTimesOut(t *testing.T) {
+	client := &fakeK8sClient{
+		getPVCErr: apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumeclaims"}, "pvc-ws-demo-proj-demo-wmb-demo"),
+	}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "not_ready" {
+		t.Fatalf("expected not_ready code, got %+v", body.Error)
+	}
+	if rec.Header().Get("Retry-After") != ensurePVCBoundRetryAfter {
+		t.Fatalf("expected Retry-After %q, got %q", ensurePVCBoundRetryAfter, rec.Header().Get("Retry-After"))
+	}
+	if !strings.Contains(body.Error.Message, "not visible yet") {
+		t.Fatalf("expected PVC not-visible not-ready message, got %+v", body.Error)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("ensure should still create PV/PVC before reporting binding not ready")
+	}
+	if client.getPVCCalls < 2 {
+		t.Fatalf("expected bounded poll to retry NotFound PVC reads, got %d", client.getPVCCalls)
+	}
+}
+
+func TestEnsureBindingFailsFastWhenPVCGetForbidden(t *testing.T) {
+	client := &fakeK8sClient{
+		getPVCErr: apierrors.NewForbidden(schema.GroupResource{Resource: "persistentvolumeclaims"}, "pvc-ws-demo-proj-demo-wmb-demo", errors.New("rbac denied")),
+	}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "internal_error" || body.Error.Message != "get persistent volume claim failed" {
+		t.Fatalf("expected sanitized internal_error, got %+v", body.Error)
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("Forbidden PVC Get must not be exposed as readiness retry, got Retry-After=%q", rec.Header().Get("Retry-After"))
+	}
+	if client.getPVCCalls != 1 {
+		t.Fatalf("expected Forbidden PVC Get to fail fast after one read, got %d", client.getPVCCalls)
+	}
+}
+
+func TestEnsureBindingFailsFastWhenPVCGetReturnsGenericError(t *testing.T) {
+	client := &fakeK8sClient{
+		getPVCErr: errors.New("apiserver unavailable"),
+	}
+	handler := NewHandler(client, Options{
+		Namespace:        "sandbox-workloads",
+		CSIDriver:        "csi.juicefs.com",
+		StorageCapacity:  "1Pi",
+		StorageClassName: "juicefs-static",
+		AFSCPClient:      &fakeAFSCPClient{plan: validPlan()},
+	})
+
+	payload := `{"namespace_id":"ns_demo","mount_binding_id":"wmb_demo"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "internal_error" || body.Error.Message != "get persistent volume claim failed" {
+		t.Fatalf("expected sanitized internal_error, got %+v", body.Error)
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("generic PVC Get error must not be exposed as readiness retry, got Retry-After=%q", rec.Header().Get("Retry-After"))
+	}
+	if client.getPVCCalls != 1 {
+		t.Fatalf("expected generic PVC Get error to fail fast after one read, got %d", client.getPVCCalls)
 	}
 }
 
@@ -412,6 +559,36 @@ func TestGetBindingReturnsNotReadyWhenPVCUnbound(t *testing.T) {
 	body := decodeErrorEnvelope(t, rec)
 	if body.Error.Code != "not_ready" {
 		t.Fatalf("expected not_ready code, got %+v", body.Error)
+	}
+}
+
+func TestGetBindingReturnsNotReadyWhenPVExistsButPVCNotFound(t *testing.T) {
+	plan := validPlan()
+	handler := NewHandler(&fakeK8sClient{
+		pv: &v1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: PVName("ws_demo", "proj_demo", "wmb_demo")},
+			Spec: v1.PersistentVolumeSpec{
+				MountOptions: []string{"subdir=" + plan.PayloadVolumeSubdir},
+				PersistentVolumeSource: v1.PersistentVolumeSource{
+					CSI: &v1.CSIPersistentVolumeSource{},
+				},
+			},
+		},
+	}, Options{Namespace: "sandbox-workloads"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "not_ready" {
+		t.Fatalf("expected not_ready code, got %+v", body.Error)
+	}
+	if !strings.Contains(body.Error.Message, "not visible yet") {
+		t.Fatalf("expected PVC not-visible not-ready message, got %+v", body.Error)
 	}
 }
 
