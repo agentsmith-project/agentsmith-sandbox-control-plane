@@ -458,6 +458,8 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 		"check_final_manifest_schema",
 		"check_provider_prerequisites_contract",
 		"check_readiness_evidence",
+		"docs/READINESS_EVIDENCE.md",
+		"Current release-prep target",
 		"check_dockerfile_contract",
 		"run_release_fixture_smoke",
 		"render_kustomize_overlays",
@@ -1337,6 +1339,24 @@ func TestReleaseVersionMetadataPreparesV216AndKeepsPublishedSectionsImmutable(t 
 	for _, token := range []string{"ASBCP-BC-"} {
 		if strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary must not introduce "+token)
+		}
+	}
+
+	readinessBytes, err := os.ReadFile(filepath.Join(repoRoot, "docs", "READINESS_EVIDENCE.md"))
+	if err != nil {
+		t.Fatalf("read readiness evidence: %v", err)
+	}
+	readiness := string(readinessBytes)
+	for _, token := range []string{
+		"Current release-prep target: `v2.0.16`.",
+		"temporarily invisible workspace PVCs",
+		"`NotFound`",
+		"retryable `503 not_ready`",
+		"`Retry-After`",
+		"supersedes `v2.0.15`",
+	} {
+		if !strings.Contains(readiness, token) {
+			violations = append(violations, "readiness evidence missing "+token)
 		}
 	}
 

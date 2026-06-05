@@ -783,18 +783,35 @@ PY
 }
 
 check_readiness_evidence() {
+  local expected_tag="$1"
   require_cmd python3
-  python3 - "${ROOT}/docs/release-evidence/release-manifest.json" <<'PY'
+  python3 - "${ROOT}/docs/release-evidence/release-manifest.json" "${ROOT}/docs/READINESS_EVIDENCE.md" "${expected_tag}" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as fh:
+manifest_path = Path(sys.argv[1])
+readiness_path = Path(sys.argv[2])
+expected_tag = sys.argv[3]
+with manifest_path.open("r", encoding="utf-8") as fh:
     manifest = json.load(fh)
+readiness = readiness_path.read_text(encoding="utf-8")
 
 failures = []
 if manifest.get("release_gate") != "scripts/verify-release.sh":
     failures.append("release_gate must be scripts/verify-release.sh")
+release_preparation = manifest.get("release_preparation") or {}
+if release_preparation.get("target_version") != expected_tag:
+    failures.append(
+        "docs/release-evidence/release-manifest.json release_preparation.target_version "
+        f"must match VERSION-derived tag {expected_tag}"
+    )
+expected_readiness_target = f"Current release-prep target: `{expected_tag}`."
+if expected_readiness_target not in readiness:
+    failures.append(
+        "docs/READINESS_EVIDENCE.md current release-prep target must match "
+        f"VERSION-derived tag {expected_tag}"
+    )
 
 required_ids = {
     "governance_guard",
@@ -1061,7 +1078,7 @@ check_api_contract_version_evidence
 check_release_workflow_lock_output
 check_final_manifest_schema
 check_provider_prerequisites_contract
-check_readiness_evidence
+check_readiness_evidence "v${VERSION}"
 check_raw_storage_sdk_dependency_absent
 
 EXPECTED_GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "${ROOT}/manager-service/go.mod")"

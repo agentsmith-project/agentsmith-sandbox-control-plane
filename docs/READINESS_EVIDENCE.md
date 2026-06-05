@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current release-prep target: `v2.0.9`. This release candidate records JuiceFS CSI workspace binding PV mount options `attr-cache=0s`, `entry-cache=0s`, `dir-entry-cache=0s`, and `negative-entry-cache=0s` while preserving the AFSCP payload subdir, prioritizing pre-GA cross-client delete visibility correctness.
+Current release-prep target: `v2.0.16`. This release candidate treats temporarily invisible workspace PVCs (`NotFound`) during workload create as retryable `503 not_ready` readiness with `Retry-After`, while RBAC/generic PVC get errors still fail fast. It supersedes `v2.0.15` and keeps the earlier JuiceFS CSI cache-disabling workspace binding behavior from `v2.0.9`.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |
