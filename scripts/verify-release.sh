@@ -829,6 +829,7 @@ required_ids = {
     "final_manifest",
     "provider_prerequisites_contract",
     "public_error_redaction",
+    "consumer_diagnostics_handoff",
     "raw_storage_exclusion",
     "runner_artifact_classification",
 }

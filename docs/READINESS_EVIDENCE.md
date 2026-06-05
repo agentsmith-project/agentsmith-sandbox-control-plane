@@ -23,6 +23,7 @@ Current release-prep target: `v2.0.16`. This release candidate treats temporaril
 | Final manifest | Workflow-gated | Tag release workflow calls `scripts/generate-final-manifest` to generate `asbcp-final-manifest.json` conforming to `docs/schemas/asbcp-final-manifest.v1.schema.json`, including CHANGELOG-derived `changelog_summary` and the complete GitHub Release body in `release_notes.body_source`, and uploads only the manifest as a GitHub Release asset |
 | Provider prerequisites contract | Yes | `docs/contracts/asbcp-provider-prerequisites.v1.json` covers ASBCP service RBAC verbs, secret/env projections, `ASBCP_AFSCP_*`, AFSCP caller identity, allowed caller, `orchestrator_mount`, and no-public-ingress |
 | Public error redaction | Yes | `httperror.Write` redacts credential-like dependency messages before returning public JSON error envelopes |
+| Consumer diagnostics handoff | Yes | Contracts define sanitized request id, workload/binding id, phase/status, HTTP status, stable error code, and retry-after evidence for AgentSmith runtime-readiness correlation without making consumer gates an ASBCP verdict |
 | Retired naming guard | Yes | Added for governed release surface |
 | Raw storage credential exclusion | Yes | Contract and active guard added |
 | Runner artifact classification | Yes | ADR and active release-surface guard added |

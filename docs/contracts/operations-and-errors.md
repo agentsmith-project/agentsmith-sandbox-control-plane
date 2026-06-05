@@ -58,3 +58,17 @@ The envelope must include a stable machine-readable `code`, a human-readable `me
 ## Operational Logging
 
 Logs should include ASBCP request identifiers and workload identifiers, but must not include secrets, tokens, raw storage credentials, or full command output unless explicitly safe.
+
+## Consumer Diagnostics Handoff
+
+AgentSmith runtime-readiness evidence joins ASBCP API responses, ASBCP logs, and
+Kubernetes status by sanitized identifiers. For retryable `not_ready`,
+`dependency_failure`, rate-limit, and lifecycle-conflict cases, ASBCP should
+make the following fields available in the API response, status response, or
+log record when they are known: API operation, request id, workload id or
+binding id, observed phase/status, HTTP status, stable error code, and
+`Retry-After`.
+
+This is a diagnostics handoff for consumers. It does not make AgentSmith
+focused gates, backend-real evidence, or product readiness part of the ASBCP
+repo-local release verdict.

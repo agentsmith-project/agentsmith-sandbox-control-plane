@@ -147,6 +147,11 @@
       "status": "added"
     },
     {
+      "id": "consumer_diagnostics_handoff",
+      "description": "Contracts define sanitized request id, workload/binding id, phase/status, HTTP status, stable error code, and retry-after evidence for AgentSmith runtime-readiness correlation without making consumer gates an ASBCP verdict.",
+      "status": "added"
+    },
+    {
       "id": "raw_storage_exclusion",
       "description": "ASBCP contract excludes raw storage credentials.",
       "status": "added"

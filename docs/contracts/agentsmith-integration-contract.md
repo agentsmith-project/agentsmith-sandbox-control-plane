@@ -128,6 +128,19 @@ AgentSmith uses:
 - `POST /workloads/{workload_id}/keepalive` to heartbeat AFSCP and extend local expiry.
 - `POST /workloads/{workload_id}/exec` for process-level checks.
 
+## 4a. Runtime Readiness Diagnostics
+
+When AgentSmith records `AGENT_SANDBOX_UNAVAILABLE`, it should preserve ASBCP
+create/status call summaries with the AgentSmith API request, pod-manager
+diagnostic summary, and Kubernetes pod/status/event evidence. The ASBCP side of
+that handoff is sanitized API/log/status data: operation, request id, workload
+id or binding id, phase/status when known, HTTP status, stable ASBCP error
+code, and `Retry-After` for retryable readiness gaps.
+
+This section only defines consumer diagnostics correlation. It does not make
+AgentSmith backend-real gates, runtime flake classification, or Product
+Readiness an ASBCP release gate.
+
 ## 5. Deletion Semantics
 
 Deleting a workload removes compute and closes the AFSCP mount lifecycle:
