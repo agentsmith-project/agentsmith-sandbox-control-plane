@@ -431,7 +431,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 
 	storageFlushed := false
 	if !fact.ReleaseDone {
-		if !podMissing && pod != nil {
+		if !podMissing && shouldFlushWorkloadStorage(pod) {
 			if err := h.flushWorkloadStorage(ctx, pod); err != nil {
 				log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
 				jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
@@ -462,7 +462,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 				return
 			}
 		} else {
-			if !storageFlushed {
+			if !storageFlushed && shouldFlushWorkloadStorage(pod) {
 				if err := h.flushWorkloadStorage(ctx, pod); err != nil {
 					log.Printf("workload/%s: storage flush barrier failed: %s", workloadID, observability.RedactLogValue(err))
 					jsonError(w, r, http.StatusInternalServerError, "internal_error", "storage flush barrier failed")
@@ -1422,6 +1422,35 @@ func (h *Handler) releaseWorkloadMount(ctx context.Context, r *http.Request, pod
 		return err
 	}
 	return nil
+}
+
+func shouldFlushWorkloadStorage(pod *v1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if pod.Status.Phase != "" && pod.Status.Phase != v1.PodPending {
+		return true
+	}
+	return mainContainerHasStarted(pod)
+}
+
+func mainContainerHasStarted(pod *v1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != "main" {
+			continue
+		}
+		if status.State.Running != nil || status.State.Terminated != nil {
+			return true
+		}
+		if status.LastTerminationState.Running != nil || status.LastTerminationState.Terminated != nil {
+			return true
+		}
+		return status.Started != nil && *status.Started
+	}
+	return false
 }
 
 func (h *Handler) flushWorkloadStorage(ctx context.Context, pod *v1.Pod) error {

@@ -1487,6 +1487,32 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
 }
 
+func TestHandleDeletePod_PendingPodWithoutStartedMainSkipsFlushAndReleases(t *testing.T) {
+	events := &eventRecorder{}
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := &fakeStorageFlushBarrier{events: events, err: errors.New("pending pod cannot exec")}
+	podName := defaultScopedPodName("wl-1")
+	pod := defaultScopedPod("wl-1")
+	pod.Status = v1.PodStatus{Phase: v1.PodPending}
+	reg := newPodRegistry(pod)
+	reg.events = events
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, flush.podName, "pod that never started cannot have runtime writes to flush")
+	assert.Equal(t, "wmb_demo", lifecycle.releaseMountBindingID)
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+
+	reg.mu.Lock()
+	assert.Nil(t, reg.pods[podName], "pending pod should not be retained after delete convergence")
+	reg.mu.Unlock()
+}
+
 func TestHandleDeletePod_ReleaseDoneFactFlushesBeforeDeletingPod(t *testing.T) {
 	events := &eventRecorder{}
 	facts := workloadfacts.NewMemoryStore()
