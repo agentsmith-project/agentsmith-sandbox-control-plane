@@ -6,6 +6,8 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.17] - 2026-06-06
+
 ### Fixed
 
 - Workload DELETE now skips the storage flush barrier for Pending Pods whose main container never started, allowing retryable release/delete convergence instead of retaining no-writer Pods until they consume local-kind capacity.

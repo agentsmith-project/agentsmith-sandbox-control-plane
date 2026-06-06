@@ -1196,15 +1196,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionMetadataPreparesV216AndKeepsPublishedSectionsImmutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV217AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.16" {
-		t.Fatalf("VERSION must be bumped to 2.0.16 for the workload PVC visibility readiness release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.17" {
+		t.Fatalf("VERSION must be bumped to 2.0.17 for the pending Pod delete convergence release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1213,17 +1213,40 @@ func TestReleaseVersionMetadataPreparesV216AndKeepsPublishedSectionsImmutable(t 
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	for _, token := range []string{"temporarily invisible workspace PVCs", "`Retry-After`", "RBAC/generic PVC get errors"} {
+	for _, token := range []string{"Pending Pods", "storage flush barrier", "no-writer Pods"} {
 		if strings.Contains(unreleased, token) {
-			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.16", token)
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.17", token)
+		}
+	}
+
+	section217 := changelogSection(changelog, "v2.0.17")
+	if section217 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.17 release section for the pending Pod delete convergence release")
+	}
+	var violations []string
+	required217 := []string{
+		"Workload DELETE",
+		"storage flush barrier",
+		"Pending Pods",
+		"main container never started",
+		"retryable release/delete convergence",
+		"no-writer Pods",
+	}
+	for _, token := range required217 {
+		if !strings.Contains(section217, token) {
+			violations = append(violations, "v2.0.17 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-"} {
+		if strings.Contains(section217, token) {
+			violations = append(violations, "v2.0.17 changelog must not introduce "+token)
 		}
 	}
 
 	section216 := changelogSection(changelog, "v2.0.16")
 	if section216 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.16 release section for the workload PVC visibility readiness release")
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.16 section")
 	}
-	var violations []string
 	required216 := []string{
 		"Workload create",
 		"temporarily invisible workspace PVCs",
@@ -1325,13 +1348,13 @@ func TestReleaseVersionMetadataPreparesV216AndKeepsPublishedSectionsImmutable(t 
 	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
 		t.Fatalf("parse release evidence manifest: %v", err)
 	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.16" {
-		violations = append(violations, "release manifest target_version must be v2.0.16")
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.17" {
+		violations = append(violations, "release manifest target_version must be v2.0.17")
 	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.15" {
-		violations = append(violations, "release manifest must record v2.0.15 as superseded published version")
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.16" {
+		violations = append(violations, "release manifest must record v2.0.16 as superseded published version")
 	}
-	for _, token := range []string{"Workload create", "temporarily invisible workspace PVCs", "NotFound", "retryable 503 not_ready", "Retry-After", "RBAC/generic PVC get errors", "fail fast"} {
+	for _, token := range []string{"Workload DELETE", "storage flush barrier", "Pending Pods", "main container never started", "retryable release/delete convergence", "no-writer Pods"} {
 		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary missing "+token)
 		}
@@ -1348,12 +1371,12 @@ func TestReleaseVersionMetadataPreparesV216AndKeepsPublishedSectionsImmutable(t 
 	}
 	readiness := string(readinessBytes)
 	for _, token := range []string{
-		"Current release-prep target: `v2.0.16`.",
-		"temporarily invisible workspace PVCs",
-		"`NotFound`",
-		"retryable `503 not_ready`",
-		"`Retry-After`",
-		"supersedes `v2.0.15`",
+		"Current release-prep target: `v2.0.17`.",
+		"Pending Pods",
+		"main container never started",
+		"storage flush barrier",
+		"no-writer Pods",
+		"supersedes `v2.0.16`",
 	} {
 		if !strings.Contains(readiness, token) {
 			violations = append(violations, "readiness evidence missing "+token)

@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.16",
+    "target_version": "v2.0.17",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.15",
-    "summary": "Workload create now treats temporarily invisible workspace PVCs (NotFound) as retryable 503 not_ready readiness with Retry-After, while RBAC/generic PVC get errors still fail fast."
+    "supersedes_published_version": "v2.0.16",
+    "summary": "Workload DELETE now skips the storage flush barrier for Pending Pods whose main container never started, allowing retryable release/delete convergence for no-writer Pods."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

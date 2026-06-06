@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current release-prep target: `v2.0.16`. This release candidate treats temporarily invisible workspace PVCs (`NotFound`) during workload create as retryable `503 not_ready` readiness with `Retry-After`, while RBAC/generic PVC get errors still fail fast. It supersedes `v2.0.15` and keeps the earlier JuiceFS CSI cache-disabling workspace binding behavior from `v2.0.9`.
+Current release-prep target: `v2.0.17`. This release candidate lets workload DELETE converge for Pending Pods whose main container never started by skipping the storage flush barrier for no-writer Pods. It supersedes `v2.0.16` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.16`.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |
