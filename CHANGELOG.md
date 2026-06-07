@@ -6,6 +6,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.18] - 2026-06-06
+
+### Fixed
+
+- Workload DELETE now serializes concurrent release/delete convergence for the same workload and uses a stable terminal status `observed_at` plus workload/mount scoped idempotency key, preventing repeated request IDs from producing AFSCP `IDEMPOTENCY_CONFLICT` during release/status retries.
+
 ## [v2.0.17] - 2026-06-06
 
 ### Fixed

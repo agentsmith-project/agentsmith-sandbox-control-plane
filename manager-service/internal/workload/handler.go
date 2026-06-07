@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsmith-project/agentsmith-sandbox-control-plane/internal/afscp"
@@ -65,6 +66,18 @@ type Handler struct {
 	k8sClient *k8s.Client
 	executor  *k8s.Executor
 	options   Options
+
+	deleteLocks workloadDeleteLocks
+}
+
+type workloadDeleteLocks struct {
+	mu    sync.Mutex
+	locks map[string]*workloadDeleteLock
+}
+
+type workloadDeleteLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type Options struct {
@@ -99,6 +112,36 @@ func newWorkloadScope(workspaceID, projectID, workloadID string) workloadScope {
 		ProjectID:   strings.TrimSpace(projectID),
 		WorkloadID:  strings.TrimSpace(workloadID),
 	}
+}
+
+func (l *workloadDeleteLocks) lock(scope workloadScope) func() {
+	key := scope.lockKey()
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*workloadDeleteLock)
+	}
+	entry := l.locks[key]
+	if entry == nil {
+		entry = &workloadDeleteLock{}
+		l.locks[key] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.locks, key)
+		}
+	}
+}
+
+func (s workloadScope) lockKey() string {
+	return strings.Join([]string{s.WorkspaceID, s.ProjectID, s.WorkloadID}, "\x00")
 }
 
 func (s workloadScope) podName() string {
@@ -363,6 +406,9 @@ func decodeCreateRequest(r *http.Request, req *CreateRequest) error {
 func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, workspaceID, projectID, workloadID string) {
 	ctx := r.Context()
 	scope := newWorkloadScope(workspaceID, projectID, workloadID)
+	unlockDelete := h.deleteLocks.lock(scope)
+	defer unlockDelete()
+
 	podName := scope.podName()
 	store := h.workloadFactStore()
 
@@ -421,6 +467,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact initialization failed")
 			return
 		}
+		ensureWorkloadFactTimestamp(&fact)
 		if err := store.Save(ctx, fact); err != nil {
 			log.Printf("workload/%s: workload fact write failed: %s", workloadID, observability.RedactLogValue(err))
 			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
@@ -1387,7 +1434,7 @@ func (h *Handler) markWorkloadMountReleasedFromFact(ctx context.Context, r *http
 		return fmt.Errorf("workload terminal fact is missing AFSCP mount ref")
 	}
 	correlationID := requestCorrelationID(r)
-	_, err := h.options.AFSCPClient.UpdateWorkloadMountStatus(ctx, ref.namespaceID, ref.mountBindingID, "released", "workload pod deleted", time.Now().UTC(), correlationID, factLifecycleIdempotencyKey("status-released", fact))
+	_, err := h.options.AFSCPClient.UpdateWorkloadMountStatus(ctx, ref.namespaceID, ref.mountBindingID, "released", "workload pod deleted", factLifecycleObservedAt(fact), correlationID, factLifecycleIdempotencyKey("status-released", fact))
 	return err
 }
 
@@ -1585,7 +1632,20 @@ func podLifecycleIdempotencyKey(action string, pod *v1.Pod) string {
 }
 
 func factLifecycleIdempotencyKey(action string, fact workloadfacts.Fact) string {
-	return sanitizeIdempotencyKey("workload", action, fact.PodName, fact.PodUID)
+	return sanitizeIdempotencyKey("workload", action, fact.WorkspaceID, fact.ProjectID, fact.WorkloadID, fact.MountBindingID, fact.PodName, fact.PodUID)
+}
+
+func ensureWorkloadFactTimestamp(fact *workloadfacts.Fact) {
+	if fact != nil && fact.UpdatedAt.IsZero() {
+		fact.UpdatedAt = time.Now().UTC()
+	}
+}
+
+func factLifecycleObservedAt(fact workloadfacts.Fact) time.Time {
+	if !fact.UpdatedAt.IsZero() {
+		return fact.UpdatedAt.UTC()
+	}
+	return time.Unix(0, 0).UTC()
 }
 
 func logWorkloadMountDependencyFailure(r *http.Request, message string, err error, workspaceID, projectID, workloadID string, pod *v1.Pod) {

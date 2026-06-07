@@ -151,6 +151,7 @@ DELETE /v1/workspaces/{workspace_id}/projects/{project_id}/workloads/{workload_i
 
 ASBCP calls AFSCP release with a stable idempotency key before deleting the Pod. If release or deletion fails, the same workload delete should be retryable.
 If a Pod is still Pending and its main container never started, ASBCP may skip the storage flush barrier because no workload writer existed; the delete still closes AFSCP release and terminal status through the same retryable lifecycle.
+ASBCP serializes concurrent DELETE requests for the same workload and sends terminal released status with a stable `observed_at` and workload/mount scoped idempotency key, so repeated request IDs observe the same release/status convergence instead of creating AFSCP idempotency conflicts.
 
 Deleting a workspace binding removes ASBCP-managed binding resources:
 

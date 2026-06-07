@@ -104,6 +104,7 @@ type fakeMountLifecycleClient struct {
 	statusMountBindingID    string
 	statusValue             string
 	statusReason            string
+	statusObservedAt        time.Time
 	statusCorrelationID     string
 	statusIdempotencyKey    string
 	statusErr               error
@@ -123,6 +124,46 @@ func (f *fakeStorageFlushBarrier) FlushWorkloadMount(_ context.Context, pod *v1.
 	f.mountPath = mountPath
 	f.events.append("flush-" + f.podName + ":" + mountPath)
 	return f.err
+}
+
+type blockingStorageFlushBarrier struct {
+	events        *eventRecorder
+	started       chan struct{}
+	allowReturn   chan struct{}
+	overlap       chan struct{}
+	mu            sync.Mutex
+	callCount     int
+	closedStarted bool
+	closedOverlap bool
+}
+
+func newBlockingStorageFlushBarrier(events *eventRecorder) *blockingStorageFlushBarrier {
+	return &blockingStorageFlushBarrier{
+		events:      events,
+		started:     make(chan struct{}),
+		allowReturn: make(chan struct{}),
+		overlap:     make(chan struct{}),
+	}
+}
+
+func (b *blockingStorageFlushBarrier) FlushWorkloadMount(_ context.Context, pod *v1.Pod, mountPath string) error {
+	podName := ""
+	if pod != nil {
+		podName = pod.Name
+	}
+	b.events.append("flush-" + podName + ":" + mountPath)
+	b.mu.Lock()
+	b.callCount++
+	if b.callCount == 1 && !b.closedStarted {
+		close(b.started)
+		b.closedStarted = true
+	} else if b.callCount > 1 && !b.closedOverlap {
+		close(b.overlap)
+		b.closedOverlap = true
+	}
+	b.mu.Unlock()
+	<-b.allowReturn
+	return nil
 }
 
 type noopStorageFlushBarrier struct{}
@@ -211,12 +252,13 @@ func (f *fakeMountLifecycleClient) ReleaseWorkloadMountBinding(_ context.Context
 	return afscp.OperationEnvelope{OperationID: "op_release", OperationState: "queued"}, nil
 }
 
-func (f *fakeMountLifecycleClient) UpdateWorkloadMountStatus(_ context.Context, namespaceID, mountBindingID, status, reason string, _ time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
+func (f *fakeMountLifecycleClient) UpdateWorkloadMountStatus(_ context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
 	f.events.append("status-" + status)
 	f.statusNamespaceID = namespaceID
 	f.statusMountBindingID = mountBindingID
 	f.statusValue = status
 	f.statusReason = reason
+	f.statusObservedAt = observedAt
 	f.statusCorrelationID = correlationID
 	f.statusIdempotencyKey = idempotencyKey
 	if f.statusErr != nil {
@@ -1487,6 +1529,51 @@ func TestHandleDeletePodFlushesAFSCPMountBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
 }
 
+func TestHandleDeletePod_SerializesConcurrentDeletesForSameWorkload(t *testing.T) {
+	events := &eventRecorder{}
+	lifecycle := &fakeMountLifecycleClient{events: events}
+	flush := newBlockingStorageFlushBarrier(events)
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	type result struct {
+		code int
+		body string
+	}
+	results := make(chan result, 2)
+	runDelete := func(correlationID string) {
+		req := httptest.NewRequest(http.MethodDelete, "/", nil)
+		req.Header.Set("X-Correlation-Id", correlationID)
+		rec := httptest.NewRecorder()
+		h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+		results <- result{code: rec.Code, body: rec.Body.String()}
+	}
+
+	go runDelete("corr-delete-1")
+	select {
+	case <-flush.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first delete to enter storage flush")
+	}
+
+	go runDelete("corr-delete-2")
+	overlapped := false
+	select {
+	case <-flush.overlap:
+		overlapped = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(flush.allowReturn)
+
+	first := <-results
+	second := <-results
+	require.False(t, overlapped, "same workload delete must not overlap release/flush convergence")
+	require.Equal(t, http.StatusOK, first.code, first.body)
+	require.Equal(t, http.StatusOK, second.code, second.body)
+	assert.Equal(t, []string{"flush-" + defaultScopedPodName("wl-1") + ":/home/task-plan", "release", "delete-pod", "confirm-pod-gone", "status-released", "confirm-pod-gone"}, events.snapshot())
+}
+
 func TestHandleDeletePod_PendingPodWithoutStartedMainSkipsFlushAndReleases(t *testing.T) {
 	events := &eventRecorder{}
 	lifecycle := &fakeMountLifecycleClient{events: events}
@@ -1775,6 +1862,56 @@ func TestDeleteWorkload_StatusFailureThenRetryContinuesTerminalMarkFromDurableFa
 	require.NoError(t, err)
 	assert.True(t, secondFact.Terminal())
 	assert.Equal(t, []string{"status-released"}, events.snapshot(), "retry must resume from durable facts instead of re-releasing or re-deleting")
+}
+
+func TestDeleteWorkload_StatusRetryUsesStableObservedAtAndIdempotencyKey(t *testing.T) {
+	events := &eventRecorder{}
+	facts := workloadfacts.NewMemoryStore()
+	observedAt := time.Date(2026, 6, 6, 23, 59, 29, 0, time.UTC)
+	require.NoError(t, facts.Save(context.Background(), workloadfacts.Fact{
+		WorkspaceID:        "ws-1",
+		ProjectID:          "proj-1",
+		WorkloadID:         "wl-1",
+		NamespaceID:        "ns_demo",
+		MountBindingID:     "wmb_demo",
+		PodName:            defaultScopedPodName("wl-1"),
+		PodUID:             "uid-1",
+		ReleaseDone:        true,
+		PodDeleted:         true,
+		TerminalStatusDone: false,
+		WorkspaceBindingID: "wmb_demo",
+		UpdatedAt:          observedAt,
+	}))
+	lifecycle := &fakeMountLifecycleClient{events: events, statusErr: errors.New("status failed")}
+	h := newHandlerWithRegistryAndOptions(t, newPodRegistry(), Options{
+		AFSCPClient:       lifecycle,
+		WorkloadFactStore: facts,
+	})
+
+	firstReq := httptest.NewRequest(http.MethodDelete, "/", nil)
+	firstReq.Header.Set("X-Correlation-Id", "corr-delete-1")
+	firstRec := httptest.NewRecorder()
+	h.handleDeletePod(firstRec, firstReq, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusBadGateway, firstRec.Code)
+	firstKey := lifecycle.statusIdempotencyKey
+	firstObservedAt := lifecycle.statusObservedAt
+	require.Equal(t, observedAt, firstObservedAt)
+	assert.Contains(t, firstKey, "ws-1")
+	assert.Contains(t, firstKey, "proj-1")
+	assert.Contains(t, firstKey, "wl-1")
+	assert.Contains(t, firstKey, "wmb_demo")
+	assert.Contains(t, firstKey, "uid-1")
+
+	lifecycle.statusErr = nil
+	secondReq := httptest.NewRequest(http.MethodDelete, "/", nil)
+	secondReq.Header.Set("X-Correlation-Id", "corr-delete-2")
+	secondRec := httptest.NewRecorder()
+	h.handleDeletePod(secondRec, secondReq, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusOK, secondRec.Code, secondRec.Body.String())
+	assert.Equal(t, firstKey, lifecycle.statusIdempotencyKey)
+	assert.Equal(t, firstObservedAt, lifecycle.statusObservedAt)
 }
 
 func TestDeleteWorkload_PodNotFoundWithoutTerminalFactFailsClosed(t *testing.T) {
