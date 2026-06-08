@@ -6,6 +6,12 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.19] - 2026-06-08
+
+### Fixed
+
+- Workload create now verifies PV scheduler-visible `Bound`/`claimRef` state before Pod creation, and workload status exposes sanitized `readiness_reason`/`retry_after` for PVC or scheduling pending so consumers keep typed pending instead of generic startup timeout.
+
 ## [v2.0.18] - 2026-06-06
 
 ### Fixed

@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TestHTTPStack_HealthAndV1WithAuth runs against an in-process HTTP server
@@ -327,6 +328,7 @@ func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolu
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
 			Namespace: "test-ns",
+			UID:       types.UID("uid-" + bindingID),
 			Annotations: map[string]string{
 				"mbos.io/afscp-namespace-id":          "ns_demo",
 				"mbos.io/afscp-mount-binding-id":      bindingID,
@@ -354,6 +356,12 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 			Name: testBindingPVName(workspaceID, projectID, bindingID),
 		},
 		Spec: v1.PersistentVolumeSpec{
+			ClaimRef: &v1.ObjectReference{
+				Kind:      "PersistentVolumeClaim",
+				Namespace: "test-ns",
+				Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
+				UID:       types.UID("uid-" + bindingID),
+			},
 			MountOptions: []string{"subdir=afscp/ns_demo/repos/repo_demo/payload"},
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
@@ -362,6 +370,7 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 				},
 			},
 		},
+		Status: v1.PersistentVolumeStatus{Phase: v1.VolumeBound},
 	}
 }
 

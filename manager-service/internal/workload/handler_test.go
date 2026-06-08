@@ -22,6 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -116,6 +117,7 @@ func testBindingPVC(workspaceID, projectID, bindingID string) *v1.PersistentVolu
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
 			Namespace: "test-ns",
+			UID:       types.UID("uid-" + bindingID),
 			Annotations: map[string]string{
 				"mbos.io/afscp-namespace-id":          "ns_demo",
 				"mbos.io/afscp-mount-binding-id":      bindingID,
@@ -152,6 +154,12 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 			},
 		},
 		Spec: v1.PersistentVolumeSpec{
+			ClaimRef: &v1.ObjectReference{
+				Kind:      "PersistentVolumeClaim",
+				Namespace: "test-ns",
+				Name:      workspacebinding.PVCName(workspaceID, projectID, bindingID),
+				UID:       types.UID("uid-" + bindingID),
+			},
 			MountOptions: []string{"subdir=afscp/ns_demo/repos/repo_demo/payload"},
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
@@ -162,6 +170,7 @@ func testBindingPV(workspaceID, projectID, bindingID string) *v1.PersistentVolum
 				},
 			},
 		},
+		Status: v1.PersistentVolumeStatus{Phase: v1.VolumeBound},
 	}
 }
 
@@ -1535,16 +1544,19 @@ func TestMaxExecTimeoutConstant(t *testing.T) {
 
 func TestPodStatus_JSONFieldNames(t *testing.T) {
 	ps := PodStatus{
-		PodName:        "workload-abc",
-		Phase:          "Running",
-		IP:             "10.0.0.1",
-		Image:          "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
-		ImageRef:       "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
-		ImageID:        "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123",
-		StartedAt:      "2025-01-01T00:00:00Z",
-		LastActivityAt: "2025-01-01T01:00:00Z",
-		ExpiresAt:      "2025-01-02T00:00:00Z",
-		Message:        "ok",
+		PodName:          "workload-abc",
+		Phase:            "Running",
+		ReadinessReason:  "workspace_pvc_unbound",
+		ReadinessMessage: "pod is waiting for workspace PVC binding before scheduling",
+		RetryAfter:       "1",
+		IP:               "10.0.0.1",
+		Image:            "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageRef:         "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123",
+		ImageID:          "ghcr.io/agentsmith-project/agentsmith-runner@sha256:abc123",
+		StartedAt:        "2025-01-01T00:00:00Z",
+		LastActivityAt:   "2025-01-01T01:00:00Z",
+		ExpiresAt:        "2025-01-02T00:00:00Z",
+		Message:          "ok",
 	}
 	b, err := json.Marshal(ps)
 	require.NoError(t, err)
@@ -1554,6 +1566,9 @@ func TestPodStatus_JSONFieldNames(t *testing.T) {
 
 	assert.Equal(t, "workload-abc", raw["pod_name"])
 	assert.Equal(t, "Running", raw["phase"])
+	assert.Equal(t, "workspace_pvc_unbound", raw["readiness_reason"])
+	assert.Equal(t, "pod is waiting for workspace PVC binding before scheduling", raw["readiness_message"])
+	assert.Equal(t, "1", raw["retry_after"])
 	assert.Equal(t, "10.0.0.1", raw["ip"])
 	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", raw["image"])
 	assert.Equal(t, "ghcr.io/agentsmith-project/agentsmith-runner:release@sha256:abc123", raw["image_ref"])
@@ -1659,7 +1674,7 @@ func TestPodStatus_OmitsZeroValues(t *testing.T) {
 	require.NoError(t, json.Unmarshal(b, &raw))
 
 	assert.Equal(t, "offline", raw["phase"])
-	for _, key := range []string{"pod_name", "ip", "image", "image_ref", "image_id", "started_at", "last_activity_at", "expires_at", "message"} {
+	for _, key := range []string{"pod_name", "readiness_reason", "readiness_message", "retry_after", "ip", "image", "image_ref", "image_id", "started_at", "last_activity_at", "expires_at", "message"} {
 		_, ok := raw[key]
 		assert.False(t, ok, "zero-value field %q must be omitted from JSON", key)
 	}

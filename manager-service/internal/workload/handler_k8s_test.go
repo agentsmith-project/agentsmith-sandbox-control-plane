@@ -891,6 +891,30 @@ func TestHandleCreatePod_RejectsUnboundPVCBeforeCreate(t *testing.T) {
 	assert.Empty(t, reg.pods, "unbound PVC must fail before pod creation")
 }
 
+func TestHandleCreatePod_RejectsUnboundPVBeforeCreate(t *testing.T) {
+	pv := testBindingPV("ws-1", "proj-1", "wmb_demo")
+	pv.Status.Phase = v1.VolumePending
+	reg := newPodRegistry()
+	reg.bindingPV = pv
+	h := newHandlerWithRegistry(t, reg)
+
+	payload, _ := json.Marshal(validCreateRequestK8s(CreateRequest{Image: "ubuntu:22.04"}))
+	req := httptest.NewRequestWithContext(shortCtx(t), http.MethodPut, "/", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	h.handleCreatePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	body := decodeError(t, rec)
+	assert.Equal(t, "not_ready", body.Error.Code)
+	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
+	assert.Contains(t, body.Error.Message, "persistent volume")
+	assert.Contains(t, body.Error.Message, "not Bound")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Empty(t, reg.pods, "unbound PV must fail before pod creation")
+}
+
 func TestHandleCreatePod_RejectsStaleBindingBeforeCreate(t *testing.T) {
 	reg := newPodRegistry()
 	stalePlan := validAFSCPMountPlan("wmb_demo")
@@ -1424,6 +1448,38 @@ func TestHandleGetPod_PendingPod(t *testing.T) {
 	var got PodStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
 	assert.Equal(t, "Pending", got.Phase)
+}
+
+func TestHandleGetPod_PendingUnboundPVCExposesTypedReadiness(t *testing.T) {
+	pod := workloadPodWithScope(defaultScopedPodName("wl-pvc"), "ws-1", "proj-1", "wl-pvc")
+	pod.CreationTimestamp = metav1.Now()
+	pod.Status = v1.PodStatus{
+		Phase: v1.PodPending,
+		Conditions: []v1.PodCondition{
+			{
+				Type:    v1.PodScheduled,
+				Status:  v1.ConditionFalse,
+				Reason:  "Unschedulable",
+				Message: "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims",
+			},
+		},
+	}
+	h := newHandlerWithRegistry(t, newPodRegistry(pod))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-pvc")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var got PodStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "pending", got.Status)
+	assert.Equal(t, "Pending", got.Phase)
+	assert.Equal(t, "workspace_pvc_unbound", got.ReadinessReason)
+	assert.Equal(t, "pod is waiting for workspace PVC binding before scheduling", got.ReadinessMessage)
+	assert.Equal(t, workspaceMountRetryAfter, got.RetryAfter)
+	assert.NotContains(t, got.ReadinessMessage, "0/1 nodes", "status must not expose raw Kubernetes scheduling messages")
+	assert.NotContains(t, got.ReadinessMessage, "PersistentVolumeClaims", "status must not expose raw Kubernetes scheduling messages")
 }
 
 func TestHandleGetPod_AnnotationsPopulatedInResponse(t *testing.T) {

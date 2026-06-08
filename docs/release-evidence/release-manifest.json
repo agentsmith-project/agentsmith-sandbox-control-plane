@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.18",
+    "target_version": "v2.0.19",
     "status": "pre-tag release prep; no git tag or push performed",
-    "supersedes_published_version": "v2.0.17",
-    "summary": "Workload DELETE now serializes same-workload release/status convergence and uses stable terminal status observed_at plus workload/mount scoped idempotency keys, preventing repeated request IDs from producing AFSCP IDEMPOTENCY_CONFLICT during runtime release retries."
+    "supersedes_published_version": "v2.0.18",
+    "summary": "Workload create verifies scheduler-visible PV Bound/claimRef state before Pod creation, and workload status exposes sanitized readiness_reason/retry_after for PVC or scheduling pending so consumers keep typed readiness pending instead of generic startup timeout."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

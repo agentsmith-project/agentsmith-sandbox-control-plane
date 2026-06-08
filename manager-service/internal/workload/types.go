@@ -39,19 +39,22 @@ type ExecResponse struct {
 
 // PodStatus is the response for GET .../workloads/{id}.
 type PodStatus struct {
-	WorkloadID     string `json:"workload_id,omitempty"`
-	PodName        string `json:"pod_name,omitempty"`
-	Status         string `json:"status,omitempty"`
-	Phase          string `json:"phase"`
-	IP             string `json:"ip,omitempty"`
-	Image          string `json:"image,omitempty"`
-	ImageRef       string `json:"image_ref,omitempty"`
-	ImageID        string `json:"image_id,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	LastActivityAt string `json:"last_activity_at,omitempty"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	CorrelationID  string `json:"correlation_id,omitempty"`
-	Message        string `json:"message,omitempty"`
+	WorkloadID       string `json:"workload_id,omitempty"`
+	PodName          string `json:"pod_name,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Phase            string `json:"phase"`
+	ReadinessReason  string `json:"readiness_reason,omitempty"`
+	ReadinessMessage string `json:"readiness_message,omitempty"`
+	RetryAfter       string `json:"retry_after,omitempty"`
+	IP               string `json:"ip,omitempty"`
+	Image            string `json:"image,omitempty"`
+	ImageRef         string `json:"image_ref,omitempty"`
+	ImageID          string `json:"image_id,omitempty"`
+	StartedAt        string `json:"started_at,omitempty"`
+	LastActivityAt   string `json:"last_activity_at,omitempty"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	CorrelationID    string `json:"correlation_id,omitempty"`
+	Message          string `json:"message,omitempty"`
 }
 
 // DeleteResponse is the response for DELETE .../workloads/{id}.

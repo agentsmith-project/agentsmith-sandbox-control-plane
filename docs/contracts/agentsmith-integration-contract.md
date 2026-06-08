@@ -107,6 +107,7 @@ Expected behavior:
 - Caller-provided mount path, sub path, working directory, storage backend settings, and storage auth material are rejected.
 - Unavailable or changed plans fail closed.
 - If the workspace binding PVC is not yet `Bound`, workload create fails with retryable `503` code `not_ready`; AgentSmith should retry binding ensure before retrying workload create.
+- Workload status may include optional `readiness_reason`, `readiness_message`, and `retry_after` fields while `status=pending`. `readiness_reason=workspace_pvc_unbound` means Kubernetes has not yet scheduled the Pod because the workspace PVC is not scheduler-visible as bound; `pod_unschedulable` means Kubernetes scheduling has not converged for another sanitized reason. AgentSmith should keep these as typed runtime readiness pending and recheck instead of converting them to terminal sandbox startup failure.
 - Pod identity is scope-qualified by `{workspace_id, project_id, workload_id}`. All status, keepalive, exec, release, and delete paths validate Pod annotations and labels against the URL scope before operating on the Pod.
 - Workload status returns `image`/`image_ref` from the main container spec image and returns `image_id` only from the main container Kubernetes `ImageID` when status exposes it; `containerStatuses[].image` is not live image identity.
 
@@ -136,6 +137,8 @@ diagnostic summary, and Kubernetes pod/status/event evidence. The ASBCP side of
 that handoff is sanitized API/log/status data: operation, request id, workload
 id or binding id, phase/status when known, HTTP status, stable ASBCP error
 code, and `Retry-After` for retryable readiness gaps.
+For workload status responses, the same retryable readiness gap may be exposed
+as body field `retry_after` together with a stable `readiness_reason`.
 
 This section only defines consumer diagnostics correlation. It does not make
 AgentSmith backend-real gates, runtime flake classification, or Product

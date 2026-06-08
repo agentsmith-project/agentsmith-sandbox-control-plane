@@ -347,7 +347,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 					jsonError(w, r, http.StatusInternalServerError, "internal_error", "workload terminal fact write failed")
 					return
 				}
-				jsonResponse(w, http.StatusOK, PodStatus{
+				status := PodStatus{
 					WorkloadID:    workloadID,
 					PodName:       existingPod.Name,
 					Status:        workloadStatusForPod(existingPod),
@@ -359,7 +359,9 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 					StartedAt:     existingPod.CreationTimestamp.Format(time.RFC3339),
 					CorrelationID: requestCorrelationID(r),
 					Message:       "pod already exists",
-				})
+				}
+				applyPodReadiness(&status, existingPod)
+				jsonResponse(w, http.StatusOK, status)
 				return
 			}
 			if stderrors.Is(getErr, errWorkloadScopeMismatch) {
@@ -392,6 +394,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		ExpiresAt:     expiresAt.Format(time.RFC3339),
 		CorrelationID: requestCorrelationID(r),
 	}
+	applyPodReadiness(&status, createdPod)
 
 	observability.GetMetrics().RecordWorkloadCreate()
 	jsonResponse(w, http.StatusCreated, status)
@@ -599,6 +602,7 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workspace
 	if v, ok := pod.Annotations["expires_at"]; ok {
 		status.ExpiresAt = v
 	}
+	applyPodReadiness(&status, pod)
 
 	jsonResponse(w, http.StatusOK, status)
 }
@@ -984,8 +988,9 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 	}
 	if err := workspacebinding.RequirePVCBound(pvc); err != nil {
 		return workspacebinding.ResolvedMount{}, responseStatusError{
-			status:  http.StatusServiceUnavailable,
-			message: "workspace binding is not ready: " + err.Error() + "; retry after workspace binding is Bound",
+			status:     http.StatusServiceUnavailable,
+			message:    "workspace binding is not ready: " + err.Error() + "; retry after workspace binding is Bound",
+			retryAfter: workspaceMountRetryAfter,
 		}
 	}
 	mount, err := workspacebinding.ResolvedMountFromPVC(pvc)
@@ -1008,6 +1013,9 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 			status:  http.StatusConflict,
 			message: "workspace binding is stale: persistent volume is not ready; re-ensure workspace binding",
 		}
+	}
+	if statusErr, ok := persistentVolumeSchedulerVisibilityError(pv, pvc); ok {
+		return workspacebinding.ResolvedMount{}, statusErr
 	}
 	if err := ensurePersistentVolumeMatchesResolvedMount(pv, mount); err != nil {
 		return workspacebinding.ResolvedMount{}, responseStatusError{
@@ -1050,6 +1058,48 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 		}
 	}
 	return mount, nil
+}
+
+func persistentVolumeSchedulerVisibilityError(pv *v1.PersistentVolume, pvc *v1.PersistentVolumeClaim) (responseStatusError, bool) {
+	if pv == nil || pvc == nil {
+		return responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: persistent volume binding objects are missing; re-ensure workspace binding",
+		}, true
+	}
+	if pv.Status.Phase != v1.VolumeBound {
+		phase := string(pv.Status.Phase)
+		if phase == "" {
+			phase = "unknown"
+		}
+		return responseStatusError{
+			status:     http.StatusServiceUnavailable,
+			message:    fmt.Sprintf("workspace binding is not ready: persistent volume %q is %s, not Bound; retry after workspace binding is Bound", pv.GetName(), phase),
+			retryAfter: workspaceMountRetryAfter,
+		}, true
+	}
+	claimRef := pv.Spec.ClaimRef
+	if claimRef == nil {
+		return responseStatusError{
+			status:     http.StatusServiceUnavailable,
+			message:    fmt.Sprintf("workspace binding is not ready: persistent volume %q has no claimRef; retry after workspace binding is Bound", pv.GetName()),
+			retryAfter: workspaceMountRetryAfter,
+		}, true
+	}
+	if strings.TrimSpace(claimRef.Namespace) != strings.TrimSpace(pvc.GetNamespace()) ||
+		strings.TrimSpace(claimRef.Name) != strings.TrimSpace(pvc.GetName()) {
+		return responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: persistent volume claimRef changed; re-ensure workspace binding",
+		}, true
+	}
+	if pvc.GetUID() != "" && claimRef.UID != "" && claimRef.UID != pvc.GetUID() {
+		return responseStatusError{
+			status:  http.StatusConflict,
+			message: "workspace binding is stale: persistent volume claimRef UID changed; re-ensure workspace binding",
+		}, true
+	}
+	return responseStatusError{}, false
 }
 
 func ensureResolvedMountMatchesPlan(mount workspacebinding.ResolvedMount, plan afscp.OrchestratorMountPlan) error {
@@ -1754,6 +1804,49 @@ func workloadStatusForPod(pod *v1.Pod) string {
 		return "offline"
 	default:
 		return "pending"
+	}
+}
+
+func applyPodReadiness(status *PodStatus, pod *v1.Pod) {
+	if status == nil || pod == nil {
+		return
+	}
+	reason, message, retryAfter := podReadinessDetail(pod)
+	status.ReadinessReason = reason
+	status.ReadinessMessage = message
+	status.RetryAfter = retryAfter
+}
+
+func podReadinessDetail(pod *v1.Pod) (reason, message, retryAfter string) {
+	if pod == nil || podTerminalOrRunning(pod) {
+		return "", "", ""
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type != v1.PodScheduled || condition.Status != v1.ConditionFalse {
+			continue
+		}
+		conditionReason := strings.TrimSpace(condition.Reason)
+		conditionMessage := strings.ToLower(condition.Message)
+		if strings.EqualFold(conditionReason, "Unschedulable") &&
+			strings.Contains(conditionMessage, "unbound immediate persistentvolumeclaims") {
+			return "workspace_pvc_unbound", "pod is waiting for workspace PVC binding before scheduling", workspaceMountRetryAfter
+		}
+		if strings.EqualFold(conditionReason, "Unschedulable") {
+			return "pod_unschedulable", "pod is waiting for Kubernetes scheduling", workspaceMountRetryAfter
+		}
+	}
+	return "", "", ""
+}
+
+func podTerminalOrRunning(pod *v1.Pod) bool {
+	if pod == nil {
+		return true
+	}
+	switch pod.Status.Phase {
+	case v1.PodRunning, v1.PodFailed, v1.PodSucceeded:
+		return true
+	default:
+		return false
 	}
 }
 

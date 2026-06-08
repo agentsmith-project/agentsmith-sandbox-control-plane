@@ -55,6 +55,13 @@ The envelope must include a stable machine-readable `code`, a human-readable `me
 | --- | --- |
 | `not_ready` | Retryable readiness gap. This can mean ASBCP service readiness, or for workspace binding ensure/get and workload create, that the binding PVC is still Pending/unbound after ASBCP created or reused PV/PVC objects. `Retry-After` may be present. |
 
+Workload `GET` status responses may expose retryable Pending convergence in
+body fields instead of an error response. `readiness_reason=workspace_pvc_unbound`
+means Kubernetes has not yet scheduled the workload because the workspace PVC is
+not scheduler-visible as bound; `pod_unschedulable` means scheduling has not
+converged for another sanitized reason. Consumers should keep typed readiness
+pending and recheck.
+
 ## Operational Logging
 
 Logs should include ASBCP request identifiers and workload identifiers, but must not include secrets, tokens, raw storage credentials, or full command output unless explicitly safe.

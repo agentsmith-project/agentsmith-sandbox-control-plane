@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current release-prep target: `v2.0.18`. This release candidate keeps the `v2.0.17` Pending Pod storage flush convergence and additionally serializes same-workload DELETE release/status convergence with stable terminal status `observed_at` and workload/mount scoped idempotency keys. It supersedes `v2.0.17` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.17`.
+Current release-prep target: `v2.0.19`. This release candidate keeps the `v2.0.18` workload release/status convergence and adds workload create/status readiness handling for scheduler-visible PV/PVC pending convergence. It supersedes `v2.0.18` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.18`.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |
