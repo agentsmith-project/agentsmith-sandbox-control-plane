@@ -459,7 +459,9 @@ func TestReleaseVerifierCoversBlockingReleaseEvidence(t *testing.T) {
 		"check_provider_prerequisites_contract",
 		"check_readiness_evidence",
 		"docs/READINESS_EVIDENCE.md",
-		"Current release-prep target",
+		"Current published release",
+		"must not describe pre-tag/no-push release preparation",
+		"must reference asbcp-final-manifest.json as the canonical final manifest",
 		"check_dockerfile_contract",
 		"run_release_fixture_smoke",
 		"render_kustomize_overlays",
@@ -1421,7 +1423,7 @@ func TestReleaseVersionMetadataPreparesV219AndKeepsPublishedSectionsImmutable(t 
 	}
 	readiness := string(readinessBytes)
 	for _, token := range []string{
-		"Current release-prep target: `v2.0.19`.",
+		"Current published release: `v2.0.19`.",
 		"scheduler-visible PV/PVC pending convergence",
 		"supersedes `v2.0.18`",
 		"earlier PVC readiness handling from `v2.0.14` through `v2.0.18`",
