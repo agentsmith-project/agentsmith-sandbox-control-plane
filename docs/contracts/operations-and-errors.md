@@ -20,12 +20,20 @@ API errors use a stable JSON envelope:
   "error": {
     "code": "dependency_failure",
     "message": "AFSCP orchestrator mount plan is unavailable",
-    "request_id": "req-..."
+    "request_id": "req-...",
+    "details": {
+      "operation": "workload.create",
+      "resource": "persistent_volume_claim",
+      "reason": "pvc_unbound",
+      "status": "not_ready",
+      "stable_code": "not_ready",
+      "retry_after": "1"
+    }
   }
 }
 ```
 
-The envelope must include a stable machine-readable `code`, a human-readable `message`, and `request_id` when available. API responses must not expose Kubernetes raw errors, AFSCP raw errors, service keys, AFSCP tokens, raw storage credentials, or full command output unless explicitly safe.
+The envelope must include a stable machine-readable `code`, a human-readable `message`, and `request_id` when available. `error.details` is optional and must be omitted when empty. Details are sanitized diagnostics handoff fields for retryable readiness/dependency cases, such as operation, scoped workload or binding identifiers, resource, reason, phase/status, stable code, dependency operation id/state, and `retry_after`. API responses must not expose Kubernetes raw errors, AFSCP raw errors, service keys, AFSCP tokens, raw storage credentials, payload volume subdirectories, secrets, environment variables, command output, or raw dependency bodies unless explicitly safe.
 
 ## Status Codes
 

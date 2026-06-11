@@ -811,6 +811,19 @@ func TestHandleCreatePod_ReturnsNotReadyWhenBindingPVCNotFoundBeforeCreate(t *te
 	assert.Equal(t, "not_ready", body.Error.Code)
 	assert.Contains(t, body.Error.Message, "workspace binding is not ready")
 	assert.Contains(t, body.Error.Message, "not visible yet")
+	assert.Equal(t, "workload.create", body.Error.Details["operation"])
+	assert.Equal(t, "ws-1", body.Error.Details["workspace_id"])
+	assert.Equal(t, "proj-1", body.Error.Details["project_id"])
+	assert.Equal(t, "wl-1", body.Error.Details["workload_id"])
+	assert.Equal(t, "wmb_demo", body.Error.Details["binding_id"])
+	assert.Equal(t, "persistent_volume_claim", body.Error.Details["resource"])
+	assert.Equal(t, "pvc_missing", body.Error.Details["reason"])
+	assert.Equal(t, "missing", body.Error.Details["phase"])
+	assert.Equal(t, "not_ready", body.Error.Details["status"])
+	assert.Equal(t, "not_ready", body.Error.Details["stable_code"])
+	assert.Equal(t, workspaceMountRetryAfter, body.Error.Details["retry_after"])
+	assert.NotContains(t, rec.Body.String(), "payload_volume_subdir")
+	assert.NotContains(t, rec.Body.String(), "secret_ref")
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -885,6 +898,12 @@ func TestHandleCreatePod_RejectsUnboundPVCBeforeCreate(t *testing.T) {
 	assert.Equal(t, "not_ready", body.Error.Code)
 	assert.Contains(t, body.Error.Message, "workspace binding is not ready")
 	assert.Contains(t, body.Error.Message, "Pending")
+	assert.Equal(t, "workload.create", body.Error.Details["operation"])
+	assert.Equal(t, "persistent_volume_claim", body.Error.Details["resource"])
+	assert.Equal(t, "pvc_unbound", body.Error.Details["reason"])
+	assert.Equal(t, "Pending", body.Error.Details["phase"])
+	assert.Equal(t, "not_ready", body.Error.Details["status"])
+	assert.Equal(t, workspaceMountRetryAfter, body.Error.Details["retry_after"])
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -909,6 +928,12 @@ func TestHandleCreatePod_RejectsUnboundPVBeforeCreate(t *testing.T) {
 	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
 	assert.Contains(t, body.Error.Message, "persistent volume")
 	assert.Contains(t, body.Error.Message, "not Bound")
+	assert.Equal(t, "workload.create", body.Error.Details["operation"])
+	assert.Equal(t, "persistent_volume", body.Error.Details["resource"])
+	assert.Equal(t, "pv_unbound", body.Error.Details["reason"])
+	assert.Equal(t, "Pending", body.Error.Details["phase"])
+	assert.Equal(t, "not_ready", body.Error.Details["status"])
+	assert.Equal(t, workspaceMountRetryAfter, body.Error.Details["retry_after"])
 
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -999,6 +1024,19 @@ func TestHandleCreatePod_FailsClosedWhenBindingActiveCheckUnavailable(t *testing
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "workspace binding active check failed")
 	assert.NotContains(t, rec.Body.String(), "raw-secret")
+	body := decodeError(t, rec)
+	assert.Equal(t, "dependency_failure", body.Error.Code)
+	assert.Equal(t, "workload.create", body.Error.Details["operation"])
+	assert.Equal(t, "ws-1", body.Error.Details["workspace_id"])
+	assert.Equal(t, "proj-1", body.Error.Details["project_id"])
+	assert.Equal(t, "wl-1", body.Error.Details["workload_id"])
+	assert.Equal(t, "wmb_demo", body.Error.Details["binding_id"])
+	assert.Equal(t, "afscp_mount_plan", body.Error.Details["resource"])
+	assert.Equal(t, "afscp_readiness_dependency_unavailable", body.Error.Details["reason"])
+	assert.Equal(t, "dependency_failure", body.Error.Details["status"])
+	assert.Equal(t, "dependency_failure", body.Error.Details["stable_code"])
+	assert.NotContains(t, rec.Body.String(), "payload_volume_subdir")
+	assert.NotContains(t, rec.Body.String(), "secret_ref")
 
 	logOutput := logs.String()
 	for _, token := range []string{"workspace binding active check failed", "workspace=ws-1", "project=proj-1", "workload=wl-1", "mount_binding_id=wmb_demo", "request_id=req-create", "[REDACTED]"} {
@@ -1360,6 +1398,16 @@ func TestHandleGetPod_GetPodReturnsInternalError_Returns500(t *testing.T) {
 	h.handleGetPod(rec, req, "ws-1", "proj-1", "wl-1")
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	body := decodeError(t, rec)
+	assert.Equal(t, "internal_error", body.Error.Code)
+	assert.Equal(t, "workload.status", body.Error.Details["operation"])
+	assert.Equal(t, "ws-1", body.Error.Details["workspace_id"])
+	assert.Equal(t, "proj-1", body.Error.Details["project_id"])
+	assert.Equal(t, "wl-1", body.Error.Details["workload_id"])
+	assert.Equal(t, "pod", body.Error.Details["resource"])
+	assert.Equal(t, "pod_lookup_failed", body.Error.Details["reason"])
+	assert.Equal(t, "internal_error", body.Error.Details["status"])
+	assert.Equal(t, "internal_error", body.Error.Details["stable_code"])
 }
 
 func TestHandleGetPod_RunningPod(t *testing.T) {
@@ -1847,6 +1895,55 @@ func TestHandleDeletePod_AFSCPReleaseFailureKeepsPodForRetry(t *testing.T) {
 	assert.NotNil(t, reg.pods[podName], "pod annotations must remain available so DELETE can retry AFSCP release")
 }
 
+func TestHandleDeletePod_AFSCPReleasePendingReturnsReleaseIncompleteDetails(t *testing.T) {
+	events := &eventRecorder{}
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{
+		events: events,
+		releaseErr: &afscp.PendingOperationError{
+			OperationID:    "op_release_pending",
+			OperationState: "running",
+			Retryable:      true,
+		},
+	}
+	flush := &fakeStorageFlushBarrier{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	req.Header.Set("X-Request-Id", "req-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
+	body := decodeError(t, rec)
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Equal(t, "workload.delete", body.Error.Details["operation"])
+	assert.Equal(t, "ws-1", body.Error.Details["workspace_id"])
+	assert.Equal(t, "proj-1", body.Error.Details["project_id"])
+	assert.Equal(t, "wl-1", body.Error.Details["workload_id"])
+	assert.Equal(t, "wmb_demo", body.Error.Details["binding_id"])
+	assert.Equal(t, "afscp_workload_mount_binding", body.Error.Details["resource"])
+	assert.Equal(t, "afscp_operation_pending", body.Error.Details["reason"])
+	assert.Equal(t, "running", body.Error.Details["phase"])
+	assert.Equal(t, "release_pending", body.Error.Details["status"])
+	assert.Equal(t, "workload_release_incomplete", body.Error.Details["stable_code"])
+	assert.Equal(t, workspaceMountRetryAfter, body.Error.Details["retry_after"])
+	assert.Equal(t, "op_release_pending", body.Error.Details["dependency_operation_id"])
+	assert.Equal(t, "running", body.Error.Details["dependency_state"])
+	assert.NotContains(t, rec.Body.String(), "raw-secret")
+	assert.NotContains(t, rec.Body.String(), "payload_volume_subdir")
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan", "release"}, events.snapshot())
+	assert.Empty(t, lifecycle.statusValue, "terminal released status must not be written while release is pending")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods[podName], "pending AFSCP release must leave pod available for retry")
+}
+
 func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	events := &eventRecorder{}
 	podName := defaultScopedPodName("wl-1")
@@ -1877,6 +1974,47 @@ func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 	assert.Nil(t, reg.pods[podName], "released status must only be attempted after the pod is gone")
+}
+
+func TestHandleDeletePod_AFSCPStatusPendingReturnsReleaseIncompleteDetailsAfterPodGone(t *testing.T) {
+	events := &eventRecorder{}
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+	lifecycle := &fakeMountLifecycleClient{
+		events: events,
+		statusErr: &afscp.PendingOperationError{
+			OperationID:    "op_status_pending",
+			OperationState: "queued",
+			Retryable:      true,
+		},
+	}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	req.Header.Set("X-Request-Id", "req-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
+	body := decodeError(t, rec)
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Equal(t, "workload.delete", body.Error.Details["operation"])
+	assert.Equal(t, "afscp_workload_mount_binding", body.Error.Details["resource"])
+	assert.Equal(t, "afscp_operation_pending", body.Error.Details["reason"])
+	assert.Equal(t, "queued", body.Error.Details["phase"])
+	assert.Equal(t, "released_status_pending", body.Error.Details["status"])
+	assert.Equal(t, "workload_release_incomplete", body.Error.Details["stable_code"])
+	assert.Equal(t, workspaceMountRetryAfter, body.Error.Details["retry_after"])
+	assert.Equal(t, "op_status_pending", body.Error.Details["dependency_operation_id"])
+	assert.Equal(t, "queued", body.Error.Details["dependency_state"])
+	assert.Equal(t, []string{"release", "delete-pod", "confirm-pod-gone", "status-released"}, events.snapshot())
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.Nil(t, reg.pods[podName], "released status pending is reported after the pod is gone")
 }
 
 func TestDeleteWorkload_StatusFailureThenRetryContinuesTerminalMarkFromDurableFact(t *testing.T) {

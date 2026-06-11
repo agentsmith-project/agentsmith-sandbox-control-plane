@@ -258,7 +258,8 @@ func (h *Handler) handleEnsure(w http.ResponseWriter, r *http.Request, workspace
 	readyPVC, err := h.waitForPVCBound(ctx, h.options.Namespace, pvc)
 	if err != nil && errors.Is(err, errPVCBoundNotReady) {
 		w.Header().Set("Retry-After", ensurePVCBoundRetryAfter)
-		jsonError(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error())
+		reason, phase := pvcReasonPhaseFromError(err)
+		jsonErrorWithDetails(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error(), bindingReadinessDetails("workspace_binding.ensure", workspaceID, projectID, bindingID, "persistent_volume_claim", reason, phase, ensurePVCBoundRetryAfter))
 		return
 	}
 	if err != nil {
@@ -342,14 +343,17 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, workspaceID,
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			message := fmt.Sprintf("workspace binding is not ready: persistent volume claim %q is not visible yet", pvcName)
-			jsonError(w, r, http.StatusServiceUnavailable, "not_ready", message)
+			w.Header().Set("Retry-After", ensurePVCBoundRetryAfter)
+			jsonErrorWithDetails(w, r, http.StatusServiceUnavailable, "not_ready", message, bindingReadinessDetails("workspace_binding.get", workspaceID, projectID, bindingID, "persistent_volume_claim", "pvc_missing", "missing", ensurePVCBoundRetryAfter))
 			return
 		}
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "get persistent volume claim failed")
 		return
 	}
 	if err := RequirePVCBound(pvc); err != nil {
-		jsonError(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error())
+		w.Header().Set("Retry-After", ensurePVCBoundRetryAfter)
+		reason, phase := pvcReasonPhaseFromObject(pvc, err)
+		jsonErrorWithDetails(w, r, http.StatusServiceUnavailable, "not_ready", "workspace binding is not ready: "+err.Error(), bindingReadinessDetails("workspace_binding.get", workspaceID, projectID, bindingID, "persistent_volume_claim", reason, phase, ensurePVCBoundRetryAfter))
 		return
 	}
 	status, err := bindingStatusFromObjects(workspaceID, projectID, bindingID, h.options.Namespace, pv, pvc)
@@ -656,6 +660,55 @@ func jsonResponse(w http.ResponseWriter, status int, payload any) {
 
 func jsonError(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
 	httperror.Write(w, r, status, code, message)
+}
+
+func jsonErrorWithDetails(w http.ResponseWriter, r *http.Request, status int, code string, message string, details map[string]string) {
+	httperror.WriteWithDetails(w, r, status, code, message, details)
+}
+
+func bindingReadinessDetails(operation, workspaceID, projectID, bindingID, resource, reason, phase, retryAfter string) map[string]string {
+	details := map[string]string{
+		"operation":    operation,
+		"workspace_id": workspaceID,
+		"project_id":   projectID,
+		"binding_id":   bindingID,
+		"resource":     resource,
+		"reason":       reason,
+		"phase":        phase,
+		"status":       "not_ready",
+		"stable_code":  "not_ready",
+	}
+	if strings.TrimSpace(retryAfter) != "" {
+		details["retry_after"] = retryAfter
+	}
+	return details
+}
+
+func pvcReasonPhaseFromError(err error) (string, string) {
+	message := err.Error()
+	if strings.Contains(message, "not visible yet") {
+		return "pvc_missing", "missing"
+	}
+	if strings.Contains(message, "Pending") {
+		return "pvc_unbound", string(v1.ClaimPending)
+	}
+	if strings.Contains(message, "Bound but has no volumeName") {
+		return "pvc_unbound", string(v1.ClaimBound)
+	}
+	return "pvc_unbound", "unknown"
+}
+
+func pvcReasonPhaseFromObject(pvc *v1.PersistentVolumeClaim, err error) (string, string) {
+	phase := "unknown"
+	if pvc != nil && pvc.Status.Phase != "" {
+		phase = string(pvc.Status.Phase)
+	}
+	reason := "pvc_unbound"
+	if err != nil && strings.Contains(err.Error(), "not visible yet") {
+		reason = "pvc_missing"
+		phase = "missing"
+	}
+	return reason, phase
 }
 
 func decodeEnsureRequest(r *http.Request) (EnsureRequest, error) {

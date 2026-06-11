@@ -92,6 +92,7 @@ type responseStatusError struct {
 	status     int
 	message    string
 	retryAfter string
+	details    map[string]string
 }
 
 var errWorkloadScopeMismatch = stderrors.New("workload pod scope mismatch")
@@ -298,7 +299,7 @@ func (h *Handler) handleCreatePod(w http.ResponseWriter, r *http.Request, worksp
 		if retryAfter := retryAfterForError(err); retryAfter != "" {
 			w.Header().Set("Retry-After", retryAfter)
 		}
-		jsonError(w, r, status, httperror.CodeForStatus(status), err.Error())
+		jsonErrorWithDetails(w, r, status, httperror.CodeForStatus(status), err.Error(), detailsForError(err))
 		return
 	}
 	req.resolvedMount = &mount
@@ -435,7 +436,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 			return
 		} else {
 			log.Printf("workload/%s: pod lookup failed before terminal delete retry: %s", workloadID, observability.RedactLogValue(err))
-			jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
+			jsonErrorWithDetails(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed", workloadErrorDetails("workload.delete", workspaceID, projectID, workloadID, "", "pod", "pod_lookup_failed", "", "internal_error", "internal_error", ""))
 			return
 		}
 	}
@@ -453,7 +454,7 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 				return
 			} else {
 				log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
-				jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
+				jsonErrorWithDetails(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed", workloadErrorDetails("workload.delete", workspaceID, projectID, workloadID, "", "pod", "pod_lookup_failed", "", "internal_error", "internal_error", ""))
 				return
 			}
 		}
@@ -492,6 +493,11 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 
 		if err := h.releaseWorkloadMountFromFact(ctx, r, fact); err != nil {
 			logWorkloadFactDependencyFailure(r, "AFSCP workload mount release failed", err, workspaceID, projectID, workloadID, fact)
+			if details, ok := afscpPendingDetails(err, "workload.delete", workspaceID, projectID, workloadID, workloadBindingIDFromFact(fact), "release_pending"); ok {
+				w.Header().Set("Retry-After", workspaceMountRetryAfter)
+				jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkloadReleaseIncomplete, "AFSCP workload mount release is pending", details)
+				return
+			}
 			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount release failed")
 			return
 		}
@@ -546,6 +552,11 @@ func (h *Handler) handleDeletePod(w http.ResponseWriter, r *http.Request, worksp
 	if !fact.TerminalStatusDone {
 		if err := h.markWorkloadMountReleasedFromFact(ctx, r, fact); err != nil {
 			logWorkloadFactDependencyFailure(r, "AFSCP workload mount released status failed", err, workspaceID, projectID, workloadID, fact)
+			if details, ok := afscpPendingDetails(err, "workload.delete", workspaceID, projectID, workloadID, workloadBindingIDFromFact(fact), "released_status_pending"); ok {
+				w.Header().Set("Retry-After", workspaceMountRetryAfter)
+				jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkloadReleaseIncomplete, "AFSCP workload mount released status is pending", details)
+				return
+			}
 			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workload mount released status failed")
 			return
 		}
@@ -582,7 +593,7 @@ func (h *Handler) handleGetPod(w http.ResponseWriter, r *http.Request, workspace
 			return
 		}
 		log.Printf("workload/%s: pod lookup failed: %s", workloadID, observability.RedactLogValue(err))
-		jsonError(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed")
+		jsonErrorWithDetails(w, r, http.StatusInternalServerError, "internal_error", "pod lookup failed", workloadErrorDetails("workload.status", workspaceID, projectID, workloadID, "", "pod", "pod_lookup_failed", "", "internal_error", "internal_error", ""))
 		return
 	}
 
@@ -979,6 +990,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 				status:     http.StatusServiceUnavailable,
 				message:    fmt.Sprintf("workspace binding is not ready: persistent volume claim %q is not visible yet; retry after workspace binding is Bound", pvcName),
 				retryAfter: workspaceMountRetryAfter,
+				details:    workloadErrorDetails("workload.create", workspaceID, projectID, workloadID, bindingID, "persistent_volume_claim", "pvc_missing", "missing", "not_ready", "not_ready", workspaceMountRetryAfter),
 			}
 		}
 		return workspacebinding.ResolvedMount{}, responseStatusError{
@@ -987,10 +999,15 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 		}
 	}
 	if err := workspacebinding.RequirePVCBound(pvc); err != nil {
+		phase := "unknown"
+		if pvc.Status.Phase != "" {
+			phase = string(pvc.Status.Phase)
+		}
 		return workspacebinding.ResolvedMount{}, responseStatusError{
 			status:     http.StatusServiceUnavailable,
 			message:    "workspace binding is not ready: " + err.Error() + "; retry after workspace binding is Bound",
 			retryAfter: workspaceMountRetryAfter,
+			details:    workloadErrorDetails("workload.create", workspaceID, projectID, workloadID, bindingID, "persistent_volume_claim", "pvc_unbound", phase, "not_ready", "not_ready", workspaceMountRetryAfter),
 		}
 	}
 	mount, err := workspacebinding.ResolvedMountFromPVC(pvc)
@@ -1014,7 +1031,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 			message: "workspace binding is stale: persistent volume is not ready; re-ensure workspace binding",
 		}
 	}
-	if statusErr, ok := persistentVolumeSchedulerVisibilityError(pv, pvc); ok {
+	if statusErr, ok := persistentVolumeSchedulerVisibilityError(workspaceID, projectID, workloadID, bindingID, pv, pvc); ok {
 		return workspacebinding.ResolvedMount{}, statusErr
 	}
 	if err := ensurePersistentVolumeMatchesResolvedMount(pv, mount); err != nil {
@@ -1042,6 +1059,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 			return workspacebinding.ResolvedMount{}, responseStatusError{
 				status:  http.StatusBadGateway,
 				message: "workspace binding active check failed",
+				details: workloadErrorDetails("workload.create", workspaceID, projectID, workloadID, bindingID, "afscp_mount_plan", "afscp_readiness_dependency_unavailable", "", "dependency_failure", "dependency_failure", ""),
 			}
 		}
 		if err := ensureResolvedMountMatchesPlan(mount, plan); err != nil {
@@ -1060,7 +1078,7 @@ func (h *Handler) resolveWorkspaceMount(ctx context.Context, r *http.Request, wo
 	return mount, nil
 }
 
-func persistentVolumeSchedulerVisibilityError(pv *v1.PersistentVolume, pvc *v1.PersistentVolumeClaim) (responseStatusError, bool) {
+func persistentVolumeSchedulerVisibilityError(workspaceID, projectID, workloadID, bindingID string, pv *v1.PersistentVolume, pvc *v1.PersistentVolumeClaim) (responseStatusError, bool) {
 	if pv == nil || pvc == nil {
 		return responseStatusError{
 			status:  http.StatusConflict,
@@ -1076,6 +1094,7 @@ func persistentVolumeSchedulerVisibilityError(pv *v1.PersistentVolume, pvc *v1.P
 			status:     http.StatusServiceUnavailable,
 			message:    fmt.Sprintf("workspace binding is not ready: persistent volume %q is %s, not Bound; retry after workspace binding is Bound", pv.GetName(), phase),
 			retryAfter: workspaceMountRetryAfter,
+			details:    workloadErrorDetails("workload.create", workspaceID, projectID, workloadID, bindingID, "persistent_volume", "pv_unbound", phase, "not_ready", "not_ready", workspaceMountRetryAfter),
 		}, true
 	}
 	claimRef := pv.Spec.ClaimRef
@@ -1084,6 +1103,7 @@ func persistentVolumeSchedulerVisibilityError(pv *v1.PersistentVolume, pvc *v1.P
 			status:     http.StatusServiceUnavailable,
 			message:    fmt.Sprintf("workspace binding is not ready: persistent volume %q has no claimRef; retry after workspace binding is Bound", pv.GetName()),
 			retryAfter: workspaceMountRetryAfter,
+			details:    workloadErrorDetails("workload.create", workspaceID, projectID, workloadID, bindingID, "persistent_volume", "pv_unbound", string(v1.VolumeBound), "not_ready", "not_ready", workspaceMountRetryAfter),
 		}, true
 	}
 	if strings.TrimSpace(claimRef.Namespace) != strings.TrimSpace(pvc.GetNamespace()) ||
@@ -1197,6 +1217,57 @@ func retryAfterForError(err error) string {
 		return strings.TrimSpace(statusErr.retryAfter)
 	}
 	return ""
+}
+
+func detailsForError(err error) map[string]string {
+	var statusErr responseStatusError
+	if stderrors.As(err, &statusErr) {
+		return statusErr.details
+	}
+	return nil
+}
+
+func workloadErrorDetails(operation, workspaceID, projectID, workloadID, bindingID, resource, reason, phase, status, stableCode, retryAfter string) map[string]string {
+	details := map[string]string{
+		"operation":    operation,
+		"workspace_id": workspaceID,
+		"project_id":   projectID,
+		"workload_id":  workloadID,
+		"binding_id":   bindingID,
+		"resource":     resource,
+		"reason":       reason,
+		"phase":        phase,
+		"status":       status,
+		"stable_code":  stableCode,
+	}
+	if strings.TrimSpace(retryAfter) != "" {
+		details["retry_after"] = retryAfter
+	}
+	return details
+}
+
+func afscpPendingDetails(err error, operation, workspaceID, projectID, workloadID, bindingID, status string) (map[string]string, bool) {
+	var pending *afscp.PendingOperationError
+	if !stderrors.As(err, &pending) {
+		return nil, false
+	}
+	phase := strings.TrimSpace(pending.OperationState)
+	if phase == "" {
+		phase = "unknown"
+	}
+	details := workloadErrorDetails(operation, workspaceID, projectID, workloadID, bindingID, "afscp_workload_mount_binding", "afscp_operation_pending", phase, status, errorCodeWorkloadReleaseIncomplete, workspaceMountRetryAfter)
+	if operationID := strings.TrimSpace(pending.OperationID); operationID != "" {
+		details["dependency_operation_id"] = operationID
+	}
+	details["dependency_state"] = phase
+	return details, true
+}
+
+func workloadBindingIDFromFact(fact workloadfacts.Fact) string {
+	if value := strings.TrimSpace(fact.WorkspaceBindingID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fact.MountBindingID)
 }
 
 func buildRuntimeEnvVars(env map[string]string, paths workloadPaths) []v1.EnvVar {
@@ -1877,6 +1948,10 @@ func jsonResponse(w http.ResponseWriter, status int, v interface{}) {
 
 func jsonError(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
 	httperror.Write(w, r, status, code, message)
+}
+
+func jsonErrorWithDetails(w http.ResponseWriter, r *http.Request, status int, code string, message string, details map[string]string) {
+	httperror.WriteWithDetails(w, r, status, code, message, details)
 }
 
 // isValidK8sName checks if a string is valid for use in a K8S pod name segment.

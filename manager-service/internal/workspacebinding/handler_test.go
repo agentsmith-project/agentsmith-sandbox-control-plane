@@ -39,9 +39,10 @@ type fakeK8sClient struct {
 
 type testErrorEnvelope struct {
 	Error struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
+		Code      string            `json:"code"`
+		Message   string            `json:"message"`
+		RequestID string            `json:"request_id"`
+		Details   map[string]string `json:"details"`
 	} `json:"error"`
 }
 
@@ -52,6 +53,22 @@ func decodeErrorEnvelope(t *testing.T, rec *httptest.ResponseRecorder) testError
 		t.Fatalf("decode error envelope: %v", err)
 	}
 	return body
+}
+
+func assertErrorDetail(t *testing.T, body testErrorEnvelope, key, want string) {
+	t.Helper()
+	if got := body.Error.Details[key]; got != want {
+		t.Fatalf("error.details[%q] = %q, want %q; details=%#v", key, got, want, body.Error.Details)
+	}
+}
+
+func assertNoSensitiveErrorDetails(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for _, forbidden := range []string{"payload_volume_subdir", "secret_ref", "juicefs-vol-demo", "raw-secret", "p@ss"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("error details leaked sensitive marker %q in %s", forbidden, rec.Body.String())
+		}
+	}
 }
 
 func (f *fakeK8sClient) EnsurePersistentVolume(_ context.Context, volume *v1.PersistentVolume) error {
@@ -405,6 +422,17 @@ func TestEnsureBindingReturnsNotReadyWhenPVCBoundPollTimesOut(t *testing.T) {
 	if !strings.Contains(body.Error.Message, "persistent volume claim") || !strings.Contains(body.Error.Message, "Pending") {
 		t.Fatalf("expected PVC pending not-ready message, got %+v", body.Error)
 	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.ensure")
+	assertErrorDetail(t, body, "workspace_id", "ws_demo")
+	assertErrorDetail(t, body, "project_id", "proj_demo")
+	assertErrorDetail(t, body, "binding_id", "wmb_demo")
+	assertErrorDetail(t, body, "resource", "persistent_volume_claim")
+	assertErrorDetail(t, body, "reason", "pvc_unbound")
+	assertErrorDetail(t, body, "phase", "Pending")
+	assertErrorDetail(t, body, "status", "not_ready")
+	assertErrorDetail(t, body, "stable_code", "not_ready")
+	assertErrorDetail(t, body, "retry_after", ensurePVCBoundRetryAfter)
+	assertNoSensitiveErrorDetails(t, rec)
 	if client.pv == nil || client.pvc == nil {
 		t.Fatalf("ensure should still create PV/PVC before reporting binding not ready")
 	}
@@ -445,6 +473,17 @@ func TestEnsureBindingReturnsNotReadyWhenPVCNotFoundPollTimesOut(t *testing.T) {
 	if !strings.Contains(body.Error.Message, "not visible yet") {
 		t.Fatalf("expected PVC not-visible not-ready message, got %+v", body.Error)
 	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.ensure")
+	assertErrorDetail(t, body, "workspace_id", "ws_demo")
+	assertErrorDetail(t, body, "project_id", "proj_demo")
+	assertErrorDetail(t, body, "binding_id", "wmb_demo")
+	assertErrorDetail(t, body, "resource", "persistent_volume_claim")
+	assertErrorDetail(t, body, "reason", "pvc_missing")
+	assertErrorDetail(t, body, "phase", "missing")
+	assertErrorDetail(t, body, "status", "not_ready")
+	assertErrorDetail(t, body, "stable_code", "not_ready")
+	assertErrorDetail(t, body, "retry_after", ensurePVCBoundRetryAfter)
+	assertNoSensitiveErrorDetails(t, rec)
 	if client.pv == nil || client.pvc == nil {
 		t.Fatalf("ensure should still create PV/PVC before reporting binding not ready")
 	}
@@ -560,6 +599,16 @@ func TestGetBindingReturnsNotReadyWhenPVCUnbound(t *testing.T) {
 	if body.Error.Code != "not_ready" {
 		t.Fatalf("expected not_ready code, got %+v", body.Error)
 	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.get")
+	assertErrorDetail(t, body, "workspace_id", "ws_demo")
+	assertErrorDetail(t, body, "project_id", "proj_demo")
+	assertErrorDetail(t, body, "binding_id", "wmb_demo")
+	assertErrorDetail(t, body, "resource", "persistent_volume_claim")
+	assertErrorDetail(t, body, "reason", "pvc_unbound")
+	assertErrorDetail(t, body, "phase", "Pending")
+	assertErrorDetail(t, body, "status", "not_ready")
+	assertErrorDetail(t, body, "stable_code", "not_ready")
+	assertNoSensitiveErrorDetails(t, rec)
 }
 
 func TestGetBindingReturnsNotReadyWhenPVExistsButPVCNotFound(t *testing.T) {
@@ -590,6 +639,16 @@ func TestGetBindingReturnsNotReadyWhenPVExistsButPVCNotFound(t *testing.T) {
 	if !strings.Contains(body.Error.Message, "not visible yet") {
 		t.Fatalf("expected PVC not-visible not-ready message, got %+v", body.Error)
 	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.get")
+	assertErrorDetail(t, body, "workspace_id", "ws_demo")
+	assertErrorDetail(t, body, "project_id", "proj_demo")
+	assertErrorDetail(t, body, "binding_id", "wmb_demo")
+	assertErrorDetail(t, body, "resource", "persistent_volume_claim")
+	assertErrorDetail(t, body, "reason", "pvc_missing")
+	assertErrorDetail(t, body, "phase", "missing")
+	assertErrorDetail(t, body, "status", "not_ready")
+	assertErrorDetail(t, body, "stable_code", "not_ready")
+	assertNoSensitiveErrorDetails(t, rec)
 }
 
 func TestEnsureBindingUsesRequestIDContextForAFSCPCorrelation(t *testing.T) {

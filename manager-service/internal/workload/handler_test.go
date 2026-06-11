@@ -209,9 +209,10 @@ func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
 
 type testErrorEnvelope struct {
 	Error struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
+		Code      string            `json:"code"`
+		Message   string            `json:"message"`
+		RequestID string            `json:"request_id"`
+		Details   map[string]string `json:"details"`
 	} `json:"error"`
 }
 

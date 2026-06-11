@@ -13,12 +13,17 @@ type Envelope struct {
 }
 
 type Error struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
+	Code      string            `json:"code"`
+	Message   string            `json:"message"`
+	RequestID string            `json:"request_id"`
+	Details   map[string]string `json:"details,omitempty"`
 }
 
 func Write(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
+	WriteWithDetails(w, r, status, code, message, nil)
+}
+
+func WriteWithDetails(w http.ResponseWriter, r *http.Request, status int, code string, message string, details map[string]string) {
 	if strings.TrimSpace(code) == "" {
 		code = CodeForStatus(status)
 	}
@@ -33,7 +38,27 @@ func Write(w http.ResponseWriter, r *http.Request, status int, code string, mess
 		Code:      code,
 		Message:   message,
 		RequestID: requestID,
+		Details:   sanitizeDetails(details),
 	}})
+}
+
+func sanitizeDetails(details map[string]string) map[string]string {
+	if len(details) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(details))
+	for key, value := range details {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = observability.RedactLogValue(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // GetRequestID returns the request ID selected for the request by observability middleware.

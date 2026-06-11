@@ -2,6 +2,7 @@ package afscp
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -159,5 +160,38 @@ func TestClientReleaseAndStatusWaitForTerminalSuccess(t *testing.T) {
 	}
 	if counts[statusKey] != 2 {
 		t.Fatalf("status calls = %d, want 2 to confirm queued operation", counts[statusKey])
+	}
+}
+
+func TestClientConfirmedMutationPendingTimeoutReturnsTypedError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(OperationEnvelope{OperationID: "op_pending", OperationState: "running"})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:               server.URL,
+		Token:                 "token",
+		CallerService:         "agentsmith-sandbox-control-plane",
+		OperationWaitTimeout:  5 * time.Millisecond,
+		OperationPollInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ReleaseWorkloadMountBinding(t.Context(), "ns_123", "wmb_123", "corr-123", "idem-release")
+	if err == nil {
+		t.Fatal("expected pending timeout error")
+	}
+	var pending *PendingOperationError
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected PendingOperationError, got %T %v", err, err)
+	}
+	if pending.OperationID != "op_pending" || pending.OperationState != "running" {
+		t.Fatalf("pending error = %#v", pending)
+	}
+	if !pending.Retryable {
+		t.Fatalf("pending timeout should be retryable: %#v", pending)
 	}
 }

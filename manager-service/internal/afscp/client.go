@@ -74,6 +74,24 @@ type OperationEnvelope struct {
 	Error          map[string]any `json:"error"`
 }
 
+type PendingOperationError struct {
+	OperationID    string
+	OperationState string
+	Retryable      bool
+}
+
+func (e *PendingOperationError) Error() string {
+	operationID := strings.TrimSpace(e.OperationID)
+	if operationID == "" {
+		operationID = "unknown"
+	}
+	state := strings.TrimSpace(e.OperationState)
+	if state == "" {
+		state = "unknown"
+	}
+	return fmt.Sprintf("afscp operation %s is still pending: last_state=%s", operationID, state)
+}
+
 const (
 	defaultOperationWaitTimeout  = 30 * time.Second
 	defaultOperationPollInterval = 250 * time.Millisecond
@@ -175,6 +193,9 @@ func (c *Client) confirmedMutation(ctx context.Context, method, path string, nam
 			envelope = *out
 		}
 		if err := c.doJSON(waitCtx, method, path, namespaceID, correlationID, idempotencyKey, body, &envelope); err != nil {
+			if waitCtx.Err() != nil && operationPending(last.OperationState) {
+				return OperationEnvelope{}, pendingOperationTimeoutError(last)
+			}
 			return OperationEnvelope{}, err
 		}
 		last = envelope
@@ -195,9 +216,17 @@ func (c *Client) confirmedMutation(ctx context.Context, method, path string, nam
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
-			return OperationEnvelope{}, fmt.Errorf("afscp operation %s did not succeed before timeout: last_state=%s", last.OperationID, last.OperationState)
+			return OperationEnvelope{}, pendingOperationTimeoutError(last)
 		case <-timer.C:
 		}
+	}
+}
+
+func pendingOperationTimeoutError(envelope OperationEnvelope) *PendingOperationError {
+	return &PendingOperationError{
+		OperationID:    envelope.OperationID,
+		OperationState: envelope.OperationState,
+		Retryable:      true,
 	}
 }
 
