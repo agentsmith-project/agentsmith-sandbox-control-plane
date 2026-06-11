@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current release-prep target: `v2.0.19`. This release candidate keeps the `v2.0.18` workload release/status convergence and adds workload create/status readiness handling for scheduler-visible PV/PVC pending convergence. It supersedes `v2.0.18` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.18`.
+Current published release: `v2.0.19`. The canonical final manifest is the GitHub Release asset `asbcp-final-manifest.json`; this checked-in ledger records release-readiness evidence and requirements. This release keeps the `v2.0.18` workload release/status convergence and adds workload create/status readiness handling for scheduler-visible PV/PVC pending convergence. It supersedes `v2.0.18` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.18`.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |

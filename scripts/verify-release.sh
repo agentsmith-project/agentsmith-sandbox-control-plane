@@ -806,11 +806,24 @@ if release_preparation.get("target_version") != expected_tag:
         "docs/release-evidence/release-manifest.json release_preparation.target_version "
         f"must match VERSION-derived tag {expected_tag}"
     )
-expected_readiness_target = f"Current release-prep target: `{expected_tag}`."
+expected_readiness_target = f"Current published release: `{expected_tag}`."
 if expected_readiness_target not in readiness:
     failures.append(
-        "docs/READINESS_EVIDENCE.md current release-prep target must match "
+        "docs/READINESS_EVIDENCE.md current published release must match "
         f"VERSION-derived tag {expected_tag}"
+    )
+release_status = str(release_preparation.get("status") or "")
+release_status_lower = release_status.lower()
+stale_status_terms = ("pre-tag", "no git tag", "no tag", "no push")
+if any(term in release_status_lower for term in stale_status_terms):
+    failures.append(
+        "docs/release-evidence/release-manifest.json release_preparation.status "
+        "must not describe pre-tag/no-push release preparation"
+    )
+if "asbcp-final-manifest.json" not in release_status:
+    failures.append(
+        "docs/release-evidence/release-manifest.json release_preparation.status "
+        "must reference asbcp-final-manifest.json as the canonical final manifest"
     )
 
 required_ids = {
