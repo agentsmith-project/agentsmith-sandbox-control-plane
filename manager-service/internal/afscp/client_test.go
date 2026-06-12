@@ -195,3 +195,115 @@ func TestClientConfirmedMutationPendingTimeoutReturnsTypedError(t *testing.T) {
 		t.Fatalf("pending timeout should be retryable: %#v", pending)
 	}
 }
+
+func TestClientNon2XXPendingEnvelopeReturnsTypedError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(struct {
+			Error struct {
+				Code      string            `json:"code"`
+				Message   string            `json:"message"`
+				RequestID string            `json:"request_id"`
+				Details   map[string]string `json:"details"`
+			} `json:"error"`
+		}{
+			Error: struct {
+				Code      string            `json:"code"`
+				Message   string            `json:"message"`
+				RequestID string            `json:"request_id"`
+				Details   map[string]string `json:"details"`
+			}{
+				Code:      "EXPORT_NOT_READY",
+				Message:   "export is not ready",
+				RequestID: "afscp-req-123",
+				Details: map[string]string{
+					"operation_id":    "op_export",
+					"operation_state": "running",
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:       server.URL,
+		Token:         "token",
+		CallerService: "agentsmith-sandbox-control-plane",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ReleaseWorkloadMountBinding(t.Context(), "ns_123", "wmb_123", "corr-123", "idem-release")
+	if err == nil {
+		t.Fatal("expected pending AFSCP envelope error")
+	}
+	var pending *PendingOperationError
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected PendingOperationError, got %T %v", err, err)
+	}
+	if pending.StatusCode != http.StatusConflict || pending.Code != "EXPORT_NOT_READY" || pending.RequestID != "afscp-req-123" {
+		t.Fatalf("pending error context = %#v", pending)
+	}
+	if pending.OperationID != "op_export" || pending.OperationState != "running" || !pending.Retryable {
+		t.Fatalf("pending error operation = %#v", pending)
+	}
+}
+
+func TestClientNon2XXPendingishEnvelopeWithTerminalStateReturnsDependencyError(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   string
+		state  string
+		reason string
+	}{
+		{
+			name:   "failed operation wins over not-ready code",
+			code:   "EXPORT_NOT_READY",
+			state:  "failed",
+			reason: "release pending",
+		},
+		{
+			name:   "cancelled operation wins over pending reason",
+			code:   "OPERATION_PENDING",
+			state:  "cancelled",
+			reason: "EXPORT_NOT_READY",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"code":       tt.code,
+					"message":    "export is not ready",
+					"reason":     tt.reason,
+					"request_id": "afscp-req-terminal",
+					"details": map[string]any{
+						"operation_id":    "op_terminal",
+						"operation_state": tt.state,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+
+			err = afscpErrorFromResponse(http.StatusConflict, payload)
+			if err == nil {
+				t.Fatal("expected terminal dependency error")
+			}
+			var pending *PendingOperationError
+			if errors.As(err, &pending) {
+				t.Fatalf("terminal state must not return PendingOperationError: %#v", pending)
+			}
+			var dependency *DependencyError
+			if !errors.As(err, &dependency) {
+				t.Fatalf("expected DependencyError, got %T %v", err, err)
+			}
+			if dependency.Code != tt.code || dependency.OperationID != "op_terminal" || dependency.OperationState != tt.state || dependency.RequestID != "afscp-req-terminal" {
+				t.Fatalf("dependency error = %#v", dependency)
+			}
+		})
+	}
+}

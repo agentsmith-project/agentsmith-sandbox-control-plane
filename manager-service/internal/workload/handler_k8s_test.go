@@ -1944,6 +1944,77 @@ func TestHandleDeletePod_AFSCPReleasePendingReturnsReleaseIncompleteDetails(t *t
 	assert.NotNil(t, reg.pods[podName], "pending AFSCP release must leave pod available for retry")
 }
 
+func TestHandleDeletePod_AFSCPExportNotReadyEnvelopeReturnsReleaseIncompleteDetails(t *testing.T) {
+	events := &eventRecorder{}
+	podName := defaultScopedPodName("wl-1")
+	reg := newPodRegistry(defaultScopedPod("wl-1"))
+	reg.events = events
+
+	var releaseCalls int
+	var releasePath string
+	afscpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		releaseCalls++
+		releasePath = r.URL.Path
+		w.WriteHeader(http.StatusConflict)
+		var body struct {
+			Error struct {
+				Code      string            `json:"code"`
+				Message   string            `json:"message"`
+				RequestID string            `json:"request_id"`
+				Details   map[string]string `json:"details"`
+			} `json:"error"`
+		}
+		body.Error.Code = "EXPORT_NOT_READY"
+		body.Error.Message = "export is not ready"
+		body.Error.RequestID = "afscp-req-export"
+		body.Error.Details = map[string]string{
+			"operation_id":    "op_export_pending",
+			"operation_state": "releasing",
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(afscpServer.Close)
+
+	lifecycle, err := afscp.NewClient(afscp.ClientConfig{
+		BaseURL:       afscpServer.URL,
+		Token:         "token",
+		CallerService: "agentsmith-sandbox-control-plane",
+	})
+	require.NoError(t, err)
+
+	flush := &fakeStorageFlushBarrier{events: events}
+	h := newHandlerWithRegistryAndOptions(t, reg, Options{AFSCPClient: lifecycle, StorageFlushBarrier: flush})
+
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete")
+	req.Header.Set("X-Request-Id", "req-delete")
+	rec := httptest.NewRecorder()
+	h.handleDeletePod(rec, req, "ws-1", "proj-1", "wl-1")
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, workspaceMountRetryAfter, rec.Header().Get("Retry-After"))
+	body := decodeError(t, rec)
+	assert.Equal(t, "workload_release_incomplete", body.Error.Code)
+	assert.Equal(t, "workload.delete", body.Error.Details["operation"])
+	assert.Equal(t, "wmb_demo", body.Error.Details["binding_id"])
+	assert.Equal(t, "afscp_workload_mount_binding", body.Error.Details["resource"])
+	assert.Equal(t, "afscp_operation_pending", body.Error.Details["reason"])
+	assert.Equal(t, "releasing", body.Error.Details["phase"])
+	assert.Equal(t, "release_pending", body.Error.Details["status"])
+	assert.Equal(t, "workload_release_incomplete", body.Error.Details["stable_code"])
+	assert.Equal(t, "op_export_pending", body.Error.Details["dependency_operation_id"])
+	assert.Equal(t, "releasing", body.Error.Details["dependency_state"])
+	assert.Equal(t, "afscp-req-export", body.Error.Details["dependency_request_id"])
+	assert.Equal(t, "EXPORT_NOT_READY", body.Error.Details["dependency_code"])
+	assert.Equal(t, 1, releaseCalls)
+	assert.Equal(t, "/internal/v1/workload-mount-bindings/wmb_demo:release", releasePath)
+	assert.Equal(t, []string{"flush-" + podName + ":/home/task-plan"}, events.snapshot())
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	assert.NotNil(t, reg.pods[podName], "pending AFSCP export must leave pod available for retry")
+}
+
 func TestHandleDeletePod_AFSCPStatusFailureHappensAfterPodGone(t *testing.T) {
 	events := &eventRecorder{}
 	podName := defaultScopedPodName("wl-1")

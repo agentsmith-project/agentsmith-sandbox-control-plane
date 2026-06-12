@@ -77,6 +77,9 @@ type OperationEnvelope struct {
 type PendingOperationError struct {
 	OperationID    string
 	OperationState string
+	RequestID      string
+	Code           string
+	StatusCode     int
 	Retryable      bool
 }
 
@@ -90,6 +93,35 @@ func (e *PendingOperationError) Error() string {
 		state = "unknown"
 	}
 	return fmt.Sprintf("afscp operation %s is still pending: last_state=%s", operationID, state)
+}
+
+type DependencyError struct {
+	StatusCode     int
+	Code           string
+	Message        string
+	RequestID      string
+	OperationID    string
+	OperationState string
+}
+
+func (e *DependencyError) Error() string {
+	if e == nil {
+		return "afscp request failed"
+	}
+	parts := []string{fmt.Sprintf("afscp request failed: status=%d", e.StatusCode)}
+	if code := strings.TrimSpace(e.Code); code != "" {
+		parts = append(parts, "code="+code)
+	}
+	if operationID := strings.TrimSpace(e.OperationID); operationID != "" {
+		parts = append(parts, "operation_id="+operationID)
+	}
+	if state := strings.TrimSpace(e.OperationState); state != "" {
+		parts = append(parts, "operation_state="+state)
+	}
+	if requestID := strings.TrimSpace(e.RequestID); requestID != "" {
+		parts = append(parts, "request_id="+requestID)
+	}
+	return strings.Join(parts, " ")
 }
 
 const (
@@ -231,12 +263,12 @@ func pendingOperationTimeoutError(envelope OperationEnvelope) *PendingOperationE
 }
 
 func operationSucceeded(state string) bool {
-	return strings.TrimSpace(state) == "succeeded"
+	return strings.ToLower(strings.TrimSpace(state)) == "succeeded"
 }
 
 func operationPending(state string) bool {
-	switch strings.TrimSpace(state) {
-	case "queued", "running", "cancel_requested":
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "queued", "pending", "running", "releasing", "cancel_requested":
 		return true
 	default:
 		return false
@@ -244,7 +276,7 @@ func operationPending(state string) bool {
 }
 
 func operationFailed(state string) bool {
-	switch strings.TrimSpace(state) {
+	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "failed", "cancelled", "operator_intervention_required":
 		return true
 	default:
@@ -302,7 +334,7 @@ func (c *Client) doJSON(ctx context.Context, method, requestPath, namespaceID, c
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("afscp request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return afscpErrorFromResponse(resp.StatusCode, data)
 	}
 	if out == nil {
 		io.Copy(io.Discard, resp.Body)
@@ -312,6 +344,200 @@ func (c *Client) doJSON(ctx context.Context, method, requestPath, namespaceID, c
 		return fmt.Errorf("decode afscp response: %w", err)
 	}
 	return nil
+}
+
+type afscpErrorEnvelope struct {
+	Code           string                     `json:"code"`
+	Message        string                     `json:"message"`
+	RequestID      string                     `json:"request_id"`
+	OperationID    string                     `json:"operation_id"`
+	OperationState string                     `json:"operation_state"`
+	State          string                     `json:"state"`
+	Status         string                     `json:"status"`
+	Operation      afscpOperationFields       `json:"operation"`
+	Error          afscpErrorFields           `json:"error"`
+	Details        map[string]json.RawMessage `json:"details"`
+}
+
+type afscpErrorFields struct {
+	Code           string                     `json:"code"`
+	Message        string                     `json:"message"`
+	RequestID      string                     `json:"request_id"`
+	OperationID    string                     `json:"operation_id"`
+	OperationState string                     `json:"operation_state"`
+	State          string                     `json:"state"`
+	Status         string                     `json:"status"`
+	Reason         string                     `json:"reason"`
+	Operation      afscpOperationFields       `json:"operation"`
+	Details        map[string]json.RawMessage `json:"details"`
+}
+
+type afscpOperationFields struct {
+	ID             string `json:"id"`
+	OperationID    string `json:"operation_id"`
+	State          string `json:"state"`
+	OperationState string `json:"operation_state"`
+	Status         string `json:"status"`
+}
+
+func afscpErrorFromResponse(statusCode int, data []byte) error {
+	var envelope afscpErrorEnvelope
+	if len(bytes.TrimSpace(data)) > 0 {
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			return fmt.Errorf("afscp request failed: status=%d", statusCode)
+		}
+	}
+
+	code := firstNonEmpty(envelope.Error.Code, envelope.Code)
+	message := firstNonEmpty(envelope.Error.Message, envelope.Message)
+	requestID := firstNonEmpty(envelope.Error.RequestID, envelope.RequestID, detailString(envelope.Error.Details, "request_id"), detailString(envelope.Details, "request_id"))
+	operationID := firstNonEmpty(
+		envelope.Error.OperationID,
+		envelope.Error.Operation.ID,
+		envelope.Error.Operation.OperationID,
+		envelope.OperationID,
+		envelope.Operation.ID,
+		envelope.Operation.OperationID,
+		detailString(envelope.Error.Details, "operation_id", "dependency_operation_id"),
+		nestedDetailString(envelope.Error.Details, "operation", "id", "operation_id"),
+		detailString(envelope.Details, "operation_id", "dependency_operation_id"),
+		nestedDetailString(envelope.Details, "operation", "id", "operation_id"),
+	)
+	operationState := firstNonEmpty(
+		envelope.Error.OperationState,
+		envelope.Error.State,
+		envelope.Error.Status,
+		envelope.Error.Operation.OperationState,
+		envelope.Error.Operation.State,
+		envelope.Error.Operation.Status,
+		envelope.OperationState,
+		envelope.State,
+		envelope.Status,
+		envelope.Operation.OperationState,
+		envelope.Operation.State,
+		envelope.Operation.Status,
+		detailString(envelope.Error.Details, "operation_state", "dependency_state", "state", "status", "phase"),
+		nestedDetailString(envelope.Error.Details, "operation", "operation_state", "state", "status"),
+		detailString(envelope.Details, "operation_state", "dependency_state", "state", "status", "phase"),
+		nestedDetailString(envelope.Details, "operation", "operation_state", "state", "status"),
+	)
+	reason := firstNonEmpty(
+		envelope.Error.Reason,
+		detailString(envelope.Error.Details, "reason", "stable_code"),
+		detailString(envelope.Details, "reason", "stable_code"),
+		code,
+	)
+
+	if operationFailed(operationState) {
+		return &DependencyError{
+			StatusCode:     statusCode,
+			Code:           code,
+			Message:        message,
+			RequestID:      requestID,
+			OperationID:    operationID,
+			OperationState: operationState,
+		}
+	}
+
+	if afscpDependencyPending(code, operationState, reason) {
+		if strings.TrimSpace(operationState) == "" {
+			operationState = inferredPendingState(code, reason)
+		}
+		return &PendingOperationError{
+			OperationID:    operationID,
+			OperationState: operationState,
+			RequestID:      requestID,
+			Code:           code,
+			StatusCode:     statusCode,
+			Retryable:      true,
+		}
+	}
+
+	return &DependencyError{
+		StatusCode:     statusCode,
+		Code:           code,
+		Message:        message,
+		RequestID:      requestID,
+		OperationID:    operationID,
+		OperationState: operationState,
+	}
+}
+
+func afscpDependencyPending(values ...string) bool {
+	for _, value := range values {
+		normalized := normalizeDependencyState(value)
+		if normalized == "" {
+			continue
+		}
+		if operationPending(normalized) {
+			return true
+		}
+		switch normalized {
+		case "EXPORT_NOT_READY", "NOT_READY", "OPERATION_NOT_READY", "OPERATION_PENDING", "RELEASE_PENDING", "RELEASE_INCOMPLETE", "IN_PROGRESS":
+			return true
+		}
+		if strings.Contains(normalized, "PENDING") || strings.Contains(normalized, "RELEASING") || strings.Contains(normalized, "NOT_READY") || strings.Contains(normalized, "IN_PROGRESS") {
+			return true
+		}
+	}
+	return false
+}
+
+func inferredPendingState(values ...string) string {
+	for _, value := range values {
+		normalized := normalizeDependencyState(value)
+		if strings.Contains(normalized, "RELEASING") {
+			return "releasing"
+		}
+		if strings.Contains(normalized, "RUNNING") || strings.Contains(normalized, "IN_PROGRESS") {
+			return "running"
+		}
+		if strings.Contains(normalized, "QUEUED") {
+			return "queued"
+		}
+	}
+	return "pending"
+}
+
+func normalizeDependencyState(value string) string {
+	return strings.ToUpper(strings.TrimSpace(value))
+}
+
+func detailString(details map[string]json.RawMessage, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := details[key]
+		if !ok {
+			continue
+		}
+		if value := rawJSONScalarString(raw); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func nestedDetailString(details map[string]json.RawMessage, parent string, keys ...string) string {
+	raw, ok := details[parent]
+	if !ok {
+		return ""
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		return ""
+	}
+	return detailString(nested, keys...)
+}
+
+func rawJSONScalarString(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return strings.TrimSpace(number.String())
+	}
+	return ""
 }
 
 func joinURLPath(basePath, requestPath string) string {

@@ -1259,6 +1259,12 @@ func afscpPendingDetails(err error, operation, workspaceID, projectID, workloadI
 	if operationID := strings.TrimSpace(pending.OperationID); operationID != "" {
 		details["dependency_operation_id"] = operationID
 	}
+	if requestID := strings.TrimSpace(pending.RequestID); requestID != "" {
+		details["dependency_request_id"] = requestID
+	}
+	if code := strings.TrimSpace(pending.Code); code != "" {
+		details["dependency_code"] = code
+	}
 	details["dependency_state"] = phase
 	return details, true
 }
