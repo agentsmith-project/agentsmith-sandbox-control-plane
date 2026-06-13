@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.19",
-    "status": "v2.0.19 is published; the canonical final manifest is the GitHub Release asset asbcp-final-manifest.json, and this checked-in manifest remains the release evidence ledger and requirements reference.",
-    "supersedes_published_version": "v2.0.18",
-    "summary": "Workload create verifies scheduler-visible PV Bound/claimRef state before Pod creation, and workload status exposes sanitized readiness_reason/retry_after for PVC or scheduling pending so consumers keep typed readiness pending instead of generic startup timeout."
+    "target_version": "v2.0.20",
+    "status": "v2.0.20 is published; the canonical final manifest is the GitHub Release asset asbcp-final-manifest.json, and this checked-in manifest remains the release evidence ledger and requirements reference.",
+    "supersedes_published_version": "v2.0.19",
+    "summary": "Workload delete and readiness paths preserve pending/releasing AFSCP dependency errors as typed workload_release_incomplete details, and sandbox runtime diagnostics expose sanitized status/readiness context so consumers distinguish backend convergence from generic startup timeout."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

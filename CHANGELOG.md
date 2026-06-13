@@ -6,6 +6,13 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.20] - 2026-06-13
+
+### Fixed
+
+- Workload delete and readiness paths now preserve pending/releasing AFSCP dependency errors as typed `workload_release_incomplete` details with sanitized dependency operation/status and retry hints, so consumers can distinguish backend convergence from generic sandbox startup timeout.
+- Sandbox runtime diagnostics now expose sanitized workload and workspace binding status/readiness details for `not_ready` and pending release paths without leaking dependency credentials.
+
 ## [v2.0.19] - 2026-06-08
 
 ### Fixed

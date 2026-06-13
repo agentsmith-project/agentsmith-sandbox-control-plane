@@ -1198,15 +1198,15 @@ func hasEnvProjection(projections []providerPrereqEnvProjectionForTest, env stri
 	return false
 }
 
-func TestReleaseVersionMetadataPreparesV219AndKeepsPublishedSectionsImmutable(t *testing.T) {
+func TestReleaseVersionMetadataPreparesV220AndKeepsPublishedSectionsImmutable(t *testing.T) {
 	repoRoot := repoRootForTest(t)
 
 	versionBytes, err := os.ReadFile(filepath.Join(repoRoot, "VERSION"))
 	if err != nil {
 		t.Fatalf("read VERSION: %v", err)
 	}
-	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.19" {
-		t.Fatalf("VERSION must be bumped to 2.0.19 for the workload scheduler readiness release, got %q", version)
+	if version := strings.TrimSpace(string(versionBytes)); version != "2.0.20" {
+		t.Fatalf("VERSION must be bumped to 2.0.20 for the AFSCP pending diagnostics release, got %q", version)
 	}
 
 	changelogBytes, err := os.ReadFile(filepath.Join(repoRoot, "CHANGELOG.md"))
@@ -1215,17 +1215,47 @@ func TestReleaseVersionMetadataPreparesV219AndKeepsPublishedSectionsImmutable(t 
 	}
 	changelog := string(changelogBytes)
 	unreleased := changelogSection(changelog, "Unreleased")
-	for _, token := range []string{"scheduler-visible", "readiness_reason", "generic startup timeout"} {
+	for _, token := range []string{"pending/releasing AFSCP", "runtime diagnostics", "generic sandbox startup timeout"} {
 		if strings.Contains(unreleased, token) {
-			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.19", token)
+			t.Fatalf("CHANGELOG.md must move %q out of Unreleased into v2.0.20", token)
+		}
+	}
+
+	section220 := changelogSection(changelog, "v2.0.20")
+	if section220 == "" {
+		t.Fatalf("CHANGELOG.md must add a v2.0.20 release section for the AFSCP pending diagnostics release")
+	}
+	var violations []string
+	required220 := []string{
+		"Workload delete",
+		"readiness paths",
+		"pending/releasing AFSCP dependency errors",
+		"`workload_release_incomplete`",
+		"sanitized dependency operation/status",
+		"retry hints",
+		"backend convergence",
+		"generic sandbox startup timeout",
+		"Sandbox runtime diagnostics",
+		"workspace binding status/readiness details",
+		"`not_ready`",
+		"pending release paths",
+		"dependency credentials",
+	}
+	for _, token := range required220 {
+		if !strings.Contains(section220, token) {
+			violations = append(violations, "v2.0.20 changelog missing "+token)
+		}
+	}
+	for _, token := range []string{"ASBCP-BC-"} {
+		if strings.Contains(section220, token) {
+			violations = append(violations, "v2.0.20 changelog must not introduce "+token)
 		}
 	}
 
 	section219 := changelogSection(changelog, "v2.0.19")
 	if section219 == "" {
-		t.Fatalf("CHANGELOG.md must add a v2.0.19 release section for the workload scheduler readiness release")
+		t.Fatalf("CHANGELOG.md must keep the published v2.0.19 section")
 	}
-	var violations []string
 	required219 := []string{
 		"Workload create",
 		"PV scheduler-visible",
@@ -1400,13 +1430,13 @@ func TestReleaseVersionMetadataPreparesV219AndKeepsPublishedSectionsImmutable(t 
 	if err := json.Unmarshal(manifestBytes, &releaseManifest); err != nil {
 		t.Fatalf("parse release evidence manifest: %v", err)
 	}
-	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.19" {
-		violations = append(violations, "release manifest target_version must be v2.0.19")
+	if releaseManifest.ReleasePreparation.TargetVersion != "v2.0.20" {
+		violations = append(violations, "release manifest target_version must be v2.0.20")
 	}
-	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.18" {
-		violations = append(violations, "release manifest must record v2.0.18 as superseded published version")
+	if releaseManifest.ReleasePreparation.SupersedesPublishedVersion != "v2.0.19" {
+		violations = append(violations, "release manifest must record v2.0.19 as superseded published version")
 	}
-	for _, token := range []string{"Workload create", "scheduler-visible PV Bound/claimRef", "workload status", "sanitized readiness_reason/retry_after", "typed readiness pending", "generic startup timeout"} {
+	for _, token := range []string{"Workload delete", "pending/releasing AFSCP dependency errors", "typed workload_release_incomplete details", "sandbox runtime diagnostics", "sanitized status/readiness context", "backend convergence", "generic startup timeout"} {
 		if !strings.Contains(releaseManifest.ReleasePreparation.Summary, token) {
 			violations = append(violations, "release manifest summary missing "+token)
 		}
@@ -1423,10 +1453,11 @@ func TestReleaseVersionMetadataPreparesV219AndKeepsPublishedSectionsImmutable(t 
 	}
 	readiness := string(readinessBytes)
 	for _, token := range []string{
-		"Current published release: `v2.0.19`.",
-		"scheduler-visible PV/PVC pending convergence",
-		"supersedes `v2.0.18`",
-		"earlier PVC readiness handling from `v2.0.14` through `v2.0.18`",
+		"Current published release: `v2.0.20`.",
+		"typed pending/releasing AFSCP dependency errors",
+		"sanitized sandbox runtime diagnostics",
+		"supersedes `v2.0.19`",
+		"earlier PVC readiness handling from `v2.0.14` through `v2.0.19`",
 	} {
 		if !strings.Contains(readiness, token) {
 			violations = append(violations, "readiness evidence missing "+token)
