@@ -41,6 +41,7 @@ type k8sClient interface {
 
 type afscpPlanClient interface {
 	GetOrchestratorMountPlan(ctx context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error)
+	UpdateWorkloadMountStatus(ctx context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error)
 }
 
 type Options struct {
@@ -50,9 +51,11 @@ type Options struct {
 	StorageClassName string
 	AFSCPClient      afscpPlanClient
 	WorkloadFacts    workloadfacts.Source
+	ReleaseFacts     WorkspaceBindingReleaseStore
 }
 
 const errorCodeWorkspaceBindingReleaseIncomplete = "workspace_binding_release_incomplete"
+const workspaceBindingReleaseRetryAfter = "1"
 
 type EnsureRequest struct {
 	NamespaceID    string `json:"namespace_id"`
@@ -114,6 +117,8 @@ const (
 	ensurePVCBoundTimeout              = time.Second
 	ensurePVCBoundPollInterval         = 50 * time.Millisecond
 	ensurePVCBoundRetryAfter           = "1"
+	workspaceBindingDeleteTimeout      = time.Second
+	workspaceBindingDeletePollInterval = 50 * time.Millisecond
 )
 
 func NewHandler(k8sClient k8sClient, options Options) *Handler {
@@ -377,6 +382,29 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspace
 		jsonError(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding release is incomplete; delete workloads first: "+strings.Join(active, ","))
 		return
 	}
+	releaseFact, hasReleaseFact := WorkspaceBindingReleaseFact{}, false
+	if h.options.AFSCPClient != nil {
+		var err error
+		releaseFact, err = h.ensureWorkspaceBindingReleaseFact(ctx, workspaceID, projectID, bindingID, pvName, pvcName)
+		if err != nil {
+			log.Printf("workspacebinding/%s: AFSCP mount reference unavailable before release: workspace=%s project=%s request_id=%s correlation_id=%s error=%s",
+				bindingID,
+				workspaceID,
+				projectID,
+				observability.GetRequestID(r),
+				observability.RequestCorrelationID(r, "asbcp"),
+				observability.RedactLogValue(err),
+			)
+			if errors.Is(err, errWorkspaceBindingReleaseFactStoreUnavailable) || errors.Is(err, errWorkspaceBindingReleaseFactWriteFailed) {
+				w.Header().Set("Retry-After", workspaceBindingReleaseRetryAfter)
+				jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding release truth is unavailable; retry after workspace binding release state is known", bindingReleaseDetails("workspace_binding.delete", workspaceID, projectID, bindingID, "workspace_binding_release_fact", "release_fact_unavailable", "unknown", "release_incomplete", errorCodeWorkspaceBindingReleaseIncomplete, workspaceBindingReleaseRetryAfter))
+				return
+			}
+			jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding release truth is unavailable; retry after workspace binding state is known", bindingReleaseDetails("workspace_binding.delete", workspaceID, projectID, bindingID, "afscp_workload_mount_binding", "mount_ref_unavailable", "unknown", "release_incomplete", errorCodeWorkspaceBindingReleaseIncomplete, workspaceBindingReleaseRetryAfter))
+			return
+		}
+		hasReleaseFact = true
+	}
 	if err := h.k8sClient.DeletePersistentVolumeClaim(ctx, h.options.Namespace, pvcName); err != nil {
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "delete persistent volume claim failed")
 		return
@@ -385,7 +413,320 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, workspace
 		jsonError(w, r, http.StatusInternalServerError, "internal_error", "delete persistent volume failed")
 		return
 	}
+	if err := h.waitForWorkspaceBindingStorageDeleted(ctx, h.options.Namespace, pvName, pvcName); err != nil {
+		if details, ok := storageDeletionPendingBindingReleaseDetails(err, "workspace_binding.delete", workspaceID, projectID, bindingID); ok {
+			w.Header().Set("Retry-After", workspaceBindingReleaseRetryAfter)
+			jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "workspace binding storage deletion is pending", details)
+			return
+		}
+		log.Printf("workspacebinding/%s: storage deletion boundary check failed: workspace=%s project=%s request_id=%s correlation_id=%s error=%s",
+			bindingID,
+			workspaceID,
+			projectID,
+			observability.GetRequestID(r),
+			observability.RequestCorrelationID(r, "asbcp"),
+			observability.RedactLogValue(err),
+		)
+		jsonError(w, r, http.StatusInternalServerError, "internal_error", "workspace binding storage deletion check failed")
+		return
+	}
+	if hasReleaseFact && !releaseFact.StorageDeleted {
+		releaseFact.StorageDeleted = true
+		if err := h.saveWorkspaceBindingReleaseFact(ctx, releaseFact); err != nil {
+			log.Printf("workspacebinding/%s: release fact storage-deleted write failed: workspace=%s project=%s request_id=%s correlation_id=%s error=%s",
+				bindingID,
+				workspaceID,
+				projectID,
+				observability.GetRequestID(r),
+				observability.RequestCorrelationID(r, "asbcp"),
+				observability.RedactLogValue(err),
+			)
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workspace binding release fact write failed")
+			return
+		}
+	}
+	if hasReleaseFact && releaseFact.TerminalStatusDone {
+		jsonResponse(w, http.StatusOK, map[string]string{"message": "binding deleted"})
+		return
+	}
+	if hasReleaseFact {
+		ref := releaseFact.MountRef()
+		if err := h.markWorkspaceBindingMountReleased(ctx, r, workspaceID, projectID, bindingID, releaseFact); err != nil {
+			log.Printf("workspacebinding/%s: AFSCP workspace binding released status failed: workspace=%s project=%s namespace_id=%s mount_binding_id=%s request_id=%s correlation_id=%s error=%s",
+				bindingID,
+				workspaceID,
+				projectID,
+				ref.namespaceID,
+				ref.mountBindingID,
+				observability.GetRequestID(r),
+				observability.RequestCorrelationID(r, "asbcp"),
+				observability.RedactLogValue(err),
+			)
+			if details, ok := afscpPendingBindingReleaseDetails(err, "workspace_binding.delete", workspaceID, projectID, bindingID, "released_status_pending"); ok {
+				w.Header().Set("Retry-After", workspaceBindingReleaseRetryAfter)
+				jsonErrorWithDetails(w, r, http.StatusConflict, errorCodeWorkspaceBindingReleaseIncomplete, "AFSCP workspace binding released status is pending", details)
+				return
+			}
+			jsonError(w, r, http.StatusBadGateway, "dependency_failure", "AFSCP workspace binding released status failed")
+			return
+		}
+		releaseFact.TerminalStatusDone = true
+		if err := h.saveWorkspaceBindingReleaseFact(ctx, releaseFact); err != nil {
+			log.Printf("workspacebinding/%s: release fact terminal-status write failed: workspace=%s project=%s request_id=%s correlation_id=%s error=%s",
+				bindingID,
+				workspaceID,
+				projectID,
+				observability.GetRequestID(r),
+				observability.RequestCorrelationID(r, "asbcp"),
+				observability.RedactLogValue(err),
+			)
+			jsonError(w, r, http.StatusInternalServerError, "internal_error", "workspace binding release fact write failed")
+			return
+		}
+	}
 	jsonResponse(w, http.StatusOK, map[string]string{"message": "binding deleted"})
+}
+
+type workspaceBindingMountRef struct {
+	namespaceID    string
+	mountBindingID string
+}
+
+var (
+	errWorkspaceBindingReleaseFactStoreUnavailable = errors.New("workspace binding release fact store unavailable")
+	errWorkspaceBindingReleaseFactWriteFailed      = errors.New("workspace binding release fact write failed")
+	errWorkspaceBindingStorageDeletionPending      = errors.New("workspace binding storage deletion pending")
+)
+
+type workspaceBindingStorageDeletionPendingError struct {
+	phase string
+}
+
+func (e workspaceBindingStorageDeletionPendingError) Error() string {
+	if strings.TrimSpace(e.phase) == "" {
+		return errWorkspaceBindingStorageDeletionPending.Error()
+	}
+	return errWorkspaceBindingStorageDeletionPending.Error() + ": " + e.phase
+}
+
+func (e workspaceBindingStorageDeletionPendingError) Unwrap() error {
+	return errWorkspaceBindingStorageDeletionPending
+}
+
+func (h *Handler) ensureWorkspaceBindingReleaseFact(ctx context.Context, workspaceID, projectID, bindingID, pvName, pvcName string) (WorkspaceBindingReleaseFact, error) {
+	store, err := h.workspaceBindingReleaseFactStore()
+	if err != nil {
+		return WorkspaceBindingReleaseFact{}, err
+	}
+	key := WorkspaceBindingReleaseKey{WorkspaceID: workspaceID, ProjectID: projectID, BindingID: bindingID}
+	fact, err := store.Get(ctx, key)
+	if err == nil {
+		if err := validateWorkspaceBindingReleaseFact(fact, workspaceID, projectID, bindingID); err != nil {
+			return WorkspaceBindingReleaseFact{}, err
+		}
+		return fact, nil
+	}
+	if !errors.Is(err, errWorkspaceBindingReleaseFactNotFound) {
+		return WorkspaceBindingReleaseFact{}, fmt.Errorf("%w: %v", errWorkspaceBindingReleaseFactStoreUnavailable, err)
+	}
+
+	ref, err := h.resolveWorkspaceBindingMountRef(ctx, workspaceID, projectID, bindingID, pvName, pvcName)
+	if err != nil {
+		return WorkspaceBindingReleaseFact{}, err
+	}
+	fact = WorkspaceBindingReleaseFact{
+		WorkspaceID:    workspaceID,
+		ProjectID:      projectID,
+		BindingID:      bindingID,
+		PVName:         pvName,
+		PVCName:        pvcName,
+		NamespaceID:    ref.namespaceID,
+		MountBindingID: ref.mountBindingID,
+	}
+	normalizeWorkspaceBindingReleaseFact(&fact)
+	if err := validateWorkspaceBindingReleaseFact(fact, workspaceID, projectID, bindingID); err != nil {
+		return WorkspaceBindingReleaseFact{}, err
+	}
+	if err := store.Save(ctx, fact); err != nil {
+		return WorkspaceBindingReleaseFact{}, fmt.Errorf("%w: %v", errWorkspaceBindingReleaseFactWriteFailed, err)
+	}
+	return fact, nil
+}
+
+func (h *Handler) saveWorkspaceBindingReleaseFact(ctx context.Context, fact WorkspaceBindingReleaseFact) error {
+	store, err := h.workspaceBindingReleaseFactStore()
+	if err != nil {
+		return err
+	}
+	normalizeWorkspaceBindingReleaseFact(&fact)
+	if err := validateWorkspaceBindingReleaseFact(fact, fact.WorkspaceID, fact.ProjectID, fact.BindingID); err != nil {
+		return err
+	}
+	if err := store.Save(ctx, fact); err != nil {
+		return fmt.Errorf("%w: %v", errWorkspaceBindingReleaseFactWriteFailed, err)
+	}
+	return nil
+}
+
+func (h *Handler) workspaceBindingReleaseFactStore() (WorkspaceBindingReleaseStore, error) {
+	if h.options.ReleaseFacts != nil {
+		return h.options.ReleaseFacts, nil
+	}
+	provider, ok := h.k8sClient.(configMapClientProvider)
+	if !ok {
+		return nil, errWorkspaceBindingReleaseFactStoreUnavailable
+	}
+	return newWorkspaceBindingReleaseConfigMapStore(provider.Clientset().CoreV1().ConfigMaps(h.options.Namespace)), nil
+}
+
+func validateWorkspaceBindingReleaseFact(fact WorkspaceBindingReleaseFact, workspaceID, projectID, bindingID string) error {
+	normalizeWorkspaceBindingReleaseFact(&fact)
+	if fact.WorkspaceID != strings.TrimSpace(workspaceID) || fact.ProjectID != strings.TrimSpace(projectID) || fact.BindingID != strings.TrimSpace(bindingID) {
+		return fmt.Errorf("workspace binding release fact scope mismatch")
+	}
+	if err := validateAFSCPNamespaceID(fact.NamespaceID); err != nil {
+		return fmt.Errorf("invalid release fact namespace_id")
+	}
+	if err := validateAFSCPMountBindingID(fact.MountBindingID); err != nil {
+		return fmt.Errorf("invalid release fact mount_binding_id")
+	}
+	if fact.MountBindingID != strings.TrimSpace(bindingID) {
+		return fmt.Errorf("release fact mount_binding_id does not match request")
+	}
+	if strings.TrimSpace(fact.PVName) == "" || strings.TrimSpace(fact.PVCName) == "" {
+		return fmt.Errorf("release fact storage object names are missing")
+	}
+	return nil
+}
+
+func (h *Handler) resolveWorkspaceBindingMountRef(ctx context.Context, workspaceID, projectID, bindingID, pvName, pvcName string) (workspaceBindingMountRef, error) {
+	if h.options.AFSCPClient == nil {
+		return workspaceBindingMountRef{}, nil
+	}
+	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, h.options.Namespace, pvcName)
+	if err == nil {
+		return workspaceBindingMountRefFromAnnotations(bindingID, pvc.GetAnnotations())
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return workspaceBindingMountRef{}, errors.New("get persistent volume claim failed")
+	}
+
+	pv, err := h.k8sClient.GetPersistentVolume(ctx, pvName)
+	if err == nil {
+		return workspaceBindingMountRefFromAnnotations(bindingID, pv.GetAnnotations())
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return workspaceBindingMountRef{}, errors.New("get persistent volume failed")
+	}
+	return workspaceBindingMountRef{}, errors.New("workspace binding resources are missing")
+}
+
+func workspaceBindingMountRefFromAnnotations(bindingID string, annotations map[string]string) (workspaceBindingMountRef, error) {
+	ref := workspaceBindingMountRef{
+		namespaceID:    strings.TrimSpace(annotations[annotationAFSCPNamespaceID]),
+		mountBindingID: strings.TrimSpace(annotations[annotationAFSCPMountBindingID]),
+	}
+	if err := validateAFSCPNamespaceID(ref.namespaceID); err != nil {
+		return workspaceBindingMountRef{}, fmt.Errorf("invalid binding namespace_id annotation")
+	}
+	if err := validateAFSCPMountBindingID(ref.mountBindingID); err != nil {
+		return workspaceBindingMountRef{}, fmt.Errorf("invalid binding mount_binding_id annotation")
+	}
+	if ref.mountBindingID != strings.TrimSpace(bindingID) {
+		return workspaceBindingMountRef{}, fmt.Errorf("binding mount_binding_id annotation does not match request")
+	}
+	return ref, nil
+}
+
+func (h *Handler) waitForWorkspaceBindingStorageDeleted(ctx context.Context, namespace, pvName, pvcName string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, workspaceBindingDeleteTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(workspaceBindingDeletePollInterval)
+	defer ticker.Stop()
+
+	lastPhase := "unknown"
+	for {
+		pvcGone, pvcPhase, err := h.persistentVolumeClaimDeleted(waitCtx, namespace, pvcName)
+		if err != nil {
+			return err
+		}
+		pvGone, pvPhase, err := h.persistentVolumeDeleted(waitCtx, pvName)
+		if err != nil {
+			return err
+		}
+		if pvcGone && pvGone {
+			return nil
+		}
+		lastPhase = storageDeletionPhase(pvcGone, pvcPhase, pvGone, pvPhase)
+
+		select {
+		case <-waitCtx.Done():
+			return workspaceBindingStorageDeletionPendingError{phase: lastPhase}
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Handler) persistentVolumeClaimDeleted(ctx context.Context, namespace, name string) (bool, string, error) {
+	pvc, err := h.k8sClient.GetPersistentVolumeClaim(ctx, namespace, name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "missing", nil
+		}
+		return false, "", errors.New("get persistent volume claim failed")
+	}
+	if pvc == nil {
+		return true, "missing", nil
+	}
+	if pvc.GetDeletionTimestamp() != nil {
+		return false, "pvc_deleting", nil
+	}
+	return false, "pvc_present", nil
+}
+
+func (h *Handler) persistentVolumeDeleted(ctx context.Context, name string) (bool, string, error) {
+	pv, err := h.k8sClient.GetPersistentVolume(ctx, name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "missing", nil
+		}
+		return false, "", errors.New("get persistent volume failed")
+	}
+	if pv == nil {
+		return true, "missing", nil
+	}
+	if pv.GetDeletionTimestamp() != nil {
+		return false, "pv_deleting", nil
+	}
+	return false, "pv_present", nil
+}
+
+func storageDeletionPhase(pvcGone bool, pvcPhase string, pvGone bool, pvPhase string) string {
+	switch {
+	case !pvcGone && !pvGone:
+		return pvcPhase + "+" + pvPhase
+	case !pvcGone:
+		return pvcPhase
+	case !pvGone:
+		return pvPhase
+	default:
+		return "deleted"
+	}
+}
+
+func (h *Handler) markWorkspaceBindingMountReleased(ctx context.Context, r *http.Request, workspaceID, projectID, bindingID string, fact WorkspaceBindingReleaseFact) error {
+	if h.options.AFSCPClient == nil {
+		return nil
+	}
+	correlationID := observability.RequestCorrelationID(r, "asbcp")
+	ref := fact.MountRef()
+	_, err := h.options.AFSCPClient.UpdateWorkloadMountStatus(ctx, ref.namespaceID, ref.mountBindingID, "released", "workspace binding deleted", fact.ObservedAt.UTC(), correlationID, workspaceBindingStatusIdempotencyKey(workspaceID, projectID, bindingID, ref))
+	return err
+}
+
+func workspaceBindingStatusIdempotencyKey(workspaceID, projectID, bindingID string, ref workspaceBindingMountRef) string {
+	return workloadfacts.ObjectName("workspace-binding-status-released", workspaceID, projectID, bindingID, ref.namespaceID, ref.mountBindingID)
 }
 
 func (h *Handler) activeWorkloadsForBinding(ctx context.Context, workspaceID, projectID, bindingID string) ([]string, error) {
@@ -682,6 +1023,59 @@ func bindingReadinessDetails(operation, workspaceID, projectID, bindingID, resou
 		details["retry_after"] = retryAfter
 	}
 	return details
+}
+
+func bindingReleaseDetails(operation, workspaceID, projectID, bindingID, resource, reason, phase, status, stableCode, retryAfter string) map[string]string {
+	details := map[string]string{
+		"operation":    operation,
+		"workspace_id": workspaceID,
+		"project_id":   projectID,
+		"binding_id":   bindingID,
+		"resource":     resource,
+		"reason":       reason,
+		"phase":        phase,
+		"status":       status,
+		"stable_code":  stableCode,
+	}
+	if strings.TrimSpace(retryAfter) != "" {
+		details["retry_after"] = retryAfter
+	}
+	return details
+}
+
+func afscpPendingBindingReleaseDetails(err error, operation, workspaceID, projectID, bindingID, status string) (map[string]string, bool) {
+	var pending *afscp.PendingOperationError
+	if !errors.As(err, &pending) {
+		return nil, false
+	}
+	phase := strings.TrimSpace(pending.OperationState)
+	if phase == "" {
+		phase = "unknown"
+	}
+	details := bindingReleaseDetails(operation, workspaceID, projectID, bindingID, "afscp_workload_mount_binding", "afscp_operation_pending", phase, status, errorCodeWorkspaceBindingReleaseIncomplete, workspaceBindingReleaseRetryAfter)
+	if operationID := strings.TrimSpace(pending.OperationID); operationID != "" {
+		details["dependency_operation_id"] = operationID
+	}
+	if requestID := strings.TrimSpace(pending.RequestID); requestID != "" {
+		details["dependency_request_id"] = requestID
+	}
+	if code := strings.TrimSpace(pending.Code); code != "" {
+		details["dependency_code"] = code
+	}
+	details["dependency_state"] = phase
+	return details, true
+}
+
+func storageDeletionPendingBindingReleaseDetails(err error, operation, workspaceID, projectID, bindingID string) (map[string]string, bool) {
+	var pending workspaceBindingStorageDeletionPendingError
+	if !errors.As(err, &pending) {
+		return nil, false
+	}
+	phase := strings.TrimSpace(pending.phase)
+	if phase == "" {
+		phase = "unknown"
+	}
+	return bindingReleaseDetails(operation, workspaceID, projectID, bindingID, "persistent_volume_binding", "storage_deletion_pending", phase, "storage_deletion_pending", errorCodeWorkspaceBindingReleaseIncomplete, workspaceBindingReleaseRetryAfter), true
 }
 
 func pvcReasonPhaseFromError(err error) (string, string) {

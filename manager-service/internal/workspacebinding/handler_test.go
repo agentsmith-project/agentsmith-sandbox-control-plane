@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,18 +24,25 @@ import (
 )
 
 type fakeK8sClient struct {
-	pv             *v1.PersistentVolume
-	pvc            *v1.PersistentVolumeClaim
-	pods           []v1.Pod
-	listSelectors  []string
-	listPodsErr    error
-	deletePVErr    error
-	deletePVCErr   error
-	ensurePVCPhase v1.PersistentVolumeClaimPhase
-	getPVCPhases   []v1.PersistentVolumeClaimPhase
-	getPVCErr      error
-	getPVCErrs     []error
-	getPVCCalls    int
+	pv                     *v1.PersistentVolume
+	pvc                    *v1.PersistentVolumeClaim
+	pods                   []v1.Pod
+	listSelectors          []string
+	listPodsErr            error
+	deletePVErr            error
+	deletePVCErr           error
+	deletePVLeavesObject   bool
+	deletePVCLeavesObject  bool
+	deletePVCalled         bool
+	deletePVCCalled        bool
+	ensurePVCPhase         v1.PersistentVolumeClaimPhase
+	getPVCPhases           []v1.PersistentVolumeClaimPhase
+	getPVCErr              error
+	getPVCErrs             []error
+	getPVCCalls            int
+	getPVCalls             int
+	getPVAfterDeleteCalls  int
+	getPVCAfterDeleteCalls int
 }
 
 type testErrorEnvelope struct {
@@ -44,6 +52,41 @@ type testErrorEnvelope struct {
 		RequestID string            `json:"request_id"`
 		Details   map[string]string `json:"details"`
 	} `json:"error"`
+}
+
+type memoryWorkspaceBindingReleaseStore struct {
+	mu    sync.Mutex
+	facts map[WorkspaceBindingReleaseKey]WorkspaceBindingReleaseFact
+	err   error
+}
+
+func newMemoryWorkspaceBindingReleaseStore() *memoryWorkspaceBindingReleaseStore {
+	return &memoryWorkspaceBindingReleaseStore{facts: make(map[WorkspaceBindingReleaseKey]WorkspaceBindingReleaseFact)}
+}
+
+func (s *memoryWorkspaceBindingReleaseStore) Get(_ context.Context, key WorkspaceBindingReleaseKey) (WorkspaceBindingReleaseFact, error) {
+	if s.err != nil {
+		return WorkspaceBindingReleaseFact{}, s.err
+	}
+	normalizeWorkspaceBindingReleaseKey(&key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fact, ok := s.facts[key]
+	if !ok {
+		return WorkspaceBindingReleaseFact{}, errWorkspaceBindingReleaseFactNotFound
+	}
+	return fact, nil
+}
+
+func (s *memoryWorkspaceBindingReleaseStore) Save(_ context.Context, fact WorkspaceBindingReleaseFact) error {
+	if s.err != nil {
+		return s.err
+	}
+	normalizeWorkspaceBindingReleaseFact(&fact)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.facts[fact.Key()] = fact
+	return nil
 }
 
 func decodeErrorEnvelope(t *testing.T, rec *httptest.ResponseRecorder) testErrorEnvelope {
@@ -76,6 +119,10 @@ func (f *fakeK8sClient) EnsurePersistentVolume(_ context.Context, volume *v1.Per
 	return nil
 }
 func (f *fakeK8sClient) GetPersistentVolume(_ context.Context, _ string) (*v1.PersistentVolume, error) {
+	f.getPVCalls++
+	if f.deletePVCalled {
+		f.getPVAfterDeleteCalls++
+	}
 	if f.pv == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "persistentvolumes"}, "missing")
 	}
@@ -84,6 +131,14 @@ func (f *fakeK8sClient) GetPersistentVolume(_ context.Context, _ string) (*v1.Pe
 func (f *fakeK8sClient) DeletePersistentVolume(_ context.Context, _ string) error {
 	if f.deletePVErr != nil {
 		return f.deletePVErr
+	}
+	f.deletePVCalled = true
+	if f.deletePVLeavesObject {
+		if f.pv != nil && f.pv.GetDeletionTimestamp() == nil {
+			now := metav1.Now()
+			f.pv.DeletionTimestamp = &now
+		}
+		return nil
 	}
 	f.pv = nil
 	return nil
@@ -100,6 +155,9 @@ func (f *fakeK8sClient) EnsurePersistentVolumeClaim(_ context.Context, _ string,
 func (f *fakeK8sClient) GetPersistentVolumeClaim(_ context.Context, _ string, _ string) (*v1.PersistentVolumeClaim, error) {
 	callIdx := f.getPVCCalls
 	f.getPVCCalls++
+	if f.deletePVCCalled {
+		f.getPVCAfterDeleteCalls++
+	}
 	if callIdx < len(f.getPVCErrs) && f.getPVCErrs[callIdx] != nil {
 		return nil, f.getPVCErrs[callIdx]
 	}
@@ -121,6 +179,14 @@ func (f *fakeK8sClient) GetPersistentVolumeClaim(_ context.Context, _ string, _ 
 func (f *fakeK8sClient) DeletePersistentVolumeClaim(_ context.Context, _ string, _ string) error {
 	if f.deletePVCErr != nil {
 		return f.deletePVCErr
+	}
+	f.deletePVCCalled = true
+	if f.deletePVCLeavesObject {
+		if f.pvc != nil && f.pvc.GetDeletionTimestamp() == nil {
+			now := metav1.Now()
+			f.pvc.DeletionTimestamp = &now
+		}
+		return nil
 	}
 	f.pvc = nil
 	return nil
@@ -147,12 +213,26 @@ func (f *fakeK8sClient) ListPods(_ context.Context, _ string, opts metav1.ListOp
 }
 
 type fakeAFSCPClient struct {
-	plan           afscp.OrchestratorMountPlan
-	err            error
-	namespaceID    string
-	mountBindingID string
-	correlationID  string
-	calls          int
+	plan                  afscp.OrchestratorMountPlan
+	err                   error
+	statusErr             error
+	namespaceID           string
+	mountBindingID        string
+	correlationID         string
+	statusNamespaceID     string
+	statusMountBindingID  string
+	statusValue           string
+	statusReason          string
+	statusCorrelationID   string
+	statusIdempotencyKey  string
+	statusObservedAt      time.Time
+	calls                 int
+	statusCalls           int
+	statusNamespaceIDs    []string
+	statusMountBindingIDs []string
+	statusIdempotencyKeys []string
+	statusObservedAts     []time.Time
+	onStatus              func()
 }
 
 func (f *fakeAFSCPClient) GetOrchestratorMountPlan(_ context.Context, namespaceID, mountBindingID, correlationID string) (afscp.OrchestratorMountPlan, error) {
@@ -164,6 +244,28 @@ func (f *fakeAFSCPClient) GetOrchestratorMountPlan(_ context.Context, namespaceI
 		return afscp.OrchestratorMountPlan{}, f.err
 	}
 	return f.plan, nil
+}
+
+func (f *fakeAFSCPClient) UpdateWorkloadMountStatus(_ context.Context, namespaceID, mountBindingID, status, reason string, observedAt time.Time, correlationID, idempotencyKey string) (afscp.OperationEnvelope, error) {
+	f.statusCalls++
+	f.statusNamespaceID = namespaceID
+	f.statusMountBindingID = mountBindingID
+	f.statusValue = status
+	f.statusReason = reason
+	f.statusObservedAt = observedAt
+	f.statusCorrelationID = correlationID
+	f.statusIdempotencyKey = idempotencyKey
+	f.statusNamespaceIDs = append(f.statusNamespaceIDs, namespaceID)
+	f.statusMountBindingIDs = append(f.statusMountBindingIDs, mountBindingID)
+	f.statusIdempotencyKeys = append(f.statusIdempotencyKeys, idempotencyKey)
+	f.statusObservedAts = append(f.statusObservedAts, observedAt)
+	if f.onStatus != nil {
+		f.onStatus()
+	}
+	if f.statusErr != nil {
+		return afscp.OperationEnvelope{}, f.statusErr
+	}
+	return afscp.OperationEnvelope{OperationID: "op_status", OperationState: "succeeded"}, nil
 }
 
 func captureStandardLog(t *testing.T) *bytes.Buffer {
@@ -185,6 +287,40 @@ func validPlan() afscp.OrchestratorMountPlan {
 		SecretRef:           afscp.SecretRef{Namespace: "afscp-mounts", Name: "juicefs-vol-demo"},
 		SecurityPolicy:      afscp.SecurityPolicy{RunAsNonRoot: true, AllowPrivileged: false, JVSControlOutsidePayload: true},
 	}
+}
+
+func bindingObjects(workspaceID, projectID, bindingID, namespaceID string, plan afscp.OrchestratorMountPlan) (*v1.PersistentVolume, *v1.PersistentVolumeClaim) {
+	pvName, pvcName := names(workspaceID, projectID, bindingID)
+	annotations := map[string]string{
+		annotationWorkspaceID:              workspaceID,
+		annotationProjectID:                projectID,
+		annotationVolumeHandle:             volumeHandle(workspaceID, projectID, bindingID),
+		annotationAFSCPNamespaceID:         namespaceID,
+		annotationAFSCPMountBindingID:      plan.MountBindingID,
+		annotationAFSCPVolumeID:            plan.VolumeID,
+		annotationPayloadVolumeSubdir:      plan.PayloadVolumeSubdir,
+		annotationMountPath:                plan.MountPath,
+		annotationReadOnly:                 boolString(plan.ReadOnly),
+		annotationRunAsNonRoot:             boolString(plan.SecurityPolicy.RunAsNonRoot),
+		annotationAllowPrivileged:          boolString(plan.SecurityPolicy.AllowPrivileged),
+		annotationJVSControlOutsidePayload: boolString(plan.SecurityPolicy.JVSControlOutsidePayload),
+	}
+	pv := &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pvName,
+			Annotations: annotations,
+		},
+	}
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pvcName,
+			Namespace:   "sandbox-workloads",
+			Annotations: annotations,
+		},
+		Spec:   v1.PersistentVolumeClaimSpec{VolumeName: pvName},
+		Status: v1.PersistentVolumeClaimStatus{Phase: v1.ClaimBound},
+	}
+	return pv, pvc
 }
 
 func TestRequirePVCBound(t *testing.T) {
@@ -867,6 +1003,194 @@ func TestDeleteBinding(t *testing.T) {
 	}
 	if client.pv != nil || client.pvc != nil {
 		t.Fatalf("expected resources to be deleted")
+	}
+}
+
+func TestDeleteBindingWithNoActiveWorkloadsMarksAFSCPTerminalReleased(t *testing.T) {
+	plan := validPlan()
+	pv, pvc := bindingObjects("ws_demo", "proj_demo", "wmb_demo", "ns_demo", plan)
+	client := &fakeK8sClient{pv: pv, pvc: pvc}
+	afscpClient := &fakeAFSCPClient{plan: plan}
+	afscpClient.onStatus = func() {
+		if client.getPVAfterDeleteCalls == 0 || client.getPVCAfterDeleteCalls == 0 {
+			t.Fatalf("AFSCP released status must wait for PV/PVC NotFound boundary; post-delete reads: pv=%d pvc=%d", client.getPVAfterDeleteCalls, client.getPVCAfterDeleteCalls)
+		}
+	}
+	releaseFacts := newMemoryWorkspaceBindingReleaseStore()
+	handler := NewHandler(client, Options{
+		Namespace:     "sandbox-workloads",
+		WorkloadFacts: workloadfacts.NewMemoryStore(),
+		AFSCPClient:   afscpClient,
+		ReleaseFacts:  releaseFacts,
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete-binding")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if client.pv != nil || client.pvc != nil {
+		t.Fatalf("expected resources to be deleted before terminal status is reported")
+	}
+	if afscpClient.statusCalls != 1 {
+		t.Fatalf("expected one AFSCP status call, got %d", afscpClient.statusCalls)
+	}
+	if afscpClient.statusNamespaceID != "ns_demo" || afscpClient.statusMountBindingID != "wmb_demo" {
+		t.Fatalf("unexpected AFSCP status ref: namespace=%q mount=%q", afscpClient.statusNamespaceID, afscpClient.statusMountBindingID)
+	}
+	if afscpClient.statusValue != "released" || afscpClient.statusReason != "workspace binding deleted" {
+		t.Fatalf("unexpected AFSCP status: value=%q reason=%q", afscpClient.statusValue, afscpClient.statusReason)
+	}
+	if afscpClient.statusCorrelationID != "corr-delete-binding" {
+		t.Fatalf("unexpected correlation id %q", afscpClient.statusCorrelationID)
+	}
+	if afscpClient.statusObservedAt.IsZero() {
+		t.Fatalf("expected observed_at to be set")
+	}
+	wantKey := workspaceBindingStatusIdempotencyKey("ws_demo", "proj_demo", "wmb_demo", workspaceBindingMountRef{namespaceID: "ns_demo", mountBindingID: "wmb_demo"})
+	if afscpClient.statusIdempotencyKey != wantKey {
+		t.Fatalf("unexpected idempotency key %q, want %q", afscpClient.statusIdempotencyKey, wantKey)
+	}
+	fact, err := releaseFacts.Get(context.Background(), WorkspaceBindingReleaseKey{WorkspaceID: "ws_demo", ProjectID: "proj_demo", BindingID: "wmb_demo"})
+	if err != nil {
+		t.Fatalf("get release fact: %v", err)
+	}
+	if !fact.Complete() {
+		t.Fatalf("expected complete release fact, got %+v", fact)
+	}
+}
+
+func TestDeleteBindingAFSCPTerminalPendingReturnsReleaseIncomplete(t *testing.T) {
+	plan := validPlan()
+	pv, pvc := bindingObjects("ws_demo", "proj_demo", "wmb_demo", "ns_demo", plan)
+	client := &fakeK8sClient{pv: pv, pvc: pvc}
+	releaseFacts := newMemoryWorkspaceBindingReleaseStore()
+	afscpClient := &fakeAFSCPClient{
+		plan: plan,
+		statusErr: &afscp.PendingOperationError{
+			OperationID:    "op_binding_status_pending",
+			OperationState: "running",
+			RequestID:      "afscp-req-binding",
+			Code:           "OPERATION_PENDING",
+			Retryable:      true,
+		},
+	}
+	handler := NewHandler(client, Options{
+		Namespace:     "sandbox-workloads",
+		WorkloadFacts: workloadfacts.NewMemoryStore(),
+		AFSCPClient:   afscpClient,
+		ReleaseFacts:  releaseFacts,
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	req.Header.Set("X-Correlation-Id", "corr-delete-binding")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != workspaceBindingReleaseRetryAfter {
+		t.Fatalf("expected Retry-After %q, got %q", workspaceBindingReleaseRetryAfter, rec.Header().Get("Retry-After"))
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.delete")
+	assertErrorDetail(t, body, "workspace_id", "ws_demo")
+	assertErrorDetail(t, body, "project_id", "proj_demo")
+	assertErrorDetail(t, body, "binding_id", "wmb_demo")
+	assertErrorDetail(t, body, "resource", "afscp_workload_mount_binding")
+	assertErrorDetail(t, body, "reason", "afscp_operation_pending")
+	assertErrorDetail(t, body, "phase", "running")
+	assertErrorDetail(t, body, "status", "released_status_pending")
+	assertErrorDetail(t, body, "stable_code", "workspace_binding_release_incomplete")
+	assertErrorDetail(t, body, "dependency_operation_id", "op_binding_status_pending")
+	assertErrorDetail(t, body, "dependency_request_id", "afscp-req-binding")
+	assertErrorDetail(t, body, "dependency_code", "OPERATION_PENDING")
+	assertErrorDetail(t, body, "dependency_state", "running")
+	if client.pv != nil || client.pvc != nil {
+		t.Fatalf("PV/PVC deletion boundary must converge before reporting AFSCP terminal pending")
+	}
+	if afscpClient.statusCalls != 1 || afscpClient.statusValue != "released" {
+		t.Fatalf("expected one released status attempt, got calls=%d status=%q", afscpClient.statusCalls, afscpClient.statusValue)
+	}
+	assertNoSensitiveErrorDetails(t, rec)
+
+	afscpClient.statusErr = nil
+	retryReq := httptest.NewRequest(http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	retryReq.Header.Set("X-Correlation-Id", "corr-delete-binding-retry")
+	retryRec := httptest.NewRecorder()
+
+	handler.ServeHTTP(retryRec, retryReq)
+
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("expected retry to complete with preserved mount ref, got %d body=%s", retryRec.Code, retryRec.Body.String())
+	}
+	if afscpClient.statusCalls != 2 {
+		t.Fatalf("expected second AFSCP status retry, got %d calls", afscpClient.statusCalls)
+	}
+	if len(afscpClient.statusNamespaceIDs) != 2 || afscpClient.statusNamespaceIDs[0] != "ns_demo" || afscpClient.statusNamespaceIDs[1] != "ns_demo" {
+		t.Fatalf("retry lost namespace ref: %#v", afscpClient.statusNamespaceIDs)
+	}
+	if len(afscpClient.statusMountBindingIDs) != 2 || afscpClient.statusMountBindingIDs[0] != "wmb_demo" || afscpClient.statusMountBindingIDs[1] != "wmb_demo" {
+		t.Fatalf("retry lost mount binding ref: %#v", afscpClient.statusMountBindingIDs)
+	}
+	if len(afscpClient.statusIdempotencyKeys) != 2 || afscpClient.statusIdempotencyKeys[0] != afscpClient.statusIdempotencyKeys[1] {
+		t.Fatalf("retry must use the same idempotency key, got %#v", afscpClient.statusIdempotencyKeys)
+	}
+	if len(afscpClient.statusObservedAts) != 2 || !afscpClient.statusObservedAts[0].Equal(afscpClient.statusObservedAts[1]) {
+		t.Fatalf("retry must use the same observed_at, got %#v", afscpClient.statusObservedAts)
+	}
+}
+
+func TestDeleteBindingStorageDeletionPendingReturnsReleaseIncompleteBeforeAFSCPStatus(t *testing.T) {
+	plan := validPlan()
+	pv, pvc := bindingObjects("ws_demo", "proj_demo", "wmb_demo", "ns_demo", plan)
+	client := &fakeK8sClient{
+		pv:                    pv,
+		pvc:                   pvc,
+		deletePVLeavesObject:  true,
+		deletePVCLeavesObject: true,
+	}
+	afscpClient := &fakeAFSCPClient{plan: plan}
+	handler := NewHandler(client, Options{
+		Namespace:     "sandbox-workloads",
+		WorkloadFacts: workloadfacts.NewMemoryStore(),
+		AFSCPClient:   afscpClient,
+		ReleaseFacts:  newMemoryWorkspaceBindingReleaseStore(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodDelete, "/v1/workspaces/ws_demo/projects/proj_demo/workspace-bindings/wmb_demo", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != workspaceBindingReleaseRetryAfter {
+		t.Fatalf("expected Retry-After %q, got %q", workspaceBindingReleaseRetryAfter, rec.Header().Get("Retry-After"))
+	}
+	body := decodeErrorEnvelope(t, rec)
+	if body.Error.Code != "workspace_binding_release_incomplete" {
+		t.Fatalf("expected stable release-incomplete code, got %+v", body.Error)
+	}
+	assertErrorDetail(t, body, "operation", "workspace_binding.delete")
+	assertErrorDetail(t, body, "resource", "persistent_volume_binding")
+	assertErrorDetail(t, body, "reason", "storage_deletion_pending")
+	assertErrorDetail(t, body, "status", "storage_deletion_pending")
+	assertErrorDetail(t, body, "stable_code", "workspace_binding_release_incomplete")
+	if afscpClient.statusCalls != 0 {
+		t.Fatalf("AFSCP released status must not be written before storage deletion boundary, got %d calls", afscpClient.statusCalls)
+	}
+	if client.pv == nil || client.pvc == nil {
+		t.Fatalf("test setup expected delete to be accepted while objects remain")
 	}
 }
 
