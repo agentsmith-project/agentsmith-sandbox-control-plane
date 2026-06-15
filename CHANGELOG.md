@@ -6,6 +6,13 @@ This project follows pre-GA evidence-first release notes. The authoritative publ
 
 ## Unreleased
 
+## [v2.0.21] - 2026-06-15
+
+### Fixed
+
+- Workspace binding delete now records AFSCP mount references before deleting PV/PVC storage, waits for terminal storage deletion, and marks AFSCP mount bindings released only after storage deletion reaches terminal truth.
+- Workspace binding release retries now persist release facts/idempotency state and return typed `workspace_binding_release_incomplete` details with retry hints for pending storage deletion or AFSCP released status convergence.
+
 ## [v2.0.20] - 2026-06-13
 
 ### Fixed

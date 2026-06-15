@@ -4,10 +4,10 @@
   "api_contract_version": "v1",
   "release_gate": "scripts/verify-release.sh",
   "release_preparation": {
-    "target_version": "v2.0.20",
-    "status": "v2.0.20 is published; the canonical final manifest is the GitHub Release asset asbcp-final-manifest.json, and this checked-in manifest remains the release evidence ledger and requirements reference.",
-    "supersedes_published_version": "v2.0.19",
-    "summary": "Workload delete and readiness paths preserve pending/releasing AFSCP dependency errors as typed workload_release_incomplete details, and sandbox runtime diagnostics expose sanitized status/readiness context so consumers distinguish backend convergence from generic startup timeout."
+    "target_version": "v2.0.21",
+    "status": "v2.0.21 is published; the canonical final manifest is the GitHub Release asset asbcp-final-manifest.json, and this checked-in manifest remains the release evidence ledger and requirements reference.",
+    "supersedes_published_version": "v2.0.20",
+    "summary": "Workspace binding delete records AFSCP mount references, waits for PV/PVC terminal storage deletion, persists release facts/idempotency state, and marks AFSCP mount bindings released only after storage deletion reaches terminal truth with typed workspace_binding_release_incomplete retry details for pending storage or released status convergence."
   },
   "image": {
     "repository": "ghcr.io/agentsmith-project/agentsmith-sandbox-control-plane",

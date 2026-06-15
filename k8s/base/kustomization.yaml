@@ -30,8 +30,8 @@ labels:
 images:
   - name: agentsmith-sandbox-control-plane
     newName: agentsmith-sandbox-control-plane
-    newTag: "2.0.20"
+    newTag: "2.0.21"
 
 # 通用注解
 commonAnnotations:
-  app.kubernetes.io/version: "2.0.20"
+  app.kubernetes.io/version: "2.0.21"

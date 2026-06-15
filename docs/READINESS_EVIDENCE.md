@@ -2,7 +2,7 @@
 
 This ledger records ASBCP release-readiness evidence. It is intentionally lightweight and focused on sandbox workload lifecycle.
 
-Current published release: `v2.0.20`. The canonical final manifest is the GitHub Release asset `asbcp-final-manifest.json`; this checked-in ledger records release-readiness evidence and requirements. This release keeps the `v2.0.19` scheduler-visible PV/PVC readiness handling and adds typed pending/releasing AFSCP dependency errors plus sanitized sandbox runtime diagnostics so consumers can distinguish backend convergence from generic startup timeout. It supersedes `v2.0.19` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.19`.
+Current published release: `v2.0.21`. The canonical final manifest is the GitHub Release asset `asbcp-final-manifest.json`; this checked-in ledger records release-readiness evidence and requirements. This release keeps the `v2.0.20` typed AFSCP dependency diagnostics and adds workspace binding terminal release handling so AFSCP mount bindings are marked released only after storage deletion reaches terminal truth. It supersedes `v2.0.20` and keeps the earlier PVC readiness handling from `v2.0.14` through `v2.0.20`.
 
 | Evidence | Required for release | Current status |
 | --- | --- | --- |
